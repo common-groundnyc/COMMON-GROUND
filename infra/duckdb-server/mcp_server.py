@@ -3288,7 +3288,7 @@ WHERE postcode IN (SELECT UNNEST(?::VARCHAR[]))
 """
 
 
-@mcp.tool(tags={"neighborhood"})
+@mcp.tool(annotations=READONLY, tags={"neighborhood"})
 def gentrification_tracker(zip_codes: Annotated[list[str], Field(description="1-5 NYC ZIP codes to track. Example: ['10009', '11216']")], ctx: Context) -> ToolResult:
     """Track gentrification and displacement pressure for NYC neighborhoods using quarterly signals since 2020 plus 4-quarter forecasts. Covers: new restaurant openings, HPD housing complaints, noise/NYPD calls, DOB construction violations, IRS income trends, HMDA investor/lending disparities, evictions, rezonings, and affordable housing loss. Use this for gentrification, displacement, rent pressure, or development questions. Parameters: zip_codes (1-5 ZIPs). Example: gentrification_tracker(["11237", "11221"]). For a broader neighborhood profile, use neighborhood_portrait(zipcode)."""
     if not zip_codes or len(zip_codes) > 5:
@@ -3749,7 +3749,7 @@ LIMIT 500
 """
 
 
-@mcp.tool(tags={"safety"})
+@mcp.tool(annotations=READONLY, tags={"safety"})
 def safety_report(precinct: Annotated[int, Field(description="NYPD precinct number 1-123. Example: 75 (East New York), 14 (Midtown South)", ge=1, le=123)], ctx: Context) -> ToolResult:
     """Comprehensive safety & policing report for an NYPD precinct (1-123). Crime trends, arrest demographics, enforcement intensity, shootings, summons, hate crimes, CCRB misconduct, Use of Force, and officer discipline. Use this for crime/safety/policing questions. Need a ZIP instead of precinct? Use neighborhood_portrait(zip) which includes safety context. Examples: safety_report(75) for East New York, safety_report(14) for Midtown South."""
     if precinct < 1 or precinct > 123:
