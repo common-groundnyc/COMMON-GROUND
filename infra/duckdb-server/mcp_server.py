@@ -2450,6 +2450,8 @@ ROUTING — pick the FIRST match:
 * BUILDING by BBL → building_profile, landlord_watchdog, building_story
 * PERSON/COMPANY by name → entity_xray, person_crossref
 * LANDLORD/OWNER → landlord_network, worst_landlords, llc_piercer
+* SCHOOL by name/ZIP → school_search, then school_report
+* DISTRICT by number → district_report
 * NEIGHBORHOOD by ZIP → neighborhood_portrait, neighborhood_compare
 * CRIME/SAFETY by precinct → safety_report
 * CORRUPTION/INFLUENCE → pay_to_play, shell_detector, flipper_detector
@@ -6427,7 +6429,7 @@ GROUP BY industry ORDER BY cnt DESC LIMIT 8
 
 @mcp.tool(annotations=READONLY, tags={"neighborhood"})
 def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
-    """What makes a NYC neighborhood distinctive — cuisine fingerprint, building stock, noise level, business mix, and how it compares to the city. Use this for neighborhood questions by ZIP. For comparing multiple ZIPs side-by-side, use neighborhood_compare([zips]). For environmental justice analysis, use environmental_justice(zipcode). For gentrification tracking, use gentrification_tracker([zips]). ZIP: 5 digits. Example: 10003 (East Village), 11201 (Downtown Brooklyn)."""
+    """What makes a NYC neighborhood distinctive — cuisine fingerprint, building stock, noise level, business mix, and how it compares to the city. Use this for neighborhood questions by ZIP. For comparing multiple ZIPs side-by-side, use neighborhood_compare([zips]). For environmental justice analysis, use environmental_justice(zipcode). For gentrification tracking, use gentrification_tracker([zips]). For schools in this ZIP, use school_search(zipcode). ZIP: 5 digits. Example: 10003 (East Village), 11201 (Downtown Brooklyn)."""
 
     t0 = time.time()
     db = ctx.lifespan_context["db"]
