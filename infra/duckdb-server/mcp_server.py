@@ -7687,6 +7687,97 @@ def building_story(bbl: BBL, ctx: Context) -> ToolResult:
     )
 
 
+@mcp.tool(annotations=READONLY, tags={"housing"})
+def similar_buildings(
+    bbl: BBL,
+    ctx: Context,
+    limit: Annotated[int, Field(description="Number of similar buildings (1-30). Default: 10", ge=1, le=30)] = 10,
+) -> ToolResult:
+    """Find buildings most similar to the given BBL based on physical characteristics and violation patterns — stories, units, age, violation rate, open violations. Useful for comparison, risk assessment, and pattern detection. Returns similar buildings with BBLs for follow-up with building_profile() or landlord_watchdog()."""
+
+    if not re.match(r"^\d{10}$", bbl):
+        raise ToolError(f"Invalid BBL '{bbl}': must be exactly 10 digits.")
+
+    t0 = time.time()
+    db = ctx.lifespan_context["db"]
+
+    with _db_lock:
+        target_rows = db.execute(
+            "SELECT features FROM main.building_vectors WHERE bbl = ?", [bbl]
+        ).fetchall()
+
+    if not target_rows:
+        raise ToolError(f"No feature vector found for BBL {bbl}. Building may not be in the vector index.")
+
+    target_vec = target_rows[0][0]
+    vec_literal = "[" + ",".join(f"{v:.6g}" for v in target_vec) + "]::FLOAT[6]"
+
+    knn_sql = f"""
+SELECT
+    bv.bbl,
+    gb.housenumber,
+    gb.streetname,
+    gb.zip,
+    gb.stories,
+    gb.units,
+    gb.year_built,
+    gb.borough,
+    array_distance(bv.features, {vec_literal}) AS distance
+FROM main.building_vectors bv
+LEFT JOIN main.graph_buildings gb ON gb.bbl = bv.bbl
+WHERE bv.bbl != '{bbl}'
+ORDER BY array_distance(bv.features, {vec_literal})
+LIMIT {limit}
+"""
+
+    with _db_lock:
+        result = db.execute(knn_sql).fetchall()
+        cols = [d[0] for d in db.description]
+
+    elapsed = round((time.time() - t0) * 1000)
+
+    if not result:
+        return ToolResult(
+            content=f"No similar buildings found for BBL {bbl}.",
+            meta={"bbl": bbl, "query_time_ms": elapsed, "count": 0},
+        )
+
+    lines = [f"BUILDINGS SIMILAR TO {bbl}", "=" * 60, ""]
+    records = []
+    for i, row in enumerate(result, 1):
+        r = dict(zip(cols, row))
+        sim_bbl = r.get("bbl") or ""
+        housenumber = r.get("housenumber") or ""
+        streetname = r.get("streetname") or ""
+        zip_code = r.get("zip") or ""
+        stories = r.get("stories") or "?"
+        units = r.get("units") or "?"
+        year_built = r.get("year_built") or "?"
+        borough = r.get("borough") or ""
+        address = f"{housenumber} {streetname}".strip() or "Unknown address"
+        addr_full = f"{address}, {borough} {zip_code}".strip(", ")
+        lines.append(f"{i}. BBL {sim_bbl} — {addr_full}")
+        lines.append(f"   {stories} stories | {units} units | built {year_built}")
+        records.append({
+            "bbl": sim_bbl,
+            "address": addr_full,
+            "stories": stories,
+            "units": units,
+            "year_built": year_built,
+            "borough": borough,
+        })
+
+    lines.append("")
+    lines.append("Use building_profile(bbl) or landlord_watchdog(bbl) for any building above.")
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={"target_bbl": bbl, "similar_buildings": records},
+        meta={"bbl": bbl, "query_time_ms": elapsed, "count": len(records)},
+    )
+
+
 # --- Neighborhood Portrait ---
 
 PORTRAIT_CUISINE_SQL = """
