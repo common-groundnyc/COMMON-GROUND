@@ -12,34 +12,34 @@ MODEL_DIR = Path(__file__).parent.parent / "model"
 
 @pytest.fixture(scope="module")
 def embedder():
-    embed, embed_batch = create_embedder(MODEL_DIR)
-    return embed, embed_batch
+    embed, embed_batch, dims = create_embedder(MODEL_DIR)
+    return embed, embed_batch, dims
 
 
-def test_embed_returns_384_dim_vector(embedder):
-    embed, _ = embedder
+def test_embed_returns_correct_dim_vector(embedder):
+    embed, _, dims = embedder
     vec = embed("hello world")
-    assert vec.shape == (384,)
+    assert vec.shape == (dims,)
     assert vec.dtype == np.float32
 
 
 def test_embed_is_unit_normalized(embedder):
-    embed, _ = embedder
+    embed, _, _ = embedder
     vec = embed("test sentence for normalization")
     norm = np.linalg.norm(vec)
     assert abs(norm - 1.0) < 1e-5
 
 
 def test_embed_batch_returns_correct_shape(embedder):
-    _, embed_batch = embedder
+    _, embed_batch, dims = embedder
     texts = ["first sentence", "second sentence", "third sentence"]
     result = embed_batch(texts)
-    assert result.shape == (3, 384)
+    assert result.shape == (3, dims)
     assert result.dtype == np.float32
 
 
 def test_similar_texts_have_high_cosine_similarity(embedder):
-    embed, _ = embedder
+    embed, _, _ = embedder
     v1 = embed("rodent infestation in kitchen")
     v2 = embed("mice found in food prep area")
     v3 = embed("property tax assessment appeal")
@@ -52,16 +52,27 @@ def test_similar_texts_have_high_cosine_similarity(embedder):
 
 
 def test_embed_empty_string(embedder):
-    embed, _ = embedder
+    embed, _, dims = embedder
     vec = embed("")
-    assert vec.shape == (384,)
+    assert vec.shape == (dims,)
 
 
 def test_embed_batch_empty_list(embedder):
-    _, embed_batch = embedder
+    _, embed_batch, dims = embedder
     result = embed_batch([])
-    assert result.shape == (0, 384)
+    assert result.shape == (0, dims)
     assert result.dtype == np.float32
+
+
+def test_create_embedder_returns_three_values():
+    """create_embedder returns (embed, embed_batch, dims) tuple."""
+    result = create_embedder(MODEL_DIR)
+    assert len(result) == 3
+    embed, embed_batch, dims = result
+    assert callable(embed)
+    assert callable(embed_batch)
+    assert isinstance(dims, int)
+    assert dims > 0
 
 
 def test_vec_to_sql_literal():

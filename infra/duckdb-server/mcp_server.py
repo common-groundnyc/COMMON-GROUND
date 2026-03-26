@@ -12,6 +12,8 @@ from fastmcp.server.lifespan import lifespan
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from response_middleware import OutputFormatterMiddleware
 from csv_export import generate_branded_csv, write_export
+from percentiles import build_percentile_tables, build_lake_percentile_tables
+from percentile_middleware import PercentileMiddleware
 from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddleware
 from fastmcp.server.dependencies import get_http_request, get_http_headers
 from fastmcp.tools.tool import ToolResult
@@ -1056,7 +1058,7 @@ async def app_lifespan(server):
         if saved > 0:
             (cache / "_built_at.txt").write_text(str(time.time()))
 
-    def _create_hnsw_indexes(conn):
+    def _create_hnsw_indexes(conn, dims=384):
         indexes = [
             ("catalog_emb_idx", "catalog_embeddings", "embedding", "cosine"),
             ("desc_emb_idx", "description_embeddings", "embedding", "cosine"),
@@ -1073,7 +1075,7 @@ async def app_lifespan(server):
             except Exception as e:
                 print(f"Warning: {idx_name} HNSW index failed: {e}", flush=True)
 
-    def _build_catalog_embeddings(conn, embed_batch):
+    def _build_catalog_embeddings(conn, embed_batch, dims=384):
         rows = []
         for schema_name, description in SCHEMA_DESCRIPTIONS.items():
             rows.append((schema_name, "__schema__", description))
@@ -1088,28 +1090,28 @@ async def app_lifespan(server):
         except Exception as e:
             print(f"Warning: ducklake_table_info() unavailable: {e}", flush=True)
         if not rows:
-            conn.execute("""
+            conn.execute(f"""
                 CREATE OR REPLACE TABLE main.catalog_embeddings (
-                    schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[384]
+                    schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}]
                 )
             """)
             return
         texts = [r[2] for r in rows]
         print(f"Building catalog embeddings ({len(texts)} entries)...", flush=True)
         vecs = embed_batch(texts)
-        conn.execute("""
+        conn.execute(f"""
             CREATE OR REPLACE TABLE main.catalog_embeddings (
-                schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[384]
+                schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}]
             )
         """)
         for (schema_name, table_name, description), vec in zip(rows, vecs):
             conn.execute(
-                "INSERT INTO main.catalog_embeddings VALUES (?, ?, ?, ?::FLOAT[384])",
+                f"INSERT INTO main.catalog_embeddings VALUES (?, ?, ?, ?::FLOAT[{dims}])",
                 [schema_name, table_name, description, vec.tolist()]
             )
         print(f"Catalog embeddings done ({len(rows)} rows)", flush=True)
 
-    def _build_description_embeddings(conn, embed_batch):
+    def _build_description_embeddings(conn, embed_batch, dims=384):
         sources = [
             ("311", """
                 SELECT DISTINCT (complaint_type || ': ' || COALESCE(descriptor, '')) AS description
@@ -1136,9 +1138,9 @@ async def app_lifespan(server):
                 LIMIT 500
             """),
         ]
-        conn.execute("""
+        conn.execute(f"""
             CREATE OR REPLACE TABLE main.description_embeddings (
-                source VARCHAR, description VARCHAR, embedding FLOAT[384]
+                source VARCHAR, description VARCHAR, embedding FLOAT[{dims}]
             )
         """)
         for source_name, sql in sources:
@@ -1150,14 +1152,14 @@ async def app_lifespan(server):
                 vecs = embed_batch(descs)
                 for description, vec in zip(descs, vecs):
                     conn.execute(
-                        "INSERT INTO main.description_embeddings VALUES (?, ?, ?::FLOAT[384])",
+                        f"INSERT INTO main.description_embeddings VALUES (?, ?, ?::FLOAT[{dims}])",
                         [source_name, description, vec.tolist()]
                     )
                 print(f"Description embeddings done for {source_name}", flush=True)
             except Exception as e:
                 print(f"Warning: description embeddings for {source_name} failed: {e}", flush=True)
 
-    def _build_entity_name_embeddings(conn, embed_batch):
+    def _build_entity_name_embeddings(conn, embed_batch, dims=384):
         sources = [
             ("owner", "SELECT DISTINCT owner_name AS name FROM main.graph_owners WHERE owner_name IS NOT NULL"),
             ("corp_officer", "SELECT DISTINCT person_name AS name FROM main.graph_corp_people WHERE person_name IS NOT NULL"),
@@ -1174,14 +1176,14 @@ async def app_lifespan(server):
             except Exception as e:
                 print(f"Warning: entity names from {source_name} failed: {e}", flush=True)
         if not metas:
-            conn.execute("""
+            conn.execute(f"""
                 CREATE OR REPLACE TABLE main.entity_name_embeddings (
-                    source VARCHAR, name VARCHAR, embedding FLOAT[384]
+                    source VARCHAR, name VARCHAR, embedding FLOAT[{dims}]
                 )
             """)
             return
         texts = [m[1] for m in metas]
-        print(f"Building entity name embeddings ({len(texts)} entries)...", flush=True)
+        print(f"Building entity name embeddings ({len(texts):,} entries)...", flush=True)
         vecs = embed_batch(texts)
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -1193,9 +1195,9 @@ async def app_lifespan(server):
         })
         tmp_path = "/tmp/_entity_embeddings.parquet"
         pq.write_table(table, tmp_path)
-        conn.execute(f"CREATE OR REPLACE TABLE main.entity_name_embeddings AS SELECT source, name, embedding::FLOAT[384] AS embedding FROM read_parquet('{tmp_path}')")
+        conn.execute(f"CREATE OR REPLACE TABLE main.entity_name_embeddings AS SELECT source, name, embedding::FLOAT[{dims}] AS embedding FROM read_parquet('{tmp_path}')")
         os.unlink(tmp_path)
-        print(f"Entity name embeddings done ({len(metas)} rows)", flush=True)
+        print(f"Entity name embeddings done ({len(metas):,} rows)", flush=True)
 
     def _build_building_vectors(conn):
         try:
@@ -2656,12 +2658,28 @@ async def app_lifespan(server):
     except Exception:
         explorations = []
 
+    # Build percentile ranking tables
+    percentiles_ready = False
+    try:
+        build_percentile_tables(conn, lock=_db_lock)
+        print("Percentile tables built (owners + buildings)", flush=True)
+        percentiles_ready = True
+    except Exception as e:
+        print(f"Warning: Percentile table build failed: {e}", flush=True)
+
+    try:
+        build_lake_percentile_tables(conn, lock=_db_lock)
+        print("Lake percentile tables built (restaurants + ZIPs + precincts)", flush=True)
+    except Exception as e:
+        print(f"Warning: Lake percentile tables failed: {e}", flush=True)
+
     # --- Vector embeddings for semantic search ---
     embed_fn = None
+    embed_dims = 384  # default, overridden by actual model
     try:
         from embedder import create_embedder
-        embed_fn, embed_batch_fn = create_embedder("/app/model")
-        print("Embedding model loaded", flush=True)
+        embed_fn, embed_batch_fn, embed_dims = create_embedder("/app/model")
+        print(f"Embedding model loaded ({embed_dims} dims)", flush=True)
     except Exception as e:
         print(f"Warning: embedding model unavailable: {e}", flush=True)
 
@@ -2672,15 +2690,15 @@ async def app_lifespan(server):
                 _load_embeddings_from_cache(conn)
             else:
                 print("Building embeddings (no cache or stale)...", flush=True)
-                _build_catalog_embeddings(conn, embed_batch_fn)
-                _build_description_embeddings(conn, embed_batch_fn)
+                _build_catalog_embeddings(conn, embed_batch_fn, embed_dims)
+                _build_description_embeddings(conn, embed_batch_fn, embed_dims)
                 if graph_ready:
-                    _build_entity_name_embeddings(conn, embed_batch_fn)
+                    _build_entity_name_embeddings(conn, embed_batch_fn, embed_dims)
                     _build_building_vectors(conn)
                 _save_embeddings_to_cache(conn)
                 print("Embeddings cached to Parquet", flush=True)
 
-            _create_hnsw_indexes(conn)
+            _create_hnsw_indexes(conn, embed_dims)
             print("HNSW indexes created", flush=True)
         except Exception as e:
             print(f"Warning: embedding tables partially built: {e}", flush=True)
@@ -2694,6 +2712,8 @@ async def app_lifespan(server):
             "posthog_enabled": bool(ph_key),
             "explorations": explorations,
             "embed_fn": embed_fn,
+            "percentiles_ready": percentiles_ready,
+            "lock": _db_lock,
         }
     finally:
         if ph_key:
@@ -4863,31 +4883,8 @@ def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
     city_avg_violations = float(avg_rows[0][0] or 0) if avg_rows else 0
     city_avg_open = float(avg_rows[0][1] or 0) if avg_rows else 0
 
-    # Step 9: Compute slumlord score
+    # Percentile ranking is injected automatically by PercentileMiddleware
     violations_per_bldg = total_violations / portfolio_size if portfolio_size else 0
-    score = 0
-    score += min(30, int(total_open_c * 3))        # Open Class C: 3 pts each, max 30
-    score += min(20, int(total_class_c / 10))       # Total Class C: 1 pt per 10, max 20
-    score += min(10, eviction_count)                # Evictions: 1 pt each, max 10
-    score += min(10, int(total_open_complaints / 50))  # Open complaints: 1 pt per 50, max 10
-    score += len(aep_buildings) * 10                # AEP: 10 pts each
-    score += len(conh_buildings) * 9                # CONH: 9 pts each
-    score += len(underlying_buildings) * 8          # Underlying: 8 pts each
-    if violations_per_bldg > city_avg_violations * 3:
-        score += 10  # 3x city average
-    elif violations_per_bldg > city_avg_violations * 2:
-        score += 5   # 2x city average
-
-    # Classify
-    if score >= 50:
-        risk_level = "CRITICAL — serial negligence pattern"
-    elif score >= 30:
-        risk_level = "HIGH — significant violation history"
-    elif score >= 15:
-        risk_level = "ELEVATED — above-average issues"
-    else:
-        risk_level = "MODERATE — within normal range"
-
     vs_city = (
         f"{violations_per_bldg / city_avg_violations:.1f}x city average"
         if city_avg_violations > 0
@@ -4952,7 +4949,7 @@ def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
     else:
         lines.append(f"\nENFORCEMENT FLAGS: None on record")
 
-    lines.append(f"\nSLUMLORD SCORE: {score}/100 — {risk_level}")
+    lines.append(f"\n(Percentile ranking added automatically)")
 
     lines.append(f"\nWHAT YOU CAN DO:")
     lines.append(f"  1. File HPD complaint: call 311 or nyc.gov/311")
@@ -4962,9 +4959,8 @@ def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
     lines.append(f"  5. Free legal help: (718) 557-1379 (Legal Aid Society Housing)")
     lines.append(f"  6. File CCRB complaint if harassed by landlord's agents: ccrb.nyc.gov")
     lines.append(f"  7. Check rent stabilization status: hcr.ny.gov/building-search")
-    if score >= 30:
-        lines.append(f"  8. Contact your City Council member — this portfolio needs oversight")
-        lines.append(f"  9. JustFix.org — free tools to document conditions and send demand letters")
+    lines.append(f"  8. Contact your City Council member — this portfolio needs oversight")
+    lines.append(f"  9. JustFix.org — free tools to document conditions and send demand letters")
 
     text = "\n".join(lines)
 
@@ -4999,8 +4995,7 @@ def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
             "conh": [{"bbl": b[0], "status": b[1]} for b in conh_buildings],
             "underlying_conditions": [{"bbl": b[0], "status": b[1]} for b in underlying_buildings],
         },
-        "slumlord_score": score,
-        "risk_level": risk_level,
+        "owner_id": reg_id,
     }
 
     return ToolResult(
@@ -9243,7 +9238,7 @@ def worst_landlords(ctx: Context, borough: Annotated[str, Field(description="Bor
 
     borough_label = f" (borough {borough.strip()})" if borough.strip() else ""
     lines = [f"WORST LANDLORDS — Top {len(rows)} by composite score{borough_label}"]
-    lines.append("Score = ClassC*3 + Litigations*5 + Harassment*10 + AEP*8 + OpenViol + Liens*2\n")
+    lines.append("Ranked by violation severity among all NYC landlords\n")
     lines.append(f"{'Rank':<5} {'Owner':<30} {'Bldgs':<6} {'Units':<6} "
                  f"{'Viol':<7} {'Open':<6} {'ClsC':<6} {'Evict':<6} {'Comp':<6} "
                  f"{'Litig':<6} {'Harass':<7} {'AEP':<5} {'Liens'}")
@@ -12205,6 +12200,7 @@ class PostHogMiddleware(Middleware):
 
 mcp.add_middleware(ResponseLimitingMiddleware(max_size=50_000))
 mcp.add_middleware(OutputFormatterMiddleware())
+mcp.add_middleware(PercentileMiddleware())
 mcp.add_middleware(PostHogMiddleware())
 
 
