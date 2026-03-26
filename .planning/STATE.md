@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 3 complete — ready for Phase 4 (Corporate Web Rebuild)
+**Current focus:** Phase 4 in progress — Corporate Web Rebuild (plan 1 of 2 complete)
 
 ## Current Position
 
-Phase: 3 of 10 (Ownership Graph Rebuild) — COMPLETE
-Plan: 2 of 2 complete
-Status: Phase 3 complete, ready for Phase 4
-Last activity: 2026-03-26 — Completed 03-02 (verification, graph_corps dedup fix, property_history date fix, all 10 MCP tools passing)
+Phase: 4 of 10 (Corporate Web Rebuild) — IN PROGRESS
+Plan: 1 of 2 complete
+Status: graph_corps expanded 2.5x, all 6 corporate web tools passing
+Last activity: 2026-03-26 — Completed 04-01 (expanded graph_corps from 105K to 268K via 4-source staging)
 
-Progress: ███░░░░░░░ 30%
+Progress: ████░░░░░░ 35%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6 (v2.0) / 8 (v1.0)
-- Average duration: ~62 min
-- Total execution time: 5.75 hours
+- Total plans completed: 7 (v2.0) / 8 (v1.0)
+- Average duration: ~66 min
+- Total execution time: 7.25 hours
 
 **By Phase:**
 
@@ -30,10 +30,11 @@ Progress: ███░░░░░░░ 30%
 | 1. Data Audit | 2/2 | 60 min | 30 min |
 | 2. Bug Fixes | 2/2 | 135 min | 68 min |
 | 3. Ownership Rebuild | 2/2 | 150 min | 75 min |
+| 4. Corporate Web Rebuild | 1/2 | 90 min | 90 min |
 
 **Recent Trend:**
-- Last 5 plans: 02-01 ✓, 02-02 ✓, 03-01 ✓, 03-02 ✓
-- Trend: Verification plans faster than rebuild plans
+- Last 5 plans: 02-02 ✓, 03-01 ✓, 03-02 ✓, 04-01 ✓
+- Trend: OOM recovery added ~30 min to 04-01
 
 ## Accumulated Context
 
@@ -58,6 +59,12 @@ Progress: ███░░░░░░░ 30%
 - **Graph Parquet cache must be deleted for SQL rebuild** — restart alone loads stale cache (03-02)
 - **graph_corps ROW_NUMBER dedup** — nys_corporations has duplicate rows with different date string formats (03-02)
 - **property_history safe date sort** — use str(date) for comparison, mixed datetime.date/None in ACRIS (03-02)
+- **Incremental temp table staging for large source scans** — UNION across DuckLake tables OOMs; INSERT INTO temp + DROP is safe (04-01)
+- **ACRIS grantees only (party_type=2)** — full ACRIS scan (46M rows) too expensive for corp matching; grantees are the relevant party (04-01)
+- **Container memory limit reduced to 20GB** — prevents system-wide OOM on 32GB server (04-01)
+- **Working mcp_server.py lives in Docker overlay, not image** — image has old code; docker-cp'd versions accumulate in overlay layers (04-01)
+- **OATH respondent column is respondent_last_name** — not respondent_name; corps stored in last_name field (04-01)
+- **Campaign contributions in city_government schema** — not financial schema (04-01)
 
 ### Prior Milestone Context (v1.0 Entity Resolution)
 
@@ -83,5 +90,5 @@ Progress: ███░░░░░░░ 30%
 ## Session Continuity
 
 Last session: 2026-03-26
-Stopped at: 03-02 complete. Phase 3 done. All 10 MCP tools passing. Ready for Phase 4 (Corporate Web Rebuild).
+Stopped at: 04-01 complete. graph_corps expanded 2.5x (268K). All 6 corporate web tools passing. Ready for 04-02 or Phase 5.
 Resume file: None

@@ -77,7 +77,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: Deduplicate graph_corps, expand source matching to ACRIS + campaign + OATH + DOB
+- [x] 04-01: Expand graph_corps from 105K to 268K via 4-source incremental staging (ACRIS + OATH + campaign) ✓
 - [ ] 04-02: Rebuild graph_corp_people, officer_edges, shared_officer with expanded corps
 
 ### Phase 5: Transaction Network Expansion
@@ -148,7 +148,7 @@ Plans:
 | 1. Data Audit | 2/2 | Complete | 2026-03-26 |
 | 2. Bug Fixes | 2/2 | Complete | 2026-03-26 |
 | 3. Ownership Rebuild | 2/2 | Complete | 2026-03-26 |
-| 4. Corporate Web Rebuild | 0/2 | Not started | — |
+| 4. Corporate Web Rebuild | 1/2 | In progress | — |
 | 5. Transaction Expansion | 0/1 | Not started | — |
 | 6. Influence Expansion | 0/1 | Not started | — |
 | 7. Cross-Domain Graph | 0/2 | Not started | — |
