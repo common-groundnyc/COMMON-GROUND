@@ -54,10 +54,11 @@ Plans:
 **Goal**: Fix the 3 broken tools identified in MCP Inspector testing: property_history date sort crash, shell_detector WCC crash from duplicate vertex PKs, graph_has_violation orphaned edges
 **Depends on**: Nothing (independent)
 **Research**: Unlikely (root causes already identified)
-**Plans**: 1 plan
+**Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: Fix property_history sort, deduplicate graph_corps, filter orphaned violations
+- [ ] 02-01: Infrastructure fixes — S3 credential resolution + duckpgq extension loading (launch blockers)
+- [ ] 02-02: Data fixes — property_history sort, graph_corps dedup, orphaned violations + full MCP re-test
 
 ### Phase 3: Ownership Graph Rebuild
 **Goal**: Rebuild the housing ownership graph from registrationid-based (489 shared edges) to name-based (31K+ shared edges). Expand graph_buildings from HPD-only (348K) to include PLUTO (860K lots). Fix null owner names (34K records).
@@ -145,7 +146,7 @@ Plans:
 | Phase | Plans | Status | Completed |
 |-------|-------|--------|-----------|
 | 1. Data Audit | 2/2 | Complete | 2026-03-26 |
-| 2. Bug Fixes | 0/1 | Not started | — |
+| 2. Bug Fixes | 0/2 | Not started | — |
 | 3. Ownership Rebuild | 0/2 | Not started | — |
 | 4. Corporate Web Rebuild | 0/2 | Not started | — |
 | 5. Transaction Expansion | 0/1 | Not started | — |
