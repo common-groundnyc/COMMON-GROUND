@@ -5,42 +5,41 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 1 — Data Audit
+**Current focus:** Phase 1 — Data Audit (Plan 01 complete, Plan 02 next)
 
 ## Current Position
 
 Phase: 1 of 10 (Data Audit)
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-03-26 — Roadmap created (v2.0 DuckPGQ Graph Rebuild)
+Plan: 1 of 2 complete
+Status: Executing
+Last activity: 2026-03-26 — Completed 01-01 (entity registry)
 
-Progress: ░░░░░░░░░░ 0%
+Progress: █░░░░░░░░░ 5%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0 (v2.0) / 8 (v1.0)
-- Average duration: —
-- Total execution time: 0 hours
+- Total plans completed: 1 (v2.0) / 8 (v1.0)
+- Average duration: ~30 min
+- Total execution time: 0.5 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| — | — | — | — |
+| 1. Data Audit | 1/2 | 30 min | 30 min |
 
 **Recent Trend:**
-- Last 5 plans: —
-- Trend: —
+- Last 5 plans: 01-01 ✓
+- Trend: Starting
 
 ## Accumulated Context
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table.
-Recent decisions affecting current work:
-
-(None yet — v2.0 just initialized)
+- 13 entity types defined for classification
+- oath_hearings (21.6M, 7 entity types) is the single highest-value ungraphed table
+- n311_service_requests (21M, 7 types) is second-highest ungraphed table
 
 ### Prior Milestone Context (v1.0 Entity Resolution)
 
@@ -50,7 +49,8 @@ Recent decisions affecting current work:
 
 ### Deferred Issues
 
-None yet.
+- 11 tables missed by column query truncation — corrections appended to registry
+- MCP server had crash-loop (stray char + missing posthog module + unsupported DuckLake option) — fixed live on Hetzner
 
 ### Blockers/Concerns
 
@@ -59,6 +59,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26 00:15
-Stopped at: Roadmap created, ready to plan Phase 1
+Last session: 2026-03-26 01:00
+Stopped at: 01-01 complete, ready for 01-02 (graph expansion plan)
 Resume file: None

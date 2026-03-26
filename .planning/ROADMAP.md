@@ -47,7 +47,7 @@ Splink probabilistic entity resolution across 44 tables, 55.5M records, producin
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01: Schema introspection — query all 539 tables, classify every column as entity-type or not
+- [x] 01-01: Schema introspection — 246 tables classified, 588 entity columns, 13 types ✓
 - [ ] 01-02: Entity coverage report — produce the definitive map of what entities exist where, cross-reference with current graph coverage
 
 ### Phase 2: Bug Fixes
@@ -144,7 +144,7 @@ Plans:
 
 | Phase | Plans | Status | Completed |
 |-------|-------|--------|-----------|
-| 1. Data Audit | 0/2 | Not started | — |
+| 1. Data Audit | 1/2 | In progress | — |
 | 2. Bug Fixes | 0/1 | Not started | — |
 | 3. Ownership Rebuild | 0/2 | Not started | — |
 | 4. Corporate Web Rebuild | 0/2 | Not started | — |
