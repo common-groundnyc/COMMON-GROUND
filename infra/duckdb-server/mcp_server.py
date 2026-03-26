@@ -3274,6 +3274,37 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
         except Exception:
             pass
 
+    # Semantic enhancement: find conceptually similar description categories
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    semantic_suggestions = []
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(query.strip())
+            vec_literal = vec_to_sql(query_vec)
+            source_filter = ""
+            if corpus == "financial":
+                source_filter = "WHERE source IN ('cfpb')"
+            elif corpus == "restaurants":
+                source_filter = "WHERE source = 'restaurant'"
+            sem_sql = f"""
+                SELECT source, description,
+                       array_cosine_distance(embedding, {vec_literal}) AS distance
+                FROM main.description_embeddings
+                {source_filter}
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sem_rows = db.execute(sem_sql).fetchall()
+            semantic_suggestions = [
+                (src, desc, round((1 - dist) * 100))
+                for src, desc, dist in sem_rows
+                if dist < 0.7
+            ]
+        except Exception:
+            pass
+
     elapsed = round((time.time() - t0) * 1000)
 
     if not all_results:
@@ -3291,10 +3322,17 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
     if corpus in ("all", "restaurants"):
         corpora_searched.append("restaurant_inspections")
 
-    summary = (
-        f"Found {len(all_results)} results for '{query}' ({elapsed}ms)\n"
-        f"Searched: {', '.join(corpora_searched)}"
-    )
+    lines = [
+        f"Found {len(all_results)} results for '{query}' ({elapsed}ms)",
+        f"Searched: {', '.join(corpora_searched)}",
+    ]
+
+    if semantic_suggestions:
+        lines.append("\nRelated categories (semantic match):")
+        for src, desc, sim in semantic_suggestions:
+            lines.append(f"  [{src}] ({sim}% similar) {desc}")
+
+    summary = "\n".join(lines)
     return make_result(summary, out_cols, all_results, {"query_time_ms": elapsed})
 
 
