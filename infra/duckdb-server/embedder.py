@@ -1,6 +1,7 @@
-"""Text embeddings via OpenRouter API (fast, parallel) or ONNX Runtime (fallback)."""
+"""Text embeddings via OpenRouter API (adaptive concurrency) or ONNX Runtime (fallback)."""
 import os
 import time
+import threading
 import numpy as np
 from pathlib import Path
 
@@ -8,9 +9,43 @@ _DEFAULT_MODEL_DIR = Path(__file__).parent / "model"
 
 # OpenRouter config
 _OR_URL = "https://openrouter.ai/api/v1/embeddings"
-_OR_MODEL = "google/gemini-embedding-001"  # 768 dims (reduced via Matryoshka)
-_OR_BATCH_SIZE = 100  # OpenRouter relay limit (~150 fails, 100 safe)
-_OR_CONCURRENCY = 20  # parallel threads
+_OR_MODEL = "google/gemini-embedding-001"
+_OR_BATCH_SIZE = 100  # OpenRouter relay limit
+
+# Adaptive concurrency config
+_MIN_WORKERS = 5
+_MAX_WORKERS = 80
+_RAMP_UP_EVERY = 10      # successes before adding a worker
+_BACKOFF_FACTOR = 0.5     # halve workers on failure
+_COOLDOWN_SECS = 2        # pause after backoff before resuming
+
+
+class _AdaptiveThrottle:
+    """Ramps up concurrency on success, backs off on failure."""
+
+    def __init__(self):
+        self.workers = _MIN_WORKERS
+        self._successes = 0
+        self._lock = threading.Lock()
+
+    def success(self):
+        with self._lock:
+            self._successes += 1
+            if self._successes >= _RAMP_UP_EVERY and self.workers < _MAX_WORKERS:
+                self.workers = min(self.workers + 2, _MAX_WORKERS)
+                self._successes = 0
+
+    def failure(self):
+        with self._lock:
+            old = self.workers
+            self.workers = max(int(self.workers * _BACKOFF_FACTOR), _MIN_WORKERS)
+            self._successes = 0
+            if self.workers < old:
+                return True  # signal: we backed off, caller should cooldown
+        return False
+
+    def __repr__(self):
+        return f"Throttle(workers={self.workers})"
 
 
 def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = None):
@@ -25,14 +60,15 @@ def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = 
 
 
 def _create_api_embedder(api_key: str):
-    """OpenRouter Gemini embeddings — parallel threads, 768 dims."""
+    """OpenRouter Gemini embeddings with adaptive concurrency."""
     import urllib.request
     import json
 
     dims = 768
+    throttle = _AdaptiveThrottle()
 
     def _call_api(texts: list[str]) -> list[list[float]]:
-        """Single API call for ≤250 texts. Retries up to 3 times."""
+        """Single API call. Retries 3x with backoff."""
         for attempt in range(3):
             try:
                 payload = json.dumps({"model": _OR_MODEL, "input": texts}).encode()
@@ -45,37 +81,63 @@ def _create_api_embedder(api_key: str):
                 if "data" not in data:
                     raise ValueError(f"API error: {data.get('error', data)}")
                 embeddings = sorted(data["data"], key=lambda x: x["index"])
-                # Truncate to dims (Matryoshka) — Gemini returns 3072 natively
+                throttle.success()
                 return [e["embedding"][:dims] for e in embeddings]
             except Exception:
+                backed_off = throttle.failure()
                 if attempt == 2:
                     raise
-                time.sleep(2 ** attempt)
+                wait = (2 ** attempt) + (_COOLDOWN_SECS if backed_off else 0)
+                time.sleep(wait)
 
     def embed(text: str) -> np.ndarray:
-        vecs = _call_api([text])
-        return np.array(vecs[0], dtype=np.float32)
+        return np.array(_call_api([text])[0], dtype=np.float32)
 
     def embed_batch(texts: list[str]) -> np.ndarray:
         if not texts:
             return np.empty((0, dims), dtype=np.float32)
         chunks = [texts[i:i + _OR_BATCH_SIZE] for i in range(0, len(texts), _OR_BATCH_SIZE)]
         if len(chunks) == 1:
-            vecs = _call_api(texts)
-            return np.array(vecs, dtype=np.float32)
-        # Parallel via thread pool
-        print(f"    Embedding {len(texts):,} texts ({len(chunks)} API calls, {_OR_CONCURRENCY} threads)...", flush=True)
+            return np.array(_call_api(texts), dtype=np.float32)
+
         from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        print(f"    {len(texts):,} texts, {len(chunks)} calls, starting at {throttle.workers} threads (adaptive {_MIN_WORKERS}→{_MAX_WORKERS})...", flush=True)
+
         all_embeddings = [None] * len(chunks)
-        done_count = 0
-        with ThreadPoolExecutor(max_workers=_OR_CONCURRENCY) as pool:
-            futures = {pool.submit(_call_api, chunk): i for i, chunk in enumerate(chunks)}
-            for future in as_completed(futures):
-                idx = futures[future]
-                all_embeddings[idx] = future.result()
-                done_count += 1
-                if done_count % 50 == 0:
-                    print(f"    {done_count * _OR_BATCH_SIZE:,}/{len(texts):,} embedded...", flush=True)
+        done = 0
+        failed = 0
+        t0 = time.time()
+
+        # Submit in waves sized to current throttle.workers
+        i = 0
+        while i < len(chunks):
+            wave_size = throttle.workers
+            wave_chunks = list(enumerate(chunks[i:i + wave_size], start=i))
+
+            with ThreadPoolExecutor(max_workers=wave_size) as pool:
+                futures = {pool.submit(_call_api, chunk): idx for idx, chunk in wave_chunks}
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        all_embeddings[idx] = future.result()
+                        done += 1
+                    except Exception:
+                        # Failed after retries — store empty, continue
+                        all_embeddings[idx] = [[0.0] * dims] * len(chunks[idx])
+                        done += 1
+                        failed += 1
+
+            i += wave_size
+            elapsed = time.time() - t0
+            rate = (done * _OR_BATCH_SIZE) / elapsed if elapsed > 0 else 0
+            if done % 20 == 0 or i >= len(chunks):
+                print(f"    {done * _OR_BATCH_SIZE:,}/{len(texts):,} ({rate:,.0f}/sec, {throttle.workers}w, {failed} fails)", flush=True)
+
+        elapsed = time.time() - t0
+        rate = len(texts) / elapsed if elapsed > 0 else 0
+        print(f"    Done: {len(texts):,} in {elapsed:.0f}s ({rate:,.0f}/sec, peak {throttle.workers}w, {failed} fails)", flush=True)
+
         flat = []
         for batch in all_embeddings:
             flat.extend(batch)
