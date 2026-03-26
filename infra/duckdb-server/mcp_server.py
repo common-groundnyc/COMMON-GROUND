@@ -2728,10 +2728,12 @@ ROUTING — pick the FIRST match:
 * CUSTOM QUERY → sql_query (read-only, all tables in 'lake' database)
 * EXPORT/DOWNLOAD/CSV → export_csv (branded CSV with row IDs and metadata)
 * DON'T KNOW WHAT TO EXPLORE → suggest_explorations
+* SEMANTIC SEARCH by concept → semantic_search (finds similar descriptions even with different words)
 
 POWER FEATURES:
 * Graph tools trace ownership networks across LLCs, property transactions, and corporate filings
 * text_search does full-text search across CFPB complaint narratives and restaurant violations
+* semantic_search does vector similarity search across 311 complaints, restaurant violations, HPD violations, OATH hearings
 * person_crossref links a name across every dataset (property, donations, businesses, violations)
 * export_csv generates branded CSV files with Common Ground watermark, row IDs, and full data attribution
 
@@ -2752,6 +2754,7 @@ ALWAYS_VISIBLE = [
     "data_catalog",
     "list_schemas",
     "suggest_explorations",
+    "semantic_search",
     "export_csv",
     # Building-centric (most common user intent)
     "building_profile",
@@ -3259,6 +3262,86 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
         f"Searched: {', '.join(corpora_searched)}"
     )
     return make_result(summary, out_cols, all_results, {"query_time_ms": elapsed})
+
+
+VALID_DESC_SOURCES = frozenset({"311", "restaurant", "hpd", "oath"})
+
+
+@mcp.tool(annotations=READONLY, tags={"discovery"})
+def semantic_search(
+    query: Annotated[str, Field(description="Natural language search query. Examples: 'pest problems in restaurants', 'landlord neglect complaints', 'noise from construction'")],
+    ctx: Context,
+    source: Annotated[str, Field(description="Filter by data source: '311', 'restaurant', 'hpd', 'oath', or 'all'")] = "all",
+    limit: Annotated[int, Field(description="Max results (1-50). Default: 15", ge=1, le=50)] = 15,
+) -> ToolResult:
+    """Semantic similarity search across NYC complaint and violation descriptions. Unlike text_search (keyword matching), this finds conceptually similar records even when different words are used. 'pest problems' finds 'mice', 'roaches', 'flies'. 'building neglect' finds 'peeling paint', 'broken elevator', 'no heat'. Uses vector embeddings + HNSW index. Sources: 311 complaints, restaurant violations, HPD violations, OATH hearings."""
+    if not query.strip():
+        raise ToolError("Search query cannot be empty")
+
+    if source != "all" and source not in VALID_DESC_SOURCES:
+        raise ToolError(
+            f"Invalid source '{source}'. Must be one of: {', '.join(sorted(VALID_DESC_SOURCES))}, or 'all'"
+        )
+
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    if embed_fn is None:
+        raise ToolError(
+            "Semantic search is unavailable — embedding model not loaded. Use text_search() for keyword matching instead."
+        )
+
+    from embedder import vec_to_sql
+
+    t0 = time.time()
+    vec = embed_fn(query.strip())
+    vec_literal = vec_to_sql(vec)
+
+    source_filter = f"WHERE source = '{source}'" if source != "all" else ""
+
+    sql = f"""
+        SELECT source, description,
+               1.0 - array_cosine_distance(embedding, {vec_literal}) AS similarity
+        FROM main.description_embeddings
+        {source_filter}
+        ORDER BY array_cosine_distance(embedding, {vec_literal})
+        LIMIT {limit}
+    """
+
+    with _db_lock:
+        try:
+            db = ctx.lifespan_context["db"]
+            cur = db.execute(sql)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        except Exception as e:
+            raise ToolError(f"Semantic search failed: {e}")
+
+    elapsed = round((time.time() - t0) * 1000)
+
+    if not rows:
+        return ToolResult(
+            content=f"No results found for '{query}'. Try broader or different phrasing.",
+            meta={"query_time_ms": elapsed},
+        )
+
+    lines = [f"Top {len(rows)} semantic matches for '{query}' ({elapsed}ms)\n"]
+    for i, row in enumerate(rows, 1):
+        rec = dict(zip(cols, row))
+        pct = round(rec["similarity"] * 100, 1)
+        lines.append(f"{i}. [{rec['source']}] {pct}% — {rec['description']}")
+
+    lines.append(
+        "\nTo retrieve full records, use sql_query() on the source table. "
+        "Example: sql_query(\"SELECT * FROM lake.housing.hpd_violations WHERE novdescription ILIKE '%no heat%' LIMIT 20\")"
+    )
+
+    content = "\n".join(lines)
+    structured = [dict(zip(cols, row)) for row in rows]
+
+    return ToolResult(
+        content=content,
+        structured_content=structured,
+        meta={"query_time_ms": elapsed, "result_count": len(rows), "source_filter": source},
+    )
 
 
 @mcp.tool(annotations=READONLY, tags={"services"})
