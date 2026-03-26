@@ -1022,18 +1022,27 @@ async def app_lifespan(server):
     def _load_embeddings_from_cache(conn):
         for t in EMBEDDING_TABLES:
             path = f"{EMBEDDING_CACHE_DIR}/{t}.parquet"
-            conn.execute(f"CREATE OR REPLACE TABLE main.{t} AS SELECT * FROM read_parquet('{path}')")
+            try:
+                conn.execute(f"CREATE OR REPLACE TABLE main.{t} AS SELECT * FROM read_parquet('{path}')")
+            except Exception:
+                pass  # parquet may not exist if builder failed on previous run
 
     def _save_embeddings_to_cache(conn):
         import pathlib
         cache = pathlib.Path(EMBEDDING_CACHE_DIR)
         cache.mkdir(parents=True, exist_ok=True)
+        saved = 0
         for t in EMBEDDING_TABLES:
-            conn.execute(
-                f"COPY main.{t} TO '{EMBEDDING_CACHE_DIR}/{t}.parquet' "
-                f"(FORMAT PARQUET, COMPRESSION ZSTD)"
-            )
-        (cache / "_built_at.txt").write_text(str(time.time()))
+            try:
+                conn.execute(
+                    f"COPY main.{t} TO '{EMBEDDING_CACHE_DIR}/{t}.parquet' "
+                    f"(FORMAT PARQUET, COMPRESSION ZSTD)"
+                )
+                saved += 1
+            except Exception:
+                pass  # table may not exist if its data source was unavailable
+        if saved > 0:
+            (cache / "_built_at.txt").write_text(str(time.time()))
 
     def _create_hnsw_indexes(conn):
         indexes = [
@@ -2641,25 +2650,29 @@ async def app_lifespan(server):
         from embedder import create_embedder
         embed_fn, embed_batch_fn = create_embedder("/app/model")
         print("Embedding model loaded", flush=True)
-
-        if _embedding_cache_fresh():
-            print("Loading embeddings from Parquet cache...", flush=True)
-            _load_embeddings_from_cache(conn)
-        else:
-            print("Building embeddings (no cache or stale)...", flush=True)
-            _build_catalog_embeddings(conn, embed_batch_fn)
-            _build_description_embeddings(conn, embed_batch_fn)
-            if graph_ready:
-                _build_entity_name_embeddings(conn, embed_batch_fn)
-                _build_building_vectors(conn)
-            _save_embeddings_to_cache(conn)
-            print("Embeddings cached to Parquet", flush=True)
-
-        _create_hnsw_indexes(conn)
-        print("HNSW indexes created", flush=True)
     except Exception as e:
-        print(f"Warning: vector search unavailable: {e}", flush=True)
-        embed_fn = None
+        print(f"Warning: embedding model unavailable: {e}", flush=True)
+
+    if embed_fn is not None:
+        try:
+            if _embedding_cache_fresh():
+                print("Loading embeddings from Parquet cache...", flush=True)
+                _load_embeddings_from_cache(conn)
+            else:
+                print("Building embeddings (no cache or stale)...", flush=True)
+                _build_catalog_embeddings(conn, embed_batch_fn)
+                _build_description_embeddings(conn, embed_batch_fn)
+                if graph_ready:
+                    _build_entity_name_embeddings(conn, embed_batch_fn)
+                    _build_building_vectors(conn)
+                _save_embeddings_to_cache(conn)
+                print("Embeddings cached to Parquet", flush=True)
+
+            _create_hnsw_indexes(conn)
+            print("HNSW indexes created", flush=True)
+        except Exception as e:
+            print(f"Warning: embedding tables partially built: {e}", flush=True)
+            # embed_fn stays set — semantic search works on whatever tables DID get built
 
     try:
         yield {
