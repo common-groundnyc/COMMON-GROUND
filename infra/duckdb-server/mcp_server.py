@@ -6553,6 +6553,150 @@ def money_trail(
 
 
 # ---------------------------------------------------------------------------
+# Judge Profile — Federal Judge Dossier
+# ---------------------------------------------------------------------------
+
+JUDGE_BIO_SQL = """
+SELECT id, name_first, name_last, name_middle, name_suffix,
+       gender, date_dob, date_dod, dob_city, dob_state, religion
+FROM lake.federal.cl_judges
+WHERE name_last ILIKE ? AND name_first ILIKE ?
+LIMIT 5
+"""
+
+JUDGE_POSITIONS_SQL = """
+SELECT position_type, court_full_name, date_start, date_retirement,
+       date_termination, appointer, how_selected, nomination_process
+FROM lake.federal.cl_judges__positions
+WHERE person_id = ?
+ORDER BY TRY_CAST(date_start AS DATE) DESC NULLS LAST
+"""
+
+JUDGE_EDUCATION_SQL = """
+SELECT school_name, degree_detail, degree_year
+FROM lake.federal.cl_judges__educations
+WHERE person_id = ?
+ORDER BY TRY_CAST(degree_year AS INT) ASC NULLS LAST
+"""
+
+JUDGE_DISCLOSURES_SQL = """
+SELECT year, report_type
+FROM lake.federal.cl_financial_disclosures
+WHERE person_id = ?
+ORDER BY TRY_CAST(year AS INT) DESC
+LIMIT 10
+"""
+
+JUDGE_INVESTMENTS_SQL = """
+SELECT description_1, description_2, description_3,
+       gross_value_code, income_during_reporting_period_code
+FROM lake.federal.cl_financial_disclosures__investments
+WHERE financial_disclosure_id IN (
+    SELECT id FROM lake.federal.cl_financial_disclosures WHERE person_id = ?
+)
+LIMIT 20
+"""
+
+JUDGE_GIFTS_SQL = """
+SELECT source, description, value
+FROM lake.federal.cl_financial_disclosures__gifts
+WHERE financial_disclosure_id IN (
+    SELECT id FROM lake.federal.cl_financial_disclosures WHERE person_id = ?
+)
+ORDER BY TRY_CAST(value AS DOUBLE) DESC NULLS LAST
+LIMIT 10
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"investigation"})
+def judge_profile(
+    name: NAME,
+    ctx: Context,
+) -> ToolResult:
+    """Federal judge dossier — career history, education, political affiliation, and financial disclosures (investments, gifts, debts). Enter a judge's name to see their background, who appointed them, where they went to school, and their financial holdings. Useful for checking conflicts of interest. Cross-references CourtListener judge database with financial disclosure filings. For case-level data, use sql_query() against cl_fjc_cases."""
+    name = name.strip()
+    if len(name) < 3:
+        raise ToolError("Name must be at least 3 characters.")
+
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    parts = name.split()
+    first = parts[0] if len(parts) >= 2 else "%"
+    last = parts[-1] if len(parts) >= 2 else name
+
+    _, bio_rows = _safe_query(db, JUDGE_BIO_SQL, [f"{last}%", f"{first}%"])
+
+    if not bio_rows:
+        raise ToolError(f"No federal judge found for '{name}'. Try last name only.")
+
+    lines = [f"JUDGE PROFILE — {name}", "=" * 55]
+
+    for bio in bio_rows:
+        judge_id, fn, ln, mn, sfx, gender, dob, dod, dob_city, dob_state, religion = bio
+        full_name = f"{fn or ''} {mn or ''} {ln or ''} {sfx or ''}".strip()
+        lines.append(f"\n{full_name}")
+        lines.append(f"  {gender or '?'} | Born: {dob or '?'} in {dob_city or '?'}, {dob_state or '?'}")
+        if dod:
+            lines.append(f"  Died: {dod}")
+        if religion:
+            lines.append(f"  Religion: {religion}")
+
+        # Positions
+        _, pos_rows = _safe_query(db, JUDGE_POSITIONS_SQL, [judge_id])
+        if pos_rows:
+            lines.append(f"\n  CAREER:")
+            for p in pos_rows:
+                pos_type, court, start, retire, term, appointer, how, nom = p
+                status = "retired" if retire else ("terminated" if term else "active")
+                lines.append(f"    {pos_type or '?'} — {court or '?'}")
+                lines.append(f"      {start or '?'} – {retire or term or 'present'} ({status})")
+                if appointer:
+                    lines.append(f"      Appointed by: {appointer}")
+
+        # Education
+        _, edu_rows = _safe_query(db, JUDGE_EDUCATION_SQL, [judge_id])
+        if edu_rows:
+            lines.append(f"\n  EDUCATION:")
+            for e in edu_rows:
+                school, degree, year = e
+                lines.append(f"    {school or '?'} — {degree or '?'} ({year or '?'})")
+
+        # Financial disclosures
+        _, disc_rows = _safe_query(db, JUDGE_DISCLOSURES_SQL, [judge_id])
+        if disc_rows:
+            lines.append(f"\n  FINANCIAL DISCLOSURES ({len(disc_rows)} filings):")
+            for d in disc_rows[:5]:
+                lines.append(f"    {d[0] or '?'}: {d[1] or 'Annual'}")
+
+        # Top investments
+        _, inv_rows = _safe_query(db, JUDGE_INVESTMENTS_SQL, [judge_id])
+        if inv_rows:
+            lines.append(f"\n  TOP INVESTMENTS ({len(inv_rows)} holdings):")
+            for i in inv_rows[:10]:
+                desc = ' / '.join(str(d) for d in [i[0], i[1], i[2]] if d)
+                value = i[3] or '?'
+                lines.append(f"    {desc[:80]} (value code: {value})")
+
+        # Gifts
+        _, gift_rows = _safe_query(db, JUDGE_GIFTS_SQL, [judge_id])
+        if gift_rows:
+            lines.append(f"\n  GIFTS RECEIVED ({len(gift_rows)}):")
+            for g in gift_rows:
+                source, desc, value = g
+                lines.append(f"    From: {source or '?'} — {desc or '?'} (${value or '?'})")
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={"name": name, "judges_found": len(bio_rows)},
+        meta={"name": name, "query_time_ms": elapsed},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Commercial Vitality
 # ---------------------------------------------------------------------------
 
