@@ -6132,6 +6132,173 @@ def due_diligence(
 
 
 # ---------------------------------------------------------------------------
+# Cop Sheet — Officer Accountability Dossier
+# ---------------------------------------------------------------------------
+
+COP_SHEET_SUMMARY_SQL = """
+SELECT first_name, last_name, allegations, substantiated,
+       force_allegations, subst_force_allegations, incidents,
+       empl_status, gender, race_ethnicity
+FROM lake.federal.nypd_ccrb_officers_current
+WHERE last_name ILIKE ? AND first_name ILIKE ?
+LIMIT 5
+"""
+
+COP_SHEET_COMPLAINTS_SQL = """
+SELECT complaint_id, incident_date, fado_type, allegation,
+       ccrb_disposition, board_cat, penalty_cat, penalty_desc,
+       incident_command, incident_rank_long, shield_no,
+       impacted_race, impacted_gender, impacted_age,
+       contact_reason, location_type
+FROM lake.federal.nypd_ccrb_complaints
+WHERE last_name ILIKE ? AND first_name ILIKE ?
+ORDER BY TRY_CAST(incident_date AS DATE) DESC NULLS LAST
+LIMIT 30
+"""
+
+COP_SHEET_SETTLEMENTS_SQL = """
+SELECT matter_name, plaintiff_name, summary_allegations,
+       amount_awarded, total_incurred, court, docket_number,
+       filed_date, closed_date, incident_date, case_outcome
+FROM lake.federal.police_settlements_538
+WHERE matter_name ILIKE '%' || ? || '%'
+   OR plaintiff_name ILIKE '%' || ? || '%'
+ORDER BY TRY_CAST(amount_awarded AS DOUBLE) DESC NULLS LAST
+LIMIT 15
+"""
+
+COP_SHEET_FEDERAL_SDNY_SQL = """
+SELECT case_name, case_name_full, docket_number,
+       date_filed, date_terminated, suit_nature, assigned_to
+FROM lake.federal.cl_nypd_cases_sdny
+WHERE case_name_full ILIKE '%' || ? || '%'
+ORDER BY TRY_CAST(date_filed AS DATE) DESC NULLS LAST
+LIMIT 10
+"""
+
+COP_SHEET_FEDERAL_EDNY_SQL = """
+SELECT case_name, case_name_full, docket_number,
+       date_filed, date_terminated, suit_nature, assigned_to
+FROM lake.federal.cl_nypd_cases_edny
+WHERE case_name_full ILIKE '%' || ? || '%'
+ORDER BY TRY_CAST(date_filed AS DATE) DESC NULLS LAST
+LIMIT 10
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"investigation", "safety"})
+def cop_sheet(
+    name: NAME,
+    ctx: Context,
+) -> ToolResult:
+    """NYPD officer accountability dossier — CCRB civilian complaints (force, abuse, discourtesy, language), complaint dispositions, penalties, federal lawsuits (SDNY/EDNY), and city settlement payouts. Enter an officer's name to see their full record. Cross-references 5 databases: CCRB complaints, CCRB officer roster, FiveThirtyEight police settlements, and CourtListener federal court records (SDNY + EDNY). For broader person search, use entity_xray(name)."""
+    name = name.strip()
+    if len(name) < 3:
+        raise ToolError("Name must be at least 3 characters.")
+
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    parts = name.split()
+    if len(parts) >= 2:
+        first = parts[0]
+        last = parts[-1]
+    else:
+        first = name
+        last = name
+
+    # Officer summary
+    _, summary_rows = _safe_query(db, COP_SHEET_SUMMARY_SQL, [f"{last}%", f"{first}%"])
+    # CCRB complaints
+    _, complaint_rows = _safe_query(db, COP_SHEET_COMPLAINTS_SQL, [f"{last}%", f"{first}%"])
+    # Settlements (search by officer last name in matter_name)
+    _, settlement_rows = _safe_query(db, COP_SHEET_SETTLEMENTS_SQL, [last, last])
+    # Federal cases SDNY
+    _, sdny_rows = _safe_query(db, COP_SHEET_FEDERAL_SDNY_SQL, [last])
+    # Federal cases EDNY
+    _, edny_rows = _safe_query(db, COP_SHEET_FEDERAL_EDNY_SQL, [last])
+
+    if not summary_rows and not complaint_rows:
+        raise ToolError(f"No CCRB records found for '{name}'. Try last name only, or check spelling.")
+
+    lines = [f"COP SHEET — {name}", "=" * 55]
+
+    # Summary
+    if summary_rows:
+        for s in summary_rows:
+            fname, lname, allegations, substantiated, force, subst_force, incidents, status, gender, race = s
+            lines.append(f"\n{fname} {lname} — {status or 'Unknown status'}")
+            lines.append(f"  {gender or '?'} | {race or '?'}")
+            lines.append(f"  Total allegations: {allegations or 0}")
+            lines.append(f"  Substantiated: {substantiated or 0}")
+            lines.append(f"  Force allegations: {force or 0} (substantiated: {subst_force or 0})")
+            lines.append(f"  Distinct incidents: {incidents or 0}")
+
+    # CCRB Complaints
+    if complaint_rows:
+        lines.append(f"\nCCRB COMPLAINTS ({len(complaint_rows)} allegations):")
+        fado_counts = {}
+        disposition_counts = {}
+        for r in complaint_rows:
+            cid, date, fado, allegation, disp, board, penalty_cat, penalty_desc, cmd, rank, shield, race, gender, age, reason, loc = r
+            fado_counts[fado] = fado_counts.get(fado, 0) + 1
+            disposition_counts[disp or 'Unknown'] = disposition_counts.get(disp or 'Unknown', 0) + 1
+
+        lines.append(f"  By type (FADO): {', '.join(f'{k}: {v}' for k, v in sorted(fado_counts.items(), key=lambda x: -x[1]))}")
+        lines.append(f"  By disposition: {', '.join(f'{k}: {v}' for k, v in sorted(disposition_counts.items(), key=lambda x: -x[1]))}")
+
+        # Show recent complaints
+        lines.append(f"\n  Recent complaints:")
+        seen_complaints = set()
+        for r in complaint_rows[:15]:
+            cid, date, fado, allegation, disp, board, penalty_cat, penalty_desc, cmd, rank, shield, race, gender, age, reason, loc = r
+            if cid in seen_complaints:
+                continue
+            seen_complaints.add(cid)
+            penalty_str = f" → {penalty_desc}" if penalty_desc else ""
+            lines.append(f"    {date or '?'}: {fado} — {allegation} ({disp or '?'}){penalty_str}")
+            lines.append(f"      Victim: {race or '?'} {gender or '?'}, age {age or '?'} | {cmd or '?'}")
+
+    # Settlements
+    if settlement_rows:
+        total_paid = sum(float(r[3] or 0) for r in settlement_rows)
+        total_incurred = sum(float(r[4] or 0) for r in settlement_rows)
+        lines.append(f"\nPOLICE SETTLEMENTS ({len(settlement_rows)} cases, ${total_paid:,.0f} awarded, ${total_incurred:,.0f} total incurred):")
+        for r in settlement_rows[:5]:
+            matter, plaintiff, summary, awarded, incurred, court, docket, filed, closed, incident, outcome = r
+            lines.append(f"  {matter or plaintiff or '?'}")
+            lines.append(f"    ${float(awarded or 0):,.0f} awarded | {court or '?'} | {docket or '?'}")
+            if summary:
+                lines.append(f"    Allegations: {summary[:150]}")
+
+    # Federal cases
+    federal_rows = (sdny_rows or []) + (edny_rows or [])
+    if federal_rows:
+        lines.append(f"\nFEDERAL LAWSUITS ({len(federal_rows)} cases):")
+        for r in federal_rows[:8]:
+            case_name, full_name, docket, filed, terminated, nature, judge = r
+            status_str = f"terminated {terminated}" if terminated else "OPEN"
+            lines.append(f"  {full_name or case_name or '?'}")
+            lines.append(f"    {docket or '?'} | Filed: {filed or '?'} | {status_str}")
+            if nature:
+                lines.append(f"    Nature: {nature}")
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={
+            "name": name,
+            "ccrb_allegations": len(complaint_rows),
+            "settlements": len(settlement_rows),
+            "federal_cases": len(federal_rows),
+        },
+        meta={"name": name, "query_time_ms": elapsed},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Vital Records — Historical NYC Records Search
 # ---------------------------------------------------------------------------
 
