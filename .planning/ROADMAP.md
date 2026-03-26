@@ -126,8 +126,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 09-01: Add shortest_path and reachability tools with SQL fallbacks
-- [ ] 09-02: Add multi-hop MATCH tools — corporate chain tracer, influence tracer
+- [x] 09-01: Add shortest_path and entity_reachable tools with SQL-based cross-domain path finding ✓
+- ~~09-02: Skipped — SQL approach in 09-01 covers multi-hop tracing without MATCH~~
 
 ### Phase 10: Validation & Hardening
 **Goal**: Every graph tool has a SQL fallback for DuckPGQ crashes. Health check tool using summarize_property_graph(). Full MCP Inspector re-test of all tools. Orphan edge validation on all graphs. Memory profiling under 28GB limit.
@@ -153,5 +153,5 @@ Plans:
 | 6. Influence Expansion | 1/1 | Complete | 2026-03-26 |
 | 7. Cross-Domain Graph | 2/2 | Complete | 2026-03-26 |
 | 8. PageRank Integration | 1/1 | Complete | 2026-03-26 |
-| 9. Path-Finding Tools | 0/2 | Not started | — |
+| 9. Path-Finding Tools | 1/1 | Complete | 2026-03-26 |
 | 10. Validation & Hardening | 0/2 | Not started | — |

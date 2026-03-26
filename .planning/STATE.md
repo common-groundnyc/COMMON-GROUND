@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 8 complete — PageRank Integration (1 of 1 complete). Ready for Phase 9 (Path-Finding)
+**Current focus:** Phase 9 complete — Path-Finding Tools (1 of 1 complete). Ready for Phase 10 (Validation & Hardening)
 
 ## Current Position
 
-Phase: 8 of 10 (PageRank Integration) — COMPLETE
-Plan: 1 of 1 complete
-Status: 2 new PageRank tools (landlord_pagerank, entity_influence), fixed nyc_housing graph definition, 14/15 MCP tools pass. Ready for Phase 9 (Path-Finding).
-Last activity: 2026-03-26 — Completed 08-01 (PageRank integration + full MCP regression)
+Phase: 9 of 10 (Path-Finding Tools) — COMPLETE
+Plan: 1 of 1 complete (09-02 skipped — SQL approach covers multi-hop tracing)
+Status: 2 new path-finding tools (shortest_path, entity_reachable), SQL-based approach avoids MATCH segfaults, 15/16 MCP tools pass. Ready for Phase 10 (Validation & Hardening).
+Last activity: 2026-03-26 — Completed 09-01 (path-finding tools + full MCP regression)
 
-Progress: ██████▓░░░ 65%
+Progress: ████████░░ 80%
 
 ## Performance Metrics
 
@@ -35,10 +35,11 @@ Progress: ██████▓░░░ 65%
 | 6. Influence Expansion | 1/1 | 40 min | 40 min |
 | 7. Cross-Domain Graph | 2/2 | 60 min | 30 min |
 | 8. PageRank Integration | 1/1 | 30 min | 30 min |
+| 9. Path-Finding Tools | 1/1 | 45 min | 45 min |
 
 **Recent Trend:**
-- Last 5 plans: 06-01 ✓, 07-01 ✓, 07-02 ✓, 08-01 ✓
-- Trend: Single-plan phases completing in ~30 min
+- Last 5 plans: 07-01 ✓, 07-02 ✓, 08-01 ✓, 09-01 ✓
+- Trend: Single-plan phases completing in ~30-45 min
 
 ## Accumulated Context
 
@@ -104,5 +105,5 @@ Progress: ██████▓░░░ 65%
 ## Session Continuity
 
 Last session: 2026-03-26
-Stopped at: 08-01 complete. Phase 8 done. 2 new PageRank tools, 14/15 MCP tools pass. Ready for Phase 9 (Path-Finding).
+Stopped at: 09-01 complete. Phase 9 done (09-02 skipped). 2 new path-finding tools, 15/16 MCP tools pass. Ready for Phase 10 (Validation & Hardening).
 Resume file: None
