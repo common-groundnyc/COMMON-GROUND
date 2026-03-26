@@ -78,7 +78,7 @@ Plans:
 
 Plans:
 - [x] 04-01: Expand graph_corps from 105K to 268K via 4-source incremental staging (ACRIS + OATH + campaign) ✓
-- [ ] 04-02: Rebuild graph_corp_people, officer_edges, shared_officer with expanded corps
+- [x] 04-02: Full MCP tool re-test (12/12 pass), property_history date sort fix, graph stats collected ✓
 
 ### Phase 5: Transaction Network Expansion
 **Goal**: Maximize ACRIS party coverage in the transaction graph. Currently 1.96M tx_entities from 46.2M ACRIS parties (4.2%). Expand entity matching, add personal property transactions (4.5M records).
@@ -148,7 +148,7 @@ Plans:
 | 1. Data Audit | 2/2 | Complete | 2026-03-26 |
 | 2. Bug Fixes | 2/2 | Complete | 2026-03-26 |
 | 3. Ownership Rebuild | 2/2 | Complete | 2026-03-26 |
-| 4. Corporate Web Rebuild | 1/2 | In progress | — |
+| 4. Corporate Web Rebuild | 2/2 | Complete | 2026-03-26 |
 | 5. Transaction Expansion | 0/1 | Not started | — |
 | 6. Influence Expansion | 0/1 | Not started | — |
 | 7. Cross-Domain Graph | 0/2 | Not started | — |

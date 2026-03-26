@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 4 in progress — Corporate Web Rebuild (plan 1 of 2 complete)
+**Current focus:** Phase 4 complete — Corporate Web Rebuild done, ready for Phase 5
 
 ## Current Position
 
-Phase: 4 of 10 (Corporate Web Rebuild) — IN PROGRESS
-Plan: 1 of 2 complete
-Status: graph_corps expanded 2.5x, all 6 corporate web tools passing
-Last activity: 2026-03-26 — Completed 04-01 (expanded graph_corps from 105K to 268K via 4-source staging)
+Phase: 4 of 10 (Corporate Web Rebuild) — COMPLETE
+Plan: 2 of 2 complete
+Status: All 12 graph-dependent MCP tools passing, property_history date sort bug fixed
+Last activity: 2026-03-26 — Completed 04-02 (full MCP tool re-test, property_history fix, graph stats collected)
 
 Progress: ████░░░░░░ 35%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 7 (v2.0) / 8 (v1.0)
-- Average duration: ~66 min
-- Total execution time: 7.25 hours
+- Total plans completed: 8 (v2.0) / 8 (v1.0)
+- Average duration: ~60 min
+- Total execution time: 7.7 hours
 
 **By Phase:**
 
@@ -30,11 +30,11 @@ Progress: ████░░░░░░ 35%
 | 1. Data Audit | 2/2 | 60 min | 30 min |
 | 2. Bug Fixes | 2/2 | 135 min | 68 min |
 | 3. Ownership Rebuild | 2/2 | 150 min | 75 min |
-| 4. Corporate Web Rebuild | 1/2 | 90 min | 90 min |
+| 4. Corporate Web Rebuild | 2/2 | 115 min | 58 min |
 
 **Recent Trend:**
-- Last 5 plans: 02-02 ✓, 03-01 ✓, 03-02 ✓, 04-01 ✓
-- Trend: OOM recovery added ~30 min to 04-01
+- Last 5 plans: 03-01 ✓, 03-02 ✓, 04-01 ✓, 04-02 ✓
+- Trend: Verification plans are fast (~25 min)
 
 ## Accumulated Context
 
@@ -58,7 +58,7 @@ Progress: ████░░░░░░ 35%
 - **Memory tuning: 18GB limit, 4 threads, insertion order off** — required for expanded PLUTO data (03-01)
 - **Graph Parquet cache must be deleted for SQL rebuild** — restart alone loads stale cache (03-02)
 - **graph_corps ROW_NUMBER dedup** — nys_corporations has duplicate rows with different date string formats (03-02)
-- **property_history safe date sort** — use str(date) for comparison, mixed datetime.date/None in ACRIS (03-02)
+- **property_history safe date sort** — use str(date) for comparison, mixed datetime.date/None in ACRIS (03-02, re-fixed 04-02)
 - **Incremental temp table staging for large source scans** — UNION across DuckLake tables OOMs; INSERT INTO temp + DROP is safe (04-01)
 - **ACRIS grantees only (party_type=2)** — full ACRIS scan (46M rows) too expensive for corp matching; grantees are the relevant party (04-01)
 - **Container memory limit reduced to 20GB** — prevents system-wide OOM on 32GB server (04-01)
@@ -76,7 +76,7 @@ Progress: ████░░░░░░ 35%
 - 11 tables missed by column query truncation — corrections appended to registry
 - ~~S3 credential breakage~~ — **FIXED** in 02-01
 - ~~duckpgq not loading~~ — **FIXED** in 02-01
-- ~~property_history date sort crash~~ — **FIXED** in 02-02, regressed in 03-01, **RE-FIXED** in 03-02
+- ~~property_history date sort crash~~ — **FIXED** in 02-02, regressed in 03-01, **RE-FIXED** in 03-02, regressed in 04-01, **RE-FIXED** in 04-02
 - ~~graph_corps 312K duplicates~~ — **FIXED** in 02-02, regressed in 03-01 (422K), **RE-FIXED** in 03-02 (105K unique)
 - ~~graph_has_violation 13.7K orphans~~ — **FIXED** in 02-02 (0 orphans); 5,209 new orphans from PLUTO expansion (0.048%, accepted)
 - MinIO HTTP change needs syncing to local infra/ directory
@@ -90,5 +90,5 @@ Progress: ████░░░░░░ 35%
 ## Session Continuity
 
 Last session: 2026-03-26
-Stopped at: 04-01 complete. graph_corps expanded 2.5x (268K). All 6 corporate web tools passing. Ready for 04-02 or Phase 5.
+Stopped at: 04-02 complete. All 12 graph tools passing. Phase 4 done. Ready for Phase 5 (Transaction Network Expansion).
 Resume file: None
