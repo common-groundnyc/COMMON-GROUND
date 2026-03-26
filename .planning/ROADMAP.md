@@ -68,7 +68,7 @@ Plans:
 
 Plans:
 - [x] 03-01: Rebuild graph_owners with name-based keys, expand graph_buildings from PLUTO ✓
-- [ ] 03-02: Rebuild graph_shared_owner, graph_owns, verify nyc_housing + nyc_building_network graphs
+- [x] 03-02: Verify graphs, fix graph_corps dedup + property_history date sort, full MCP re-test (10/10 pass) ✓
 
 ### Phase 4: Corporate Web Rebuild
 **Goal**: Deduplicate graph_corps (312K dupes → unique dos_ids), expand beyond HPD/PLUTO matching to include ACRIS-referenced corps, campaign employers, OATH respondents, DOB permit owners. Target: 5% → 30%+ of NYC corps in graph.
@@ -147,7 +147,7 @@ Plans:
 |-------|-------|--------|-----------|
 | 1. Data Audit | 2/2 | Complete | 2026-03-26 |
 | 2. Bug Fixes | 2/2 | Complete | 2026-03-26 |
-| 3. Ownership Rebuild | 1/2 | In progress | — |
+| 3. Ownership Rebuild | 2/2 | Complete | 2026-03-26 |
 | 4. Corporate Web Rebuild | 0/2 | Not started | — |
 | 5. Transaction Expansion | 0/1 | Not started | — |
 | 6. Influence Expansion | 0/1 | Not started | — |

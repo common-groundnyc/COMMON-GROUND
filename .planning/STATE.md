@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 3 — Ownership Graph Rebuild (Plan 1 of 2 complete)
+**Current focus:** Phase 3 complete — ready for Phase 4 (Corporate Web Rebuild)
 
 ## Current Position
 
-Phase: 3 of 10 (Ownership Graph Rebuild)
-Plan: 1 of 2 complete
-Status: Executing
-Last activity: 2026-03-26 — Completed 03-01 (core table rebuilds: name-based owners, PLUTO buildings, ownership edges)
+Phase: 3 of 10 (Ownership Graph Rebuild) — COMPLETE
+Plan: 2 of 2 complete
+Status: Phase 3 complete, ready for Phase 4
+Last activity: 2026-03-26 — Completed 03-02 (verification, graph_corps dedup fix, property_history date fix, all 10 MCP tools passing)
 
-Progress: ███▌░░░░░░ 25%
+Progress: ███░░░░░░░ 30%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5 (v2.0) / 8 (v1.0)
-- Average duration: ~63 min
-- Total execution time: 4.75 hours
+- Total plans completed: 6 (v2.0) / 8 (v1.0)
+- Average duration: ~62 min
+- Total execution time: 5.75 hours
 
 **By Phase:**
 
@@ -29,11 +29,11 @@ Progress: ███▌░░░░░░ 25%
 |-------|-------|-------|----------|
 | 1. Data Audit | 2/2 | 60 min | 30 min |
 | 2. Bug Fixes | 2/2 | 135 min | 68 min |
-| 3. Ownership Rebuild | 1/2 | 90 min | 90 min |
+| 3. Ownership Rebuild | 2/2 | 150 min | 75 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-02 ✓, 02-01 ✓, 02-02 ✓, 03-01 ✓
-- Trend: Infrastructure changes (OOM debugging) slower than data fixes
+- Last 5 plans: 02-01 ✓, 02-02 ✓, 03-01 ✓, 03-02 ✓
+- Trend: Verification plans faster than rebuild plans
 
 ## Accumulated Context
 
@@ -55,6 +55,9 @@ Progress: ███▌░░░░░░ 25%
 - **Mega-owner filter (>100 buildings)** — prevents O(n^2) in graph_shared_owner self-join (03-01)
 - **DuckDB config options lock after startup** — must SET at initial connection, not dynamically (03-01)
 - **Memory tuning: 18GB limit, 4 threads, insertion order off** — required for expanded PLUTO data (03-01)
+- **Graph Parquet cache must be deleted for SQL rebuild** — restart alone loads stale cache (03-02)
+- **graph_corps ROW_NUMBER dedup** — nys_corporations has duplicate rows with different date string formats (03-02)
+- **property_history safe date sort** — use str(date) for comparison, mixed datetime.date/None in ACRIS (03-02)
 
 ### Prior Milestone Context (v1.0 Entity Resolution)
 
@@ -66,11 +69,12 @@ Progress: ███▌░░░░░░ 25%
 - 11 tables missed by column query truncation — corrections appended to registry
 - ~~S3 credential breakage~~ — **FIXED** in 02-01
 - ~~duckpgq not loading~~ — **FIXED** in 02-01
-- ~~property_history date sort crash~~ — **FIXED** in 02-02
-- ~~graph_corps 312K duplicates~~ — **FIXED** in 02-02 (104K unique)
-- ~~graph_has_violation 13.7K orphans~~ — **FIXED** in 02-02 (0 orphans)
+- ~~property_history date sort crash~~ — **FIXED** in 02-02, regressed in 03-01, **RE-FIXED** in 03-02
+- ~~graph_corps 312K duplicates~~ — **FIXED** in 02-02, regressed in 03-01 (422K), **RE-FIXED** in 03-02 (105K unique)
+- ~~graph_has_violation 13.7K orphans~~ — **FIXED** in 02-02 (0 orphans); 5,209 new orphans from PLUTO expansion (0.048%, accepted)
 - MinIO HTTP change needs syncing to local infra/ directory
 - neighborhood_portrait returns skeleton-only data (known limitation)
+- graph_owns uncapped (172K max buildings per owner) — capped only in graph_shared_owner; cosmetic issue in worst_landlords top results
 
 ### Blockers/Concerns
 
@@ -78,6 +82,6 @@ Progress: ███▌░░░░░░ 25%
 
 ## Session Continuity
 
-Last session: 2026-03-26 06:00
-Stopped at: 03-01 complete (core table rebuilds). graph_owners/buildings/owns rebuilt with name-based PK + PLUTO. Ready for 03-02.
+Last session: 2026-03-26
+Stopped at: 03-02 complete. Phase 3 done. All 10 MCP tools passing. Ready for Phase 4 (Corporate Web Rebuild).
 Resume file: None
