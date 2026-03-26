@@ -2461,7 +2461,13 @@ ROUTING — pick the FIRST match:
 * SCHOOL by name/ZIP → school_search, then school_report
 * DISTRICT by number → district_report
 * NEIGHBORHOOD by ZIP → neighborhood_portrait, neighborhood_compare
+* OFFICER/COP by name → cop_sheet
+* JUDGE by name → judge_profile
 * CRIME/SAFETY by precinct → safety_report
+* ENVIRONMENT/CLIMATE by ZIP → climate_risk
+* BACKGROUND CHECK by name → due_diligence
+* POLITICAL MONEY by name → money_trail (broader), pay_to_play (city-level)
+* VITAL RECORDS/GENEALOGY → vital_records, marriage_search
 * CORRUPTION/INFLUENCE → pay_to_play, shell_detector, flipper_detector
 * FIND DATA by keyword → data_catalog, then list_tables
 * CUSTOM QUERY → sql_query (read-only, all tables in 'lake' database)
