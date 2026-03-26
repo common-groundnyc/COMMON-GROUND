@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 6 complete — Influence Network Expansion done, ready for Phase 7
+**Current focus:** Phase 7 in progress — Cross-Domain Unified Graph (plan 1 of 2 complete)
 
 ## Current Position
 
-Phase: 6 of 10 (Influence Network Expansion) — COMPLETE
-Plan: 1 of 1 complete
-Status: Influence graph expanded 103% entities (310K→631K), +1.5M expenditure edges, +169 payroll agencies. MCP tools passing (2/10 verified before client disconnect, server healthy).
-Last activity: 2026-03-26 — Completed 06-01 (influence graph expansion with expenditures + offyear + doing business + payroll)
+Phase: 7 of 10 (Cross-Domain Unified Graph) — IN PROGRESS
+Plan: 1 of 2 complete
+Status: 4 bridge tables (578K links) + unified entity summary (597K multi-domain entities) + nyc_unified property graph (5 vertex tables, 5 edge types). All MATCH queries verified. No regressions.
+Last activity: 2026-03-26 — Completed 07-01 (cross-domain bridge tables + unified property graph)
 
-Progress: █████░░░░░ 45%
+Progress: ██████░░░░ 50%
 
 ## Performance Metrics
 
@@ -33,9 +33,10 @@ Progress: █████░░░░░ 45%
 | 4. Corporate Web Rebuild | 2/2 | 115 min | 58 min |
 | 5. Transaction Expansion | 1/1 | 45 min | 45 min |
 | 6. Influence Expansion | 1/1 | 40 min | 40 min |
+| 7. Cross-Domain Graph | 1/2 | 35 min | 35 min |
 
 **Recent Trend:**
-- Last 5 plans: 04-01 ✓, 04-02 ✓, 05-01 ✓, 06-01 ✓
+- Last 5 plans: 04-02 ✓, 05-01 ✓, 06-01 ✓, 07-01 ✓
 - Trend: Verification plans are fast (~25 min)
 
 ## Accumulated Context
@@ -72,6 +73,8 @@ Progress: █████░░░░░ 45%
 - **GRANTOR/GRANTEE role labels** — replaced SOLD/BOUGHT for accuracy across mortgages/assignments (05-01)
 - **NYS expenditure columns differ from plan** — `cand_comm_name` (filer), `flng_ent_name` (payee), `org_amt` (amount), `sched_date` (date), `purpose_code_desc` (purpose) (06-01)
 - **doing_business_contributions uses `amnt` not `amount`** — same pattern as cfb_offyear_contributions (06-01)
+- **Direct name matching for cross-domain bridges** — resolved_entities (56M rows) too expensive for bridge joins; UPPER(TRIM()) on graph tables yields 597K multi-domain entities with zero DuckLake reads (07-01)
+- **DuckPGQ MATCH requires edge variable** — `[:Label]` segfaults; must use `[e:Label]` syntax (07-01)
 
 ### Prior Milestone Context (v1.0 Entity Resolution)
 
@@ -97,5 +100,5 @@ Progress: █████░░░░░ 45%
 ## Session Continuity
 
 Last session: 2026-03-26
-Stopped at: 06-01 complete. Influence graph: 630K entities (+103%), 1.5M expenditure edges, 169 payroll agencies. Phase 6 done. Ready for Phase 7 (Cross-Domain Unified Graph).
+Stopped at: 07-01 complete. Bridge tables: 578K links, 597K multi-domain entities, nyc_unified graph with 5 vertex + 5 edge types. Ready for 07-02 (verify cross-domain MATCH queries, build MCP tools).
 Resume file: None

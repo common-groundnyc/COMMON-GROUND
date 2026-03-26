@@ -106,7 +106,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 07-01: Design unified graph schema — vertex tables, edge tables, label strategy
+- [x] 07-01: Build cross-domain bridge tables + unified property graph (nyc_unified) — 578K links, 597K multi-domain entities ✓
 - [ ] 07-02: Build unified graph, verify cross-domain MATCH queries work
 
 ### Phase 8: PageRank Integration
@@ -151,7 +151,7 @@ Plans:
 | 4. Corporate Web Rebuild | 2/2 | Complete | 2026-03-26 |
 | 5. Transaction Expansion | 1/1 | Complete | 2026-03-26 |
 | 6. Influence Expansion | 1/1 | Complete | 2026-03-26 |
-| 7. Cross-Domain Graph | 0/2 | Not started | — |
+| 7. Cross-Domain Graph | 1/2 | In progress | — |
 | 8. PageRank Integration | 0/1 | Not started | — |
 | 9. Path-Finding Tools | 0/2 | Not started | — |
 | 10. Validation & Hardening | 0/2 | Not started | — |
