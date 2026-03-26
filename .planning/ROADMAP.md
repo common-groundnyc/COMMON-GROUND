@@ -116,7 +116,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 08-01: Add pagerank tools — landlord_pagerank, politician_pagerank, contractor_pagerank, entity_influence
+- [x] 08-01: Add pagerank tools — landlord_pagerank + entity_influence (4 domains), fix nyc_housing graph definition, 14/15 MCP tools pass ✓
 
 ### Phase 9: Path-Finding Tools
 **Goal**: Add GRAPH_TABLE MATCH-powered tools — shortest path between any two entities, reachability checks, multi-hop corporate chain tracing. "How is person A connected to building B?" Uses ANY SHORTEST path-finding with quantifiers.
@@ -152,6 +152,6 @@ Plans:
 | 5. Transaction Expansion | 1/1 | Complete | 2026-03-26 |
 | 6. Influence Expansion | 1/1 | Complete | 2026-03-26 |
 | 7. Cross-Domain Graph | 2/2 | Complete | 2026-03-26 |
-| 8. PageRank Integration | 0/1 | Not started | — |
+| 8. PageRank Integration | 1/1 | Complete | 2026-03-26 |
 | 9. Path-Finding Tools | 0/2 | Not started | — |
 | 10. Validation & Hardening | 0/2 | Not started | — |

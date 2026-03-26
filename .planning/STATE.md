@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 7 complete — Cross-Domain Unified Graph (2 of 2 complete). Ready for Phase 8 (PageRank)
+**Current focus:** Phase 8 complete — PageRank Integration (1 of 1 complete). Ready for Phase 9 (Path-Finding)
 
 ## Current Position
 
-Phase: 7 of 10 (Cross-Domain Unified Graph) — COMPLETE
-Plan: 2 of 2 complete
-Status: 48 graph tables, ~86M+ rows, 597K multi-domain entities, 12/13 MCP tools pass (1 entity_xray crash on specific entity — data quality issue, deferred). Ready for Phase 8 (PageRank).
-Last activity: 2026-03-26 — Completed 07-02 (cross-domain verification + full MCP regression)
+Phase: 8 of 10 (PageRank Integration) — COMPLETE
+Plan: 1 of 1 complete
+Status: 2 new PageRank tools (landlord_pagerank, entity_influence), fixed nyc_housing graph definition, 14/15 MCP tools pass. Ready for Phase 9 (Path-Finding).
+Last activity: 2026-03-26 — Completed 08-01 (PageRank integration + full MCP regression)
 
-Progress: ██████░░░░ 55%
+Progress: ██████▓░░░ 65%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10 (v2.0) / 8 (v1.0)
-- Average duration: ~56 min
-- Total execution time: 9.2 hours
+- Total plans completed: 11 (v2.0) / 8 (v1.0)
+- Average duration: ~54 min
+- Total execution time: 9.7 hours
 
 **By Phase:**
 
@@ -34,10 +34,11 @@ Progress: ██████░░░░ 55%
 | 5. Transaction Expansion | 1/1 | 45 min | 45 min |
 | 6. Influence Expansion | 1/1 | 40 min | 40 min |
 | 7. Cross-Domain Graph | 2/2 | 60 min | 30 min |
+| 8. PageRank Integration | 1/1 | 30 min | 30 min |
 
 **Recent Trend:**
-- Last 5 plans: 05-01 ✓, 06-01 ✓, 07-01 ✓, 07-02 ✓
-- Trend: Verification plans are fast (~25 min)
+- Last 5 plans: 06-01 ✓, 07-01 ✓, 07-02 ✓, 08-01 ✓
+- Trend: Single-plan phases completing in ~30 min
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Progress: ██████░░░░ 55%
 - **doing_business_contributions uses `amnt` not `amount`** — same pattern as cfb_offyear_contributions (06-01)
 - **Direct name matching for cross-domain bridges** — resolved_entities (56M rows) too expensive for bridge joins; UPPER(TRIM()) on graph tables yields 597K multi-domain entities with zero DuckLake reads (07-01)
 - **DuckPGQ MATCH requires edge variable** — `[:Label]` segfaults; must use `[e:Label]` syntax (07-01)
+- **DuckPGQ pagerank() uses labels, not table names** — syntax is `pagerank(graph, vertex_label, edge_label)`, returns `(key_col, pagerank)` (08-01)
+- **nyc_housing graph referenced stale registrationid column** — caused all graph creation to fail silently; fixed by removing column from PROPERTIES list (08-01)
 
 ### Prior Milestone Context (v1.0 Entity Resolution)
 
@@ -101,5 +104,5 @@ Progress: ██████░░░░ 55%
 ## Session Continuity
 
 Last session: 2026-03-26
-Stopped at: 07-02 complete. Phase 7 done. 48 graph tables, ~86M+ rows, 12/13 tools pass. Ready for Phase 8 (PageRank).
+Stopped at: 08-01 complete. Phase 8 done. 2 new PageRank tools, 14/15 MCP tools pass. Ready for Phase 9 (Path-Finding).
 Resume file: None
