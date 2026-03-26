@@ -361,19 +361,19 @@ def format_text_table(cols, rows, max_rows=MAX_LLM_ROWS):
         return "(no rows)"
 
     display = rows[:max_rows]
-    str_rows = [
-        [str(v)[:40] if v is not None else "" for v in row] for row in display
-    ]
-    widths = [
-        min(40, max(len(str(c)), max((len(r[i]) for r in str_rows), default=0)))
-        for i, c in enumerate(cols)
-    ]
 
-    def fmt(values):
-        return " | ".join(str(v)[:40].ljust(w) for v, w in zip(values, widths))
+    def cell(v):
+        s = str(v)[:40] if v is not None else ""
+        return s.replace("|", "\\|")
 
-    lines = [fmt(cols), "-+-".join("-" * w for w in widths)]
-    lines.extend(fmt(row) for row in str_rows)
+    lines = [
+        "| " + " | ".join(str(c) for c in cols) + " |",
+        "| " + " | ".join("---" for _ in cols) + " |",
+    ]
+    lines.extend(
+        "| " + " | ".join(cell(v) for v in row) + " |"
+        for row in display
+    )
 
     total = len(rows)
     if total > max_rows:
