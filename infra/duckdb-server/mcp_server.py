@@ -6697,6 +6697,175 @@ def judge_profile(
 
 
 # ---------------------------------------------------------------------------
+# Climate Risk — Environmental Due Diligence
+# ---------------------------------------------------------------------------
+
+CLIMATE_HEAT_SQL = """
+SELECT hvi FROM lake.environment.heat_vulnerability WHERE zcta20 = ? LIMIT 1
+"""
+
+CLIMATE_LEAD_SQL = """
+SELECT sl_category, COUNT(*) AS cnt
+FROM lake.environment.lead_service_lines
+WHERE zip_code = ?
+GROUP BY sl_category
+ORDER BY cnt DESC
+"""
+
+CLIMATE_LEAD_DETAIL_SQL = """
+SELECT
+    COUNT(*) AS total_lines,
+    COUNT(*) FILTER (WHERE LOWER(sl_category) LIKE '%lead%') AS lead_lines,
+    COUNT(*) FILTER (WHERE LOWER(public_sl_material) LIKE '%lead%'
+                      OR LOWER(customer_sl_material) LIKE '%lead%') AS lead_material
+FROM lake.environment.lead_service_lines
+WHERE zip_code = ?
+"""
+
+CLIMATE_ENERGY_BBL_SQL = """
+SELECT property_name, primary_property_type, energy_star_score,
+       site_eui_kbtu_ft, source_eui_kbtu_ft,
+       direct_ghg_emissions_metric, total_location_based_ghg,
+       year_built, number_of_buildings, occupancy
+FROM lake.environment.ll84_energy_2023
+WHERE nyc_borough_block_and_lot = ?
+LIMIT 1
+"""
+
+CLIMATE_ENERGY_ZIP_SQL = """
+SELECT
+    COUNT(*) AS buildings,
+    ROUND(AVG(TRY_CAST(energy_star_score AS DOUBLE)), 0) AS avg_energy_star,
+    ROUND(AVG(TRY_CAST(site_eui_kbtu_ft AS DOUBLE)), 1) AS avg_site_eui,
+    ROUND(AVG(TRY_CAST(direct_ghg_emissions_metric AS DOUBLE)), 1) AS avg_ghg
+FROM lake.environment.ll84_energy_2023
+WHERE postal_code = ?
+"""
+
+CLIMATE_TREES_SQL = """
+SELECT
+    COUNT(*) AS total_trees,
+    COUNT(DISTINCT spc_common) AS species_count,
+    spc_common AS top_species
+FROM lake.environment.street_trees
+WHERE zipcode = ?
+GROUP BY spc_common
+ORDER BY COUNT(*) DESC
+LIMIT 1
+"""
+
+CLIMATE_TREE_COUNT_SQL = """
+SELECT COUNT(*) AS trees FROM lake.environment.street_trees WHERE zipcode = ?
+"""
+
+CLIMATE_CLEANUP_SQL = """
+SELECT COUNT(*) AS sites
+FROM lake.environment.oer_cleanup
+WHERE zip = ?
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"environment"})
+def climate_risk(
+    zipcode: ZIP,
+    ctx: Context,
+) -> ToolResult:
+    """Environmental due diligence for a NYC ZIP code — heat vulnerability, lead pipes, building energy efficiency, tree canopy, and cleanup sites. Use this when someone asks 'is this area safe environmentally?', 'should I move here?', or 'what's the environmental risk?'. For building-specific energy data, provide a BBL to building_profile(bbl) and follow up here for the ZIP context. For neighborhood lifestyle, use neighborhood_portrait(zipcode)."""
+    if not re.match(r"^\d{5}$", zipcode):
+        raise ToolError("Please provide a valid 5-digit NYC ZIP code.")
+
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    _, heat_rows = _safe_query(db, CLIMATE_HEAT_SQL, [zipcode])
+    _, lead_rows = _safe_query(db, CLIMATE_LEAD_DETAIL_SQL, [zipcode])
+    _, energy_rows = _safe_query(db, CLIMATE_ENERGY_ZIP_SQL, [zipcode])
+    _, tree_count = _safe_query(db, CLIMATE_TREE_COUNT_SQL, [zipcode])
+    _, tree_rows = _safe_query(db, CLIMATE_TREES_SQL, [zipcode])
+    _, cleanup_rows = _safe_query(db, CLIMATE_CLEANUP_SQL, [zipcode])
+
+    lines = [f"CLIMATE & ENVIRONMENTAL RISK — ZIP {zipcode}", "=" * 55]
+
+    # Heat vulnerability
+    if heat_rows and heat_rows[0][0] is not None:
+        hvi = float(heat_rows[0][0])
+        if hvi >= 4:
+            risk = "HIGH — significant heat-related health risk"
+        elif hvi >= 3:
+            risk = "MODERATE-HIGH"
+        elif hvi >= 2:
+            risk = "MODERATE"
+        else:
+            risk = "LOW"
+        lines.append(f"\nHEAT VULNERABILITY")
+        lines.append(f"  Heat Vulnerability Index: {hvi:.1f}/5 — {risk}")
+    else:
+        lines.append(f"\nHEAT VULNERABILITY: No data for this ZIP")
+
+    # Lead pipes
+    if lead_rows and lead_rows[0][0]:
+        total = int(lead_rows[0][0] or 0)
+        lead_lines = int(lead_rows[0][1] or 0)
+        lead_material = int(lead_rows[0][2] or 0)
+        pct = round(lead_material / total * 100, 1) if total > 0 else 0
+        lines.append(f"\nLEAD SERVICE LINES")
+        lines.append(f"  Total service lines surveyed: {total:,}")
+        lines.append(f"  Lines categorized as lead: {lead_lines:,}")
+        lines.append(f"  Lines with lead material: {lead_material:,} ({pct}%)")
+        if pct > 20:
+            lines.append(f"  ⚠️  HIGH lead pipe concentration")
+        elif pct > 5:
+            lines.append(f"  Moderate lead pipe presence")
+    else:
+        lines.append(f"\nLEAD SERVICE LINES: No data for this ZIP")
+
+    # Energy
+    if energy_rows and energy_rows[0][0]:
+        e = energy_rows[0]
+        buildings = int(e[0] or 0)
+        avg_star = e[1]
+        avg_eui = e[2]
+        avg_ghg = e[3]
+        lines.append(f"\nBUILDING ENERGY (LL84 benchmarking, {buildings} large buildings)")
+        if avg_star:
+            star_str = f"{avg_star:.0f}/100"
+            if float(avg_star) >= 75:
+                star_str += " (good)"
+            elif float(avg_star) <= 50:
+                star_str += " (poor)"
+            lines.append(f"  Avg Energy Star score: {star_str}")
+        if avg_eui:
+            lines.append(f"  Avg Site EUI: {avg_eui} kBtu/ft²")
+        if avg_ghg:
+            lines.append(f"  Avg GHG emissions: {avg_ghg} metric tons CO₂e")
+
+    # Trees
+    if tree_count and tree_count[0][0]:
+        trees = int(tree_count[0][0])
+        top_species = tree_rows[0][2] if tree_rows else "Unknown"
+        lines.append(f"\nTREE CANOPY")
+        lines.append(f"  Street trees: {trees:,}")
+        lines.append(f"  Most common species: {top_species}")
+
+    # Cleanup sites
+    if cleanup_rows and cleanup_rows[0][0]:
+        sites = int(cleanup_rows[0][0])
+        if sites > 0:
+            lines.append(f"\nCLEANUP SITES")
+            lines.append(f"  Active/historical OER cleanup sites: {sites}")
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={"zipcode": zipcode},
+        meta={"zipcode": zipcode, "query_time_ms": elapsed},
+    )
+
+
+
+# ---------------------------------------------------------------------------
 # Commercial Vitality
 # ---------------------------------------------------------------------------
 
