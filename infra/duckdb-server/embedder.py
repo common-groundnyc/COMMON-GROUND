@@ -9,8 +9,8 @@ _DEFAULT_MODEL_DIR = Path(__file__).parent / "model"
 # OpenRouter config
 _OR_URL = "https://openrouter.ai/api/v1/embeddings"
 _OR_MODEL = "google/gemini-embedding-001"  # 768 dims (reduced via Matryoshka)
-_OR_BATCH_SIZE = 250  # Gemini max per request
-_OR_CONCURRENCY = 8  # parallel threads (too many triggers OpenRouter 404s)
+_OR_BATCH_SIZE = 100  # OpenRouter relay limit (~150 fails, 100 safe)
+_OR_CONCURRENCY = 8  # parallel threads
 
 
 def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = None):
