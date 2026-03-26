@@ -5750,6 +5750,161 @@ def school_compare(
 
 
 # ---------------------------------------------------------------------------
+# District Report
+# ---------------------------------------------------------------------------
+
+DISTRICT_SCHOOLS_SQL = """
+SELECT
+    d.dbn,
+    d.school_name,
+    TRY_CAST(d.total_enrollment AS INT) AS enrollment
+FROM lake.education.demographics_2020 d
+WHERE SUBSTRING(d.dbn, 1, 2) = LPAD(?, 2, '0')
+ORDER BY enrollment DESC NULLS LAST
+"""
+
+DISTRICT_AGGREGATE_SQL = """
+SELECT
+    COUNT(DISTINCT d.dbn) AS school_count,
+    SUM(TRY_CAST(d.total_enrollment AS INT)) AS total_students,
+    ROUND(AVG(TRY_CAST(d.total_enrollment AS INT)), 0) AS avg_enrollment,
+    ROUND(AVG(TRY_CAST(d.asian_1 AS DOUBLE)), 1) AS avg_asian_pct,
+    ROUND(AVG(TRY_CAST(d.black_1 AS DOUBLE)), 1) AS avg_black_pct,
+    ROUND(AVG(TRY_CAST(d.hispanic_1 AS DOUBLE)), 1) AS avg_hispanic_pct,
+    ROUND(AVG(TRY_CAST(d.white_1 AS DOUBLE)), 1) AS avg_white_pct
+FROM lake.education.demographics_2020 d
+WHERE SUBSTRING(d.dbn, 1, 2) = LPAD(?, 2, '0')
+"""
+
+DISTRICT_TEST_SCORES_SQL = """
+SELECT
+    year,
+    'ELA' AS subject,
+    COUNT(*) AS schools_tested,
+    ROUND(AVG(TRY_CAST(mean_scale_score AS DOUBLE)), 1) AS avg_mean_score
+FROM lake.education.ela_results
+WHERE report_category = 'School'
+  AND grade = 'All Grades'
+  AND SUBSTRING(geographic_subdivision, 1, 2) = LPAD(?, 2, '0')
+GROUP BY year
+UNION ALL
+SELECT
+    year,
+    'Math' AS subject,
+    COUNT(*) AS schools_tested,
+    ROUND(AVG(TRY_CAST(mean_scale_score AS DOUBLE)), 1) AS avg_mean_score
+FROM lake.education.math_results
+WHERE report_category = 'School'
+  AND grade = 'All Grades'
+  AND SUBSTRING(geographic_division, 1, 2) = LPAD(?, 2, '0')
+GROUP BY year
+ORDER BY year DESC, subject
+"""
+
+DISTRICT_ATTENDANCE_SQL = """
+SELECT
+    year,
+    COUNT(DISTINCT dbn) AS schools,
+    ROUND(AVG(TRY_CAST(attendance AS DOUBLE)), 1) AS avg_attendance,
+    ROUND(AVG(TRY_CAST(chronically_absent_1 AS DOUBLE)), 1) AS avg_chronic_absent
+FROM lake.education.chronic_absenteeism
+WHERE grade = 'All Grades'
+  AND SUBSTRING(dbn, 1, 2) = LPAD(?, 2, '0')
+GROUP BY year
+ORDER BY year DESC
+LIMIT 3
+"""
+
+DISTRICT_SAFETY_SQL = """
+SELECT
+    school_year,
+    COUNT(DISTINCT dbn) AS schools,
+    SUM(TRY_CAST(major_n AS INT)) AS major_incidents,
+    SUM(TRY_CAST(vio_n AS INT)) AS violent_incidents,
+    SUM(TRY_CAST(prop_n AS INT)) AS property_incidents,
+    SUM(TRY_CAST(register AS INT)) AS total_register
+FROM lake.education.school_safety
+WHERE CAST(geographical_district_code AS INT) = CAST(? AS INT)
+GROUP BY school_year
+ORDER BY school_year DESC
+LIMIT 3
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"education"})
+def district_report(
+    district: Annotated[str, Field(description="NYC school district number (1-32, 75, 79). Example: '2' or '02'")],
+    ctx: Context,
+) -> ToolResult:
+    """Aggregate education report for a NYC school district — school count, enrollment, demographics, average test scores, attendance, and safety across all schools in the district. Districts 1-32 are geographic, 75 is citywide special education, 79 is alternative schools. Example: district_report('2'). For individual school detail, use school_report(dbn). To find schools in a district, use school_search(district_number)."""
+    district = district.strip().lstrip('0') or '0'
+    if not district.isdigit() or int(district) < 1 or int(district) > 79:
+        raise ToolError("District must be 1-32, 75, or 79.")
+
+    padded = district.zfill(2)
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    _, agg_rows = _safe_query(db, DISTRICT_AGGREGATE_SQL, [padded])
+    _, test_rows = _safe_query(db, DISTRICT_TEST_SCORES_SQL, [padded, padded])
+    _, attend_rows = _safe_query(db, DISTRICT_ATTENDANCE_SQL, [padded])
+    _, safety_rows = _safe_query(db, DISTRICT_SAFETY_SQL, [padded])
+    _, school_rows = _safe_query(db, DISTRICT_SCHOOLS_SQL, [padded])
+
+    if not agg_rows or not agg_rows[0][0]:
+        raise ToolError(f"No data found for District {district}. Valid districts: 1-32, 75, 79.")
+
+    a = agg_rows[0]
+    lines = [f"DISTRICT {district} REPORT", "=" * 50]
+
+    lines.append(f"\nOVERVIEW")
+    lines.append(f"  Schools: {a[0]}")
+    lines.append(f"  Total students: {int(a[1] or 0):,}")
+    lines.append(f"  Average enrollment: {int(a[2] or 0):,}")
+
+    lines.append(f"\nDEMOGRAPHICS (district average)")
+    for label, val in [("Asian", a[3]), ("Black", a[4]), ("Hispanic", a[5]), ("White", a[6])]:
+        if val:
+            lines.append(f"  {label}: {val}%")
+
+    if test_rows:
+        lines.append(f"\nTEST SCORES (district average):")
+        for r in test_rows[:6]:
+            year, subject, count, avg_score = r
+            lines.append(f"  {year} {subject}: avg mean score {avg_score} ({count} schools)")
+
+    if attend_rows:
+        lines.append(f"\nATTENDANCE:")
+        for r in attend_rows:
+            year, schools, avg_attend, avg_chronic = r
+            lines.append(f"  {year}: {avg_attend}% avg attendance, {avg_chronic}% chronic absent ({schools} schools)")
+
+    if safety_rows:
+        lines.append(f"\nSAFETY:")
+        for r in safety_rows:
+            sy, schools, major, violent, prop, register = r
+            total = int(major or 0) + int(violent or 0) + int(prop or 0)
+            rate = round(total / int(register) * 1000, 1) if register and int(register) > 0 else 0
+            lines.append(f"  {sy}: {total} incidents across {schools} schools ({rate} per 1000 students)")
+
+    if school_rows:
+        lines.append(f"\nLARGEST SCHOOLS:")
+        for r in school_rows[:10]:
+            dbn, name, enrollment = r
+            enr_str = f"{enrollment:,}" if enrollment else "?"
+            lines.append(f"  {dbn} — {name} ({enr_str} students)")
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={"district": district, "school_count": a[0], "total_students": a[1]},
+        meta={"district": district, "query_time_ms": elapsed},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Commercial Vitality
 # ---------------------------------------------------------------------------
 
