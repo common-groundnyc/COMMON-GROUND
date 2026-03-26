@@ -11,6 +11,7 @@ from fastmcp import FastMCP, Context
 from fastmcp.server.lifespan import lifespan
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from response_middleware import OutputFormatterMiddleware
+from csv_export import generate_branded_csv, write_export
 from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddleware
 from fastmcp.server.dependencies import get_http_request, get_http_headers
 from fastmcp.tools.tool import ToolResult
@@ -1016,6 +1017,233 @@ async def app_lifespan(server):
             path = f"{GRAPH_CACHE_DIR}/{t}.parquet"
             conn.execute(f"COPY main.{t} TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
         (cache / "_built_at.txt").write_text(str(time.time()))
+
+    # --- Embedding cache (same pattern as graph cache) ---
+    EMBEDDING_CACHE_DIR = "/data/common-ground/embedding-cache"
+    EMBEDDING_TABLES = [
+        "catalog_embeddings",
+        "description_embeddings",
+        "entity_name_embeddings",
+        "building_vectors",
+    ]
+
+    def _embedding_cache_fresh():
+        import pathlib
+        cache = pathlib.Path(EMBEDDING_CACHE_DIR)
+        marker = cache / "_built_at.txt"
+        if not marker.exists():
+            return False
+        try:
+            built_ts = float(marker.read_text().strip())
+            age_hours = (time.time() - built_ts) / 3600
+            return age_hours < 24 and all(
+                (cache / f"{t}.parquet").exists() for t in EMBEDDING_TABLES
+            )
+        except (ValueError, OSError):
+            return False
+
+    def _load_embeddings_from_cache(conn):
+        for t in EMBEDDING_TABLES:
+            path = f"{EMBEDDING_CACHE_DIR}/{t}.parquet"
+            conn.execute(f"CREATE OR REPLACE TABLE main.{t} AS SELECT * FROM read_parquet('{path}')")
+
+    def _save_embeddings_to_cache(conn):
+        import pathlib
+        cache = pathlib.Path(EMBEDDING_CACHE_DIR)
+        cache.mkdir(parents=True, exist_ok=True)
+        for t in EMBEDDING_TABLES:
+            conn.execute(
+                f"COPY main.{t} TO '{EMBEDDING_CACHE_DIR}/{t}.parquet' "
+                f"(FORMAT PARQUET, COMPRESSION ZSTD)"
+            )
+        (cache / "_built_at.txt").write_text(str(time.time()))
+
+    def _create_hnsw_indexes(conn):
+        indexes = [
+            ("catalog_emb_idx", "catalog_embeddings", "embedding", "cosine"),
+            ("desc_emb_idx", "description_embeddings", "embedding", "cosine"),
+            ("name_emb_idx", "entity_name_embeddings", "embedding", "cosine"),
+            ("building_vec_idx", "building_vectors", "features", "l2sq"),
+        ]
+        for idx_name, table, col, metric in indexes:
+            try:
+                conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {idx_name}
+                    ON main.{table} USING HNSW ({col})
+                    WITH (metric = '{metric}')
+                """)
+            except Exception as e:
+                print(f"Warning: {idx_name} HNSW index failed: {e}", flush=True)
+
+    def _build_catalog_embeddings(conn, embed_batch):
+        rows = []
+        for schema_name, description in SCHEMA_DESCRIPTIONS.items():
+            rows.append((schema_name, "__schema__", description))
+        try:
+            table_comments = conn.execute("""
+                SELECT schema_name, table_name, comment
+                FROM ducklake_table_info()
+                WHERE comment IS NOT NULL AND comment != ''
+            """).fetchall()
+            for schema_name, table_name, comment in table_comments:
+                rows.append((schema_name, table_name, comment))
+        except Exception as e:
+            print(f"Warning: ducklake_table_info() unavailable: {e}", flush=True)
+        if not rows:
+            conn.execute("""
+                CREATE OR REPLACE TABLE main.catalog_embeddings (
+                    schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[384]
+                )
+            """)
+            return
+        texts = [r[2] for r in rows]
+        print(f"Building catalog embeddings ({len(texts)} entries)...", flush=True)
+        vecs = embed_batch(texts)
+        conn.execute("""
+            CREATE OR REPLACE TABLE main.catalog_embeddings (
+                schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[384]
+            )
+        """)
+        for (schema_name, table_name, description), vec in zip(rows, vecs):
+            conn.execute(
+                "INSERT INTO main.catalog_embeddings VALUES (?, ?, ?, ?::FLOAT[384])",
+                [schema_name, table_name, description, vec.tolist()]
+            )
+        print(f"Catalog embeddings done ({len(rows)} rows)", flush=True)
+
+    def _build_description_embeddings(conn, embed_batch):
+        sources = [
+            ("311", """
+                SELECT DISTINCT (complaint_type || ': ' || COALESCE(descriptor, '')) AS description
+                FROM lake.social_services.n311_service_requests
+                WHERE complaint_type IS NOT NULL
+                LIMIT 3000
+            """),
+            ("restaurant", """
+                SELECT DISTINCT violation_description AS description
+                FROM lake.health.restaurant_inspections
+                WHERE violation_description IS NOT NULL
+                LIMIT 500
+            """),
+            ("hpd", """
+                SELECT DISTINCT novdescription AS description
+                FROM lake.housing.hpd_violations
+                WHERE novdescription IS NOT NULL
+                LIMIT 1000
+            """),
+            ("oath", """
+                SELECT DISTINCT charge_1_code_description AS description
+                FROM lake.city_government.oath_hearings
+                WHERE charge_1_code_description IS NOT NULL
+                LIMIT 500
+            """),
+        ]
+        conn.execute("""
+            CREATE OR REPLACE TABLE main.description_embeddings (
+                source VARCHAR, description VARCHAR, embedding FLOAT[384]
+            )
+        """)
+        for source_name, sql in sources:
+            try:
+                descs = [r[0] for r in conn.execute(sql).fetchall() if r[0]]
+                if not descs:
+                    continue
+                print(f"Building description embeddings for {source_name} ({len(descs)} entries)...", flush=True)
+                vecs = embed_batch(descs)
+                for description, vec in zip(descs, vecs):
+                    conn.execute(
+                        "INSERT INTO main.description_embeddings VALUES (?, ?, ?::FLOAT[384])",
+                        [source_name, description, vec.tolist()]
+                    )
+                print(f"Description embeddings done for {source_name}", flush=True)
+            except Exception as e:
+                print(f"Warning: description embeddings for {source_name} failed: {e}", flush=True)
+
+    def _build_entity_name_embeddings(conn, embed_batch):
+        sources = [
+            ("owner", "SELECT DISTINCT owner_name AS name FROM main.graph_owners WHERE owner_name IS NOT NULL"),
+            ("corp_officer", "SELECT DISTINCT person_name AS name FROM main.graph_corp_people WHERE person_name IS NOT NULL"),
+            ("donor", "SELECT DISTINCT donor_name AS name FROM main.graph_campaign_donors WHERE donor_name IS NOT NULL"),
+            ("tx_party", "SELECT DISTINCT entity_name AS name FROM main.graph_tx_entities WHERE entity_name IS NOT NULL"),
+        ]
+        metas = []
+        for source_name, sql in sources:
+            try:
+                names = [r[0] for r in conn.execute(sql).fetchall() if r[0]]
+                for name in names:
+                    metas.append((source_name, name))
+                print(f"Fetched {len(names)} names from {source_name}", flush=True)
+            except Exception as e:
+                print(f"Warning: entity names from {source_name} failed: {e}", flush=True)
+        if not metas:
+            conn.execute("""
+                CREATE OR REPLACE TABLE main.entity_name_embeddings (
+                    source VARCHAR, name VARCHAR, embedding FLOAT[384]
+                )
+            """)
+            return
+        texts = [m[1] for m in metas]
+        print(f"Building entity name embeddings ({len(texts)} entries)...", flush=True)
+        vecs = embed_batch(texts)
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        import os
+        table = pa.table({
+            "source": [m[0] for m in metas],
+            "name": [m[1] for m in metas],
+            "embedding": [v.tolist() for v in vecs],
+        })
+        tmp_path = "/tmp/_entity_embeddings.parquet"
+        pq.write_table(table, tmp_path)
+        conn.execute(f"CREATE OR REPLACE TABLE main.entity_name_embeddings AS SELECT source, name, embedding::FLOAT[384] AS embedding FROM read_parquet('{tmp_path}')")
+        os.unlink(tmp_path)
+        print(f"Entity name embeddings done ({len(metas)} rows)", flush=True)
+
+    def _build_building_vectors(conn):
+        try:
+            conn.execute("""
+                CREATE OR REPLACE TABLE main.building_vectors AS
+                WITH base AS (
+                    SELECT
+                        b.bbl,
+                        b.borough,
+                        COALESCE(TRY_CAST(b.stories AS DOUBLE), 0) AS stories,
+                        COALESCE(TRY_CAST(b.units AS DOUBLE), 0) AS units,
+                        COALESCE(TRY_CAST(b.year_built AS DOUBLE), 0) AS year_built,
+                        COUNT(v.violation_id) AS viol_count,
+                        COUNT(CASE WHEN v.currentstatus = 'Open' THEN 1 END) AS open_viol_count
+                    FROM main.graph_buildings b
+                    LEFT JOIN main.graph_violations v ON b.bbl = v.bbl
+                    GROUP BY b.bbl, b.borough, b.stories, b.units, b.year_built
+                ),
+                normed AS (
+                    SELECT
+                        bbl,
+                        borough,
+                        stories / NULLIF(MAX(stories) OVER (), 0) AS n1,
+                        units / NULLIF(MAX(units) OVER (), 0) AS n2,
+                        year_built / NULLIF(MAX(year_built) OVER (), 0) AS n3,
+                        viol_count / NULLIF(MAX(viol_count) OVER (), 0) AS n4,
+                        open_viol_count / NULLIF(MAX(open_viol_count) OVER (), 0) AS n5,
+                        CASE WHEN units > 0 THEN viol_count::DOUBLE / units ELSE 0 END /
+                            NULLIF(MAX(CASE WHEN units > 0 THEN viol_count::DOUBLE / units ELSE 0 END) OVER (), 0) AS n6
+                    FROM base
+                )
+                SELECT
+                    bbl,
+                    borough,
+                    [COALESCE(n1, 0), COALESCE(n2, 0), COALESCE(n3, 0),
+                     COALESCE(n4, 0), COALESCE(n5, 0), COALESCE(n6, 0)]::FLOAT[6] AS features
+                FROM normed
+            """)
+            print("Building vectors done", flush=True)
+        except Exception as e:
+            print(f"Warning: building vectors failed: {e}", flush=True)
+            conn.execute("""
+                CREATE OR REPLACE TABLE main.building_vectors (
+                    bbl VARCHAR, borough VARCHAR, features FLOAT[6]
+                )
+            """)
 
     try:
         if _graph_cache_fresh():
@@ -2430,6 +2658,32 @@ async def app_lifespan(server):
     except Exception:
         explorations = []
 
+    # --- Vector embeddings for semantic search ---
+    embed_fn = None
+    try:
+        from embedder import create_embedder
+        embed_fn, embed_batch_fn = create_embedder("/app/model")
+        print("Embedding model loaded", flush=True)
+
+        if _embedding_cache_fresh():
+            print("Loading embeddings from Parquet cache...", flush=True)
+            _load_embeddings_from_cache(conn)
+        else:
+            print("Building embeddings (no cache or stale)...", flush=True)
+            _build_catalog_embeddings(conn, embed_batch_fn)
+            _build_description_embeddings(conn, embed_batch_fn)
+            if graph_ready:
+                _build_entity_name_embeddings(conn, embed_batch_fn)
+                _build_building_vectors(conn)
+            _save_embeddings_to_cache(conn)
+            print("Embeddings cached to Parquet", flush=True)
+
+        _create_hnsw_indexes(conn)
+        print("HNSW indexes created", flush=True)
+    except Exception as e:
+        print(f"Warning: vector search unavailable: {e}", flush=True)
+        embed_fn = None
+
     try:
         yield {
             "db": conn, "catalog": catalog,
@@ -2437,6 +2691,7 @@ async def app_lifespan(server):
             "marriage_parquet": MARRIAGE_PARQUET if marriage_available else None,
             "posthog_enabled": bool(ph_key),
             "explorations": explorations,
+            "embed_fn": embed_fn,
         }
     finally:
         if ph_key:
@@ -2471,12 +2726,14 @@ ROUTING — pick the FIRST match:
 * CORRUPTION/INFLUENCE → pay_to_play, shell_detector, flipper_detector
 * FIND DATA by keyword → data_catalog, then list_tables
 * CUSTOM QUERY → sql_query (read-only, all tables in 'lake' database)
+* EXPORT/DOWNLOAD/CSV → export_csv (branded CSV with row IDs and metadata)
 * DON'T KNOW WHAT TO EXPLORE → suggest_explorations
 
 POWER FEATURES:
 * Graph tools trace ownership networks across LLCs, property transactions, and corporate filings
 * text_search does full-text search across CFPB complaint narratives and restaurant violations
 * person_crossref links a name across every dataset (property, donations, businesses, violations)
+* export_csv generates branded CSV files with Common Ground watermark, row IDs, and full data attribution
 
 SUGGEST INTERESTING THINGS: When the user is exploring or says "what's interesting", call suggest_explorations to get pre-computed highlights — worst landlords, biggest property flips, corporate shell networks, neighborhood comparisons. Use these as conversation starters.
 
@@ -2495,6 +2752,7 @@ ALWAYS_VISIBLE = [
     "data_catalog",
     "list_schemas",
     "suggest_explorations",
+    "export_csv",
     # Building-centric (most common user intent)
     "building_profile",
     "landlord_watchdog",
@@ -2867,6 +3125,56 @@ def suggest_explorations(ctx: Context) -> str:
             lines.append(f"Dig deeper: {exp['follow_up']}")
         lines.append("")
     return "\n".join(lines)
+
+
+@mcp.tool(annotations=READONLY, tags={"discovery"})
+def export_csv(
+    sql: Annotated[str, Field(description="SQL query to export. Use the exact query that produced the data you want. All tables in 'lake' database. Example: SELECT * FROM lake.housing.hpd_violations WHERE bbl = '1000670001'")],
+    ctx: Context,
+    name: Annotated[str, Field(description="Short name for the export file. Example: 'violations_10003', 'worst_landlords_brooklyn'")] = "export",
+    sources: Annotated[str, Field(description="Comma-separated data sources for attribution. Example: 'HPD violations, DOB permits'")] = "",
+) -> str:
+    """Export query results as a branded CSV file with Common Ground watermark, row IDs, and metadata. Use this when the user wants to download data, save results, get a spreadsheet, or export to CSV. The file is written to the server's export directory and the path is returned. Returns a preview of the first rows. Maximum 100,000 rows per export."""
+    _validate_sql(sql)
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    with _db_lock:
+        try:
+            cur = db.execute(sql.strip().rstrip(";"))
+            cols = [d[0] for d in cur.description] if cur.description else []
+            rows = cur.fetchmany(100_000)
+        except duckdb.Error as e:
+            raise ToolError(f"Export query failed: {e}. Use data_catalog(keyword) to find table names.")
+
+    if not cols:
+        raise ToolError("Query returned no columns. Check your SQL.")
+
+    elapsed = round((time.time() - t0) * 1000)
+    source_list = [s.strip() for s in sources.split(",") if s.strip()] if sources else []
+
+    csv_text = generate_branded_csv(
+        cols, rows,
+        sql=sql,
+        sources=source_list,
+    )
+
+    path = write_export(csv_text, name)
+
+    preview_rows = rows[:5]
+    preview_lines = [" | ".join(str(c) for c in cols)]
+    preview_lines.append("-" * len(preview_lines[0]))
+    for row in preview_rows:
+        preview_lines.append(" | ".join(str(v) if v is not None else "" for v in row))
+
+    return (
+        f"Exported {len(rows):,} rows to CSV ({elapsed}ms).\n\n"
+        f"File: {path}\n"
+        f"Size: {len(csv_text):,} bytes\n\n"
+        f"Preview (first {len(preview_rows)} rows):\n"
+        + "\n".join(preview_lines)
+        + (f"\n\n... and {len(rows) - 5:,} more rows" if len(rows) > 5 else "")
+    )
 
 
 @mcp.tool(annotations=READONLY, tags={"discovery"})
