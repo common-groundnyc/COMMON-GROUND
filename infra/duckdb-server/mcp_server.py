@@ -2354,7 +2354,7 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"discovery"})
 def sql_query(sql: Annotated[str, Field(description="Read-only SQL. Tables in 'lake' database. Example: SELECT * FROM lake.housing.hpd_violations LIMIT 10")], ctx: Context) -> ToolResult:
     """Execute a read-only SQL query against the NYC data lake (294 tables, 60M+ rows). Use this for custom queries when no domain tool fits. All tables in 'lake' database. Only SELECT/WITH/EXPLAIN/DESCRIBE allowed. Example: SELECT * FROM lake.housing.hpd_violations LIMIT 10. Start with data_catalog(keyword) or list_schemas() to discover tables."""
     _validate_sql(sql)
@@ -2370,7 +2370,7 @@ def sql_query(sql: Annotated[str, Field(description="Read-only SQL. Tables in 'l
     )
 
 
-@mcp.tool(annotations=ADMIN)
+@mcp.tool(annotations=ADMIN, tags={"discovery"})
 def sql_admin(sql: Annotated[str, Field(description="DDL statement. Only CREATE OR REPLACE VIEW allowed")], ctx: Context) -> str:
     """Create SQL views on the NYC data lake (CREATE OR REPLACE VIEW only). Use this to parse JSON columns, add computed columns, or create reusable derived tables. No other DDL allowed. Example: CREATE OR REPLACE VIEW lake.housing.v_designated_buildings AS SELECT *, json_extract_string(the_geom, '$.coordinates[0]')::DOUBLE AS lon FROM lake.housing.designated_buildings. For read-only queries, use sql_query() instead."""
     stripped = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
@@ -2396,7 +2396,7 @@ def sql_admin(sql: Annotated[str, Field(description="DDL statement. Only CREATE 
             raise ToolError(f"DDL error: {e}")
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"discovery"})
 def list_schemas(ctx: Context) -> str:
     """List all 12 schemas in the NYC data lake with table counts and total rows. Schemas: housing, public_safety, health, social_services, financial, environment, recreation, education, business, transportation, city_government, census. Use list_tables(schema) next to see individual tables in a schema."""
     catalog = ctx.lifespan_context["catalog"]
@@ -2408,7 +2408,7 @@ def list_schemas(ctx: Context) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"discovery"})
 def list_tables(schema: Annotated[str, Field(description="Schema name. Use list_schemas() to see available schemas")], ctx: Context) -> ToolResult:
     """List all tables in a specific schema with row counts and column counts. Use after list_schemas() to drill into a domain. Fuzzy-matches schema names. For column-level detail, follow up with describe_table(schema, table). For keyword search across all schemas, use data_catalog(keyword) instead."""
     catalog = ctx.lifespan_context["catalog"]
@@ -2423,7 +2423,7 @@ def list_tables(schema: Annotated[str, Field(description="Schema name. Use list_
     return make_result(f"Schema '{schema}': {len(tables)} tables.", cols, rows)
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"discovery"})
 def describe_table(schema: Annotated[str, Field(description="Schema name")], table: Annotated[str, Field(description="Table name. Use list_tables(schema) to see available tables")], ctx: Context) -> ToolResult:
     """Show column names, types, and nullability for a specific table in the NYC data lake. Use after data_catalog() or list_tables() to understand a table's structure before querying with sql_query(). Fuzzy-matches both schema and table names. Parameters: schema (e.g. 'housing'), table (e.g. 'hpd_violations')."""
     db = ctx.lifespan_context["db"]
@@ -2462,7 +2462,7 @@ def describe_table(schema: Annotated[str, Field(description="Schema name")], tab
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"building", "housing"})
 def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
     """Quick building dossier by BBL — address, units, stories, plus violation and complaint counts. Use this for a fast overview. For deeper investigation, follow up with: landlord_watchdog(bbl) for the owner's full portfolio and slumlord score, enforcement_web(bbl) for multi-agency enforcement actions, property_history(bbl) for ACRIS transaction chain since 1966, building_story(bbl) for historical narrative. BBL is 10 digits: borough(1) + block(5) + lot(4). Example: 1000670001"""
     if not re.match(r"^\d{10}$", bbl):
@@ -2585,7 +2585,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"housing"})
 def complaints_by_zip(zip_code: ZIP, ctx: Context, days: Annotated[int, Field(description="Look-back period in days. Default: 365", ge=1, le=3650)] = 365) -> ToolResult:
     """Aggregate HPD housing complaints and 311 service requests for a NYC ZIP code over a time period. Use this for complaint volume and category breakdowns by ZIP. Parameters: zip_code (5 digits), days (look-back period, default 365). For building-specific violations, use owner_violations(bbl). For full neighborhood context, use neighborhood_portrait(zipcode)."""
     if not re.match(r"^\d{5}$", zip_code):
@@ -2615,7 +2615,7 @@ def complaints_by_zip(zip_code: ZIP, ctx: Context, days: Annotated[int, Field(de
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"housing"})
 def owner_violations(bbl: BBL, ctx: Context) -> ToolResult:
     """Get HPD housing violations and DOB/ECB building violations for a specific NYC property by BBL. Use this for the violation list at one building. For the full landlord portfolio analysis, use landlord_watchdog(bbl). For multi-agency enforcement (FDNY, OATH, restaurants, facades), use enforcement_web(bbl). BBL is 10 digits: borough(1) + block(5) + lot(4). Example: 1000670001"""
     if not re.match(r"^\d{10}$", bbl):
@@ -2643,7 +2643,7 @@ def owner_violations(bbl: BBL, ctx: Context) -> ToolResult:
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"discovery"})
 def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search term — fuzzy matched against table names, descriptions, column names. Examples: 'eviction', 'restaurant', 'arrest'")] = "") -> ToolResult:
     """Search the NYC data lake for tables matching a keyword — fuzzy matching, typos OK. START HERE if you don't know which tool to use. Searches table names, descriptions, and column names. Call with no keyword for a schema overview. Examples: 'eviction', 'restaurant', 'arrest', 'school', 'rat'. After finding a table, use describe_table(schema, table) for columns, then sql_query() to query it."""
     if not keyword.strip():
@@ -2671,7 +2671,7 @@ def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search
     return make_result(summary, cols, rows)
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"discovery"})
 def text_search(query: Annotated[str, Field(description="Search keywords. Examples: 'identity theft credit report', 'mice droppings kitchen'")], ctx: Context, corpus: Annotated[str, Field(description="Which data to search: 'financial' (CFPB complaints), 'restaurants' (inspection violations), or 'all' (both)")] = "all", limit: Annotated[int, Field(description="Max results (1-100). Default: 20", ge=1, le=100)] = 20) -> ToolResult:
     """Full-text keyword search across NYC open data records (ILIKE on lake tables). Searches CFPB consumer financial complaints and restaurant inspection violation narratives. Use this when you need to find specific text in records rather than aggregate data. Parameters: query (search text), corpus ('financial', 'restaurants', or 'all'). Examples: 'identity theft credit report', 'mice droppings kitchen'. For table discovery, use data_catalog() instead."""
     if not query.strip():
@@ -2755,7 +2755,7 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
     return make_result(summary, out_cols, all_results, {"query_time_ms": elapsed})
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"services"})
 def restaurant_lookup(name: Annotated[str, Field(description="Restaurant name — fuzzy matched, typos OK. Example: 'Wo Hop', 'joes pizza'")], ctx: Context, zipcode: Annotated[str, Field(description="Optional ZIP to narrow results")] = "", borough: Annotated[str, Field(description="Optional borough filter: Manhattan, Brooklyn, Bronx, Queens, Staten Island")] = "") -> ToolResult:
     """Look up a NYC restaurant by name to see its health department grade, inspection history, and food safety violations. Fuzzy matching — typos OK. Use this when someone asks about a specific restaurant. Parameters: name (restaurant name), zipcode (optional), borough (optional). Examples: restaurant_lookup("Wo Hop"), restaurant_lookup("joes pizza", borough="Manhattan"). For area-wide restaurant stats, use neighborhood_portrait(zipcode)."""
     if len(name.strip()) < 2:
@@ -2860,7 +2860,7 @@ def restaurant_lookup(name: Annotated[str, Field(description="Restaurant name �
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"neighborhood"})
 def area_snapshot(lat: Annotated[float, Field(description="Latitude within NYC (40.4-41.0). Example: 40.7128", ge=40.4, le=41.0)], lng: Annotated[float, Field(description="Longitude within NYC (-74.3 to -73.6). Example: -74.0060", ge=-74.3, le=-73.6)], ctx: Context, radius_m: Annotated[int, Field(description="Search radius in meters (50-2000). Default: 500", ge=50, le=2000)] = 500) -> ToolResult:
     """What's nearby a NYC location — spatial radius query across crimes, restaurants, subway stops, 311 complaints, rats, and trees. Use this for location-based questions with coordinates. Parameters: lat, lng, radius_m (default 500). Examples: area_snapshot(40.7128, -74.0060) for Lower Manhattan. For ZIP-based analysis, use neighborhood_portrait(zipcode). For comparing neighborhoods, use neighborhood_compare([zips])."""
     if not (40.4 <= lat <= 41.0 and -74.3 <= lng <= -73.6):
@@ -2983,7 +2983,7 @@ def area_snapshot(lat: Annotated[float, Field(description="Latitude within NYC (
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"neighborhood"})
 def neighborhood_compare(zip_codes: Annotated[list[str], Field(description="2-7 NYC ZIP codes to compare. Example: ['10003', '11201', '11215']")], ctx: Context) -> ToolResult:
     """Compare 2-7 NYC neighborhoods side-by-side across quality-of-life dimensions: crime, restaurants, housing complaints, noise, income, commute time, parks, and education. Use this when comparing ZIPs for living, working, or investing. Parameters: zip_codes (list of 2-7 ZIP strings). Example: neighborhood_compare(["10003", "11201", "11215"]). For a single neighborhood deep-dive, use neighborhood_portrait(zipcode)."""
     if not zip_codes or len(zip_codes) < 2:
@@ -3288,7 +3288,7 @@ WHERE postcode IN (SELECT UNNEST(?::VARCHAR[]))
 """
 
 
-@mcp.tool()
+@mcp.tool(tags={"neighborhood"})
 def gentrification_tracker(zip_codes: Annotated[list[str], Field(description="1-5 NYC ZIP codes to track. Example: ['10009', '11216']")], ctx: Context) -> ToolResult:
     """Track gentrification and displacement pressure for NYC neighborhoods using quarterly signals since 2020 plus 4-quarter forecasts. Covers: new restaurant openings, HPD housing complaints, noise/NYPD calls, DOB construction violations, IRS income trends, HMDA investor/lending disparities, evictions, rezonings, and affordable housing loss. Use this for gentrification, displacement, rent pressure, or development questions. Parameters: zip_codes (1-5 ZIPs). Example: gentrification_tracker(["11237", "11221"]). For a broader neighborhood profile, use neighborhood_portrait(zipcode)."""
     if not zip_codes or len(zip_codes) > 5:
@@ -3749,7 +3749,7 @@ LIMIT 500
 """
 
 
-@mcp.tool()
+@mcp.tool(tags={"safety"})
 def safety_report(precinct: Annotated[int, Field(description="NYPD precinct number 1-123. Example: 75 (East New York), 14 (Midtown South)", ge=1, le=123)], ctx: Context) -> ToolResult:
     """Comprehensive safety & policing report for an NYPD precinct (1-123). Crime trends, arrest demographics, enforcement intensity, shootings, summons, hate crimes, CCRB misconduct, Use of Force, and officer discipline. Use this for crime/safety/policing questions. Need a ZIP instead of precinct? Use neighborhood_portrait(zip) which includes safety context. Examples: safety_report(75) for East New York, safety_report(14) for Midtown South."""
     if precinct < 1 or precinct > 123:
@@ -4098,7 +4098,7 @@ def _fill_placeholders(sql_template, bbls):
     return sql_template.replace("{placeholders}", ph)
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"housing"})
 def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
     """Investigate a landlord's FULL portfolio — all buildings, violations, complaints, evictions, enforcement flags (AEP, CONH, Underlying Conditions), and slumlord score. Use this when a user asks about a landlord, building owner, or tenant rights. For ownership NETWORK analysis (graph traversal, shell companies), use landlord_network(bbl). For LLC piercing, use llc_piercer(entity_name). BBL is 10 digits: borough(1) + block(5) + lot(4). Example: 1000670001. Returns actionable next steps: hotlines, tenant rights, legal aid contacts."""
     if not re.match(r"^\d{10}$", bbl):
@@ -4480,7 +4480,7 @@ GROUP BY communitydistrict
 """
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"environment"})
 def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
     """Environmental justice analysis for a NYC ZIP code — pollution burden, air quality (PM2.5, NO2), asthma rates, environmental racism indicators, waste facility proximity, EPA-regulated sites, toxic exposure, flood and heat vulnerability, and 311 environmental complaints. Use this for pollution, air quality, asthma, environmental racism, EJ, waste, or toxic exposure questions. Parameters: zipcode (5 digits). Example: 10456 (South Bronx). For general neighborhood info, use neighborhood_portrait(zipcode)."""
     if not re.match(r"^\d{5}$", zipcode):
@@ -4790,7 +4790,7 @@ LIMIT 10
 """
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"services"})
 def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What you're looking for: 'food', 'health', 'childcare', 'youth', 'benefits', 'legal', 'shelter', 'wifi', 'senior', or 'all'")], ctx: Context) -> ToolResult:
     """Find food pantries, SNAP benefits, health clinics, shelters, legal aid, childcare, youth programs, and other social services near a NYC ZIP code. Use this when someone needs help finding resources, benefits, or community services. Parameters: zipcode (5 digits), need (category: 'food', 'health', 'childcare', 'youth', 'benefits', 'legal', 'shelter', 'wifi', 'senior', 'immigration', or 'all'). Example: resource_finder("10456", "food")."""
     if not re.match(r"^\d{5}$", zipcode):
@@ -5017,7 +5017,7 @@ LIMIT 1
 """
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"services"})
 def school_report(dbn: Annotated[str, Field(description="School DBN: district(2) + borough letter(1) + number(3). Example: 02M001. Borough: M=Manhattan, X=Bronx, K=Brooklyn, Q=Queens, R=Staten Island")], ctx: Context) -> ToolResult:
     """Comprehensive school performance report for a NYC public school by DBN — test scores (ELA and Math), enrollment, performance ratings, and education quality. Use this when someone asks about a specific school. DBN format: district(2) + borough letter + number(3). Borough letters: M=Manhattan, X=Bronx, K=Brooklyn, Q=Queens, R=Staten Island. Examples: 02M001 (PS 1, Manhattan), 13K330 (Brooklyn). For neighborhood-level education stats, use neighborhood_portrait(zipcode)."""
     dbn = dbn.strip().upper()
@@ -5188,7 +5188,7 @@ ORDER BY cnt DESC LIMIT 5
 """
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"services"})
 def commercial_vitality(zipcode: ZIP, ctx: Context) -> ToolResult:
     """Measure business licenses, permits, commercial economic activity, and storefront health for a NYC ZIP code. Covers active licenses, restaurant count, DOB construction permits, sidewalk cafes, SBS certified businesses, and commercial 311 complaints. Use this for business vitality, economic activity, or storefront vacancy questions. Parameters: zipcode (5 digits). Example: 10003 (East Village). For neighborhood lifestyle context, use neighborhood_portrait(zipcode)."""
     if not re.match(r"^\d{5}$", zipcode):
@@ -5373,7 +5373,7 @@ LIMIT 200
 """
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"building", "housing"})
 def building_story(bbl: BBL, ctx: Context) -> ToolResult:
     """The narrative history of a NYC building — its era, what it's survived, complaint character, neighborhood comparison, and milestones witnessed. Use this for a storytelling view of a building's life. Differs from building_profile (quick stats) and building_context (era/contemporaries). Parameters: bbl (10 digits: borough(1) + block(5) + lot(4)). Example: 1000670001. For quick stats, use building_profile(bbl). For era context, use building_context(bbl)."""
 
@@ -5644,7 +5644,7 @@ GROUP BY industry ORDER BY cnt DESC LIMIT 8
 """
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"neighborhood"})
 def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
     """What makes a NYC neighborhood distinctive — cuisine fingerprint, building stock, noise level, business mix, and how it compares to the city. Use this for neighborhood questions by ZIP. For comparing multiple ZIPs side-by-side, use neighborhood_compare([zips]). For environmental justice analysis, use environmental_justice(zipcode). For gentrification tracking, use gentrification_tracker([zips]). ZIP: 5 digits. Example: 10003 (East Village), 11201 (Downtown Brooklyn)."""
 
@@ -5845,7 +5845,7 @@ WHERE bldgclass = ?
 """
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"building"})
 def nyc_twins(bbl: BBL, ctx: Context) -> ToolResult:
     """Find statistically similar buildings (twins) across NYC — same era, same building class, similar size — and compare violation rates and assessed values. Use this to benchmark one building against its peers in other boroughs. Parameters: bbl (10 digits). Example: 1000670001. For the building's own history, use building_story(bbl). For block-level trends, use block_timeline(bbl)."""
 
@@ -6023,7 +6023,7 @@ ORDER BY yr DESC, cnt DESC
 """
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"building"})
 def block_timeline(bbl: BBL, ctx: Context) -> ToolResult:
     """A NYC block through time — all buildings, construction permits by year, restaurant scene, 311 complaint trends, and HPD complaint patterns over the last decade. Uses the block portion of the BBL to find all buildings on the block. Parameters: bbl (10 digits). Example: 1000670001. For a single building's story, use building_story(bbl). For neighborhood-wide trends, use neighborhood_portrait(zipcode)."""
 
@@ -6245,7 +6245,7 @@ WHERE postcode = ?
 """
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"building", "housing"})
 def building_context(bbl: BBL, ctx: Context) -> ToolResult:
     """What was happening when a NYC building was born — famous building contemporaries, citywide construction activity that year, and historical era context. Differs from building_story (narrative history) and building_profile (quick stats). Use this for historical/architectural curiosity about a building's era. Parameters: bbl (10 digits). Example: 1000670001. For the building's full life narrative, use building_story(bbl)."""
 
@@ -6402,7 +6402,7 @@ def _require_graph(ctx):
         raise ToolError("Property graph unavailable — DuckPGQ extension not loaded.")
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"graph", "housing"})
 def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
     """Discover the full ownership NETWORK around a building using DuckPGQ graph traversal. Finds the owner, ALL their other buildings, and aggregated violation stats across the portfolio. Use this for ownership graph analysis. For a simpler portfolio view, use landlord_watchdog(bbl). For hidden ownership clusters (WCC algorithm), use ownership_clusters(). For worst landlords ranking, use worst_landlords(). BBL is 10 digits: borough(1) + block(5) + lot(4). Example: 1000670001"""
     _require_graph(ctx)
@@ -6663,7 +6663,7 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"graph"})
 def ownership_graph(bbl: BBL, depth: Annotated[int, Field(description="Hops through ownership network (1-6). Default: 2", ge=1, le=6)] = 2, ctx: Context = None) -> ToolResult:
     """BFS graph traversal from one BBL through shared-owner links to find connected buildings at increasing depths. Depth 1 = buildings sharing a direct owner. Depth 2+ = indirect connections through shared ownership chains. Use this for ownership graph exploration from a specific building. Differs from ownership_clusters (WCC across all buildings) and ownership_cliques (clustering coefficient). Parameters: bbl (10 digits), depth (1-6, default 2). For portfolio-level analysis, use landlord_network(bbl)."""
     _require_graph(ctx)
@@ -6713,7 +6713,7 @@ def ownership_graph(bbl: BBL, depth: Annotated[int, Field(description="Hops thro
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"graph"})
 def ownership_clusters(ctx: Context, min_buildings: Annotated[int, Field(description="Min buildings per cluster. Default: 5", ge=2, le=100)] = 5, borough: Annotated[str, Field(description="Borough filter. Empty for all boroughs")] = "") -> ToolResult:
     """Find hidden ownership networks using Weakly Connected Components (WCC) across ALL NYC buildings — groups of buildings linked through shared landlords, even across different corporate names. Differs from ownership_graph (BFS from one BBL) and ownership_cliques (clustering coefficient). Use this to discover large ownership empires. Parameters: min_buildings (default 5), borough (optional filter). For worst landlords ranked by violations, use worst_landlords()."""
     _require_graph(ctx)
@@ -6793,7 +6793,7 @@ def ownership_clusters(ctx: Context, min_buildings: Annotated[int, Field(descrip
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"graph"})
 def ownership_cliques(ctx: Context, top_n: Annotated[int, Field(description="Number of results. Default: 20", ge=1, le=100)] = 20) -> ToolResult:
     """Find buildings at the center of tight-knit ownership cliques using Local Clustering Coefficient (LCC). High LCC means a building's co-owned neighbors are also co-owned with each other — indicating concentrated ownership (potential shell company networks or portfolio landlords). Differs from ownership_graph (BFS from one BBL) and ownership_clusters (WCC across all buildings). Parameters: top_n (default 20). For shell company detection, use shell_detector()."""
     _require_graph(ctx)
@@ -6844,7 +6844,7 @@ def ownership_cliques(ctx: Context, top_n: Annotated[int, Field(description="Num
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"graph", "housing"})
 def worst_landlords(ctx: Context, borough: Annotated[str, Field(description="Borough name or code 1-5. Empty for all boroughs")] = "", top_n: Annotated[int, Field(description="Number of results. Default: 25", ge=1, le=100)] = 25) -> ToolResult:
     """Rank the worst landlords in NYC by a composite slumlord score across violations, litigations, harassment findings, AEP buildings, tax liens, evictions, and complaints. Uses DuckPGQ ownership graph to aggregate across entire portfolios. Use this for 'who are the worst landlords' questions. Parameters: borough (optional filter), top_n (default 25). For a specific landlord's portfolio, use landlord_watchdog(bbl) or landlord_network(bbl)."""
     _require_graph(ctx)
@@ -6960,7 +6960,7 @@ def worst_landlords(ctx: Context, borough: Annotated[str, Field(description="Bor
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"investigation"})
 def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
     """Pierce the LLC veil — find the people and addresses behind a shell company or LLC using NYS Department of State corporation filings, ACRIS property transaction records, and HPD registration contacts. Use this for LLC piercing, corporate ownership, or shell company investigation. Parameters: entity_name (company or person name, min 3 chars). Example: 'GREENPOINT HOLDINGS LLC'. For corporate network graph traversal, use corporate_web(entity_name)."""
     if len(entity_name.strip()) < 3:
@@ -7123,7 +7123,7 @@ def _resolve_name_variants(db, name: str) -> list[tuple[str, str]]:
         return []
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"investigation"})
 def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     """Full X-ray of a person or entity across ALL NYC datasets — corporations, businesses, restaurants, campaign donations, expenditures, OATH hearings, ACRIS transactions, property, DOB permits, payroll, marriage records, attorney registrations, and more. USE THIS when someone asks about a person or company by name. Handles name variations — 'Barton Perlbinder' matches 'PERLBINDER, BARTON M'. For probabilistic cross-referencing with Splink matching, use person_crossref(name). For political influence specifically, use pay_to_play(name)."""
     if len(name.strip()) < 3:
@@ -7872,7 +7872,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"investigation"})
 def marriage_search(surname: Annotated[str, Field(description="Last name to search. Matches both bride and groom. Example: 'SMITH'")], first_name: Annotated[str, Field(description="Optional first name filter. Example: 'JOHN'")] = "", ctx: Context = None) -> ToolResult:
     """Search NYC marriage records (1866-2017, ~10M records) by bride or groom surname. Combines marriage certificates 1866-1937 and marriage index 1950-2017. Use this to find marriage record matches, confirm family relationships, or trace wedding and family history. Parameters: surname (required), first_name (optional filter). Example: marriage_search("PERLBINDER", "BARTON"). For broader person search, use entity_xray(name) or person_crossref(name)."""
     if len(surname.strip()) < 2:
@@ -7976,7 +7976,7 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"finance"})
 def property_history(bbl: BBL, ctx: Context) -> ToolResult:
     """Full ACRIS transaction chain for a NYC property since 1966 — every sale, mortgage, satisfaction, and assignment. Shows who bought from whom, when, for how much, plus mortgage and flip detection. Use this for property ownership history, sale price, or deed questions. Parameters: bbl (10 digits). Example: 1000670001. For multi-agency enforcement, use enforcement_web(bbl). For landlord portfolio, use landlord_watchdog(bbl)."""
     if not re.match(r"^\d{10}$", bbl):
@@ -8121,7 +8121,7 @@ def property_history(bbl: BBL, ctx: Context) -> ToolResult:
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"finance"})
 def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
     """Multi-agency enforcement web for a NYC property — HPD violations, DOB ECB violations, FDNY violations, OATH hearings, restaurant inspections, DOB complaints, facade safety (FISP), boiler safety, and SRO status. Shows every agency that has taken action at this address with severity scoring. Use this for enforcement or inspection history questions. Parameters: bbl (10 digits). Example: 1000670001. For building-level violations only, use owner_violations(bbl). For landlord portfolio, use landlord_watchdog(bbl)."""
     if not re.match(r"^\d{10}$", bbl):
@@ -8405,7 +8405,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"finance"})
 def flipper_detector(ctx: Context, borough: Annotated[str, Field(description="Borough name or code 1-5. Empty for all boroughs")] = "", months: Annotated[int, Field(description="Max months between buy and sell. Default: 24", ge=1, le=120)] = 24, min_profit_pct: Annotated[int, Field(description="Min price increase percentage. Default: 20", ge=1, le=1000)] = 20) -> ToolResult:
     """Detect property flips — investors who buy and resell NYC properties for profit within a short window. Finds house flipping, investor speculation, and profit patterns. Cross-references with DOB permits (renovation) and tax lien sales (distressed acquisition). Use this for flip detection, investor speculation, or profit analysis questions. Parameters: borough (optional), months (max hold period, default 24), min_profit_pct (default 20). For a specific property's transaction history, use property_history(bbl)."""
     db = ctx.lifespan_context["db"]
@@ -8558,7 +8558,7 @@ def flipper_detector(ctx: Context, borough: Annotated[str, Field(description="Bo
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"graph", "finance"})
 def transaction_network(name: NAME, ctx: Context) -> ToolResult:
     """Trace a person or entity through NYC property transactions using DuckPGQ graph traversal — all properties bought/sold, co-transactors on the same deeds, and up to 3 hops through the transaction network. Reveals hidden connections between buyers, sellers, and shell companies. Use this for property transaction network questions. Parameters: name (person or company). Example: 'BLACKSTONE'. For a single property's history, use property_history(bbl). For corporate network, use corporate_web(entity_name)."""
     _require_graph(ctx)
@@ -8672,7 +8672,7 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"graph", "investigation"})
 def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
     """Expose the shell company and LLC corporate network behind an entity using DuckPGQ. Traverses NYS corporation filings to find connected LLCs, shared officers, shared incorporation addresses, and links to HPD landlord registrations. Use this for shell company investigation, corporate network mapping, or shared officer analysis. Parameters: entity_name (company or person). Example: 'KUSHNER'. For LLC piercing, use llc_piercer(entity_name). For property transaction networks, use transaction_network(name)."""
     _require_graph(ctx)
@@ -8814,7 +8814,7 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"finance", "investigation"})
 def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     """Trace corruption, donation, lobbying, and contract political influence networks using DuckPGQ. Starting from any donor, candidate, lobbyist, or vendor — follows the money through campaign donations, lobbying registrations, and city contracts. Exposes pay-to-play patterns. Use this for political corruption, donation, lobbying, or contract influence questions. Parameters: entity_name (person or company). Example: 'CATSIMATIDIS'. For broader entity search, use entity_xray(name)."""
     _require_graph(ctx)
@@ -9011,7 +9011,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"graph"})
 def contractor_network(name_or_license: Annotated[str, Field(description="Contractor name or license number. Example: 'NACHMAN PLUMBING' or '0042962'")], ctx: Context) -> ToolResult:
     """Expose a contractor's full NYC footprint using DuckPGQ — all buildings worked on, violation rates at those buildings, co-workers (other contractors on same buildings), and owners served. Reveals contractor rings and safety patterns across 4M+ DOB permits. Use this for contractor investigation, construction safety, or contractor network questions. Parameters: name_or_license (contractor name or license number). Example: 'NACHMAN PLUMBING' or '0042962'."""
     _require_graph(ctx)
@@ -9163,7 +9163,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
     )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"graph", "investigation"})
 def shell_detector(ctx: Context, borough: Annotated[str, Field(description="Borough/county filter. Empty for all")] = "", min_corps: Annotated[int, Field(description="Min corporations per cluster. Default: 5", ge=2, le=50)] = 5) -> ToolResult:
     """Detect shell company clusters connected through shared officers using DuckPGQ Weakly Connected Components. Reveals hidden LLC corporate networks — groups of companies linked through the same people, even across different corporate names. Use this for shell company detection, corporate opacity, or beneficial owner investigation. Parameters: borough (optional county filter), min_corps (default 5). For a specific entity's corporate web, use corporate_web(entity_name). For LLC piercing, use llc_piercer(entity_name)."""
     _require_graph(ctx)
@@ -9243,7 +9243,7 @@ def shell_detector(ctx: Context, borough: Annotated[str, Field(description="Boro
 # Cross-Reference Dashboard (Phase 08)
 # ---------------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"investigation"})
 def person_crossref(name: NAME, ctx: Context) -> ToolResult:
     """Find every appearance of a person across the NYC data lake using Splink probabilistic matching. Matches the same person across 44 source tables even when name formats differ (e.g., 'Barton Perlbinder' matches 'PERLBINDER, BARTON M'). Use this for thorough cross-referencing. For a quick entity scan, use entity_xray(name). Returns: all source tables, record counts, addresses, cities, zips, and cluster details."""
     db = ctx.lifespan_context["db"]
@@ -9375,7 +9375,7 @@ def person_crossref(name: NAME, ctx: Context) -> ToolResult:
         )
 
 
-@mcp.tool(annotations=READONLY)
+@mcp.tool(annotations=READONLY, tags={"investigation"})
 def top_crossrefs(
     ctx: Context,
     min_tables: Annotated[int, Field(description="Min data tables a person appears in. Default: 5", ge=1, le=44)] = 5,
