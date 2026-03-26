@@ -107,7 +107,7 @@ Plans:
 
 Plans:
 - [x] 07-01: Build cross-domain bridge tables + unified property graph (nyc_unified) — 578K links, 597K multi-domain entities ✓
-- [ ] 07-02: Build unified graph, verify cross-domain MATCH queries work
+- [x] 07-02: Full MCP tool regression (12/13 pass) + cross-domain verification + comprehensive graph stats ✓
 
 ### Phase 8: PageRank Integration
 **Goal**: Add PageRank-powered tools — rank most connected/influential entities in each domain graph AND the unified graph. "Who are the most connected landlords in Brooklyn?" "Most influential political donors?" Already tested and working in DuckPGQ, just not wired up.
@@ -151,7 +151,7 @@ Plans:
 | 4. Corporate Web Rebuild | 2/2 | Complete | 2026-03-26 |
 | 5. Transaction Expansion | 1/1 | Complete | 2026-03-26 |
 | 6. Influence Expansion | 1/1 | Complete | 2026-03-26 |
-| 7. Cross-Domain Graph | 1/2 | In progress | — |
+| 7. Cross-Domain Graph | 2/2 | Complete | 2026-03-26 |
 | 8. PageRank Integration | 0/1 | Not started | — |
 | 9. Path-Finding Tools | 0/2 | Not started | — |
 | 10. Validation & Hardening | 0/2 | Not started | — |

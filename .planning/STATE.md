@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 7 in progress — Cross-Domain Unified Graph (plan 1 of 2 complete)
+**Current focus:** Phase 7 complete — Cross-Domain Unified Graph (2 of 2 complete). Ready for Phase 8 (PageRank)
 
 ## Current Position
 
-Phase: 7 of 10 (Cross-Domain Unified Graph) — IN PROGRESS
-Plan: 1 of 2 complete
-Status: 4 bridge tables (578K links) + unified entity summary (597K multi-domain entities) + nyc_unified property graph (5 vertex tables, 5 edge types). All MATCH queries verified. No regressions.
-Last activity: 2026-03-26 — Completed 07-01 (cross-domain bridge tables + unified property graph)
+Phase: 7 of 10 (Cross-Domain Unified Graph) — COMPLETE
+Plan: 2 of 2 complete
+Status: 48 graph tables, ~86M+ rows, 597K multi-domain entities, 12/13 MCP tools pass (1 entity_xray crash on specific entity — data quality issue, deferred). Ready for Phase 8 (PageRank).
+Last activity: 2026-03-26 — Completed 07-02 (cross-domain verification + full MCP regression)
 
-Progress: ██████░░░░ 50%
+Progress: ██████░░░░ 55%
 
 ## Performance Metrics
 
@@ -33,10 +33,10 @@ Progress: ██████░░░░ 50%
 | 4. Corporate Web Rebuild | 2/2 | 115 min | 58 min |
 | 5. Transaction Expansion | 1/1 | 45 min | 45 min |
 | 6. Influence Expansion | 1/1 | 40 min | 40 min |
-| 7. Cross-Domain Graph | 1/2 | 35 min | 35 min |
+| 7. Cross-Domain Graph | 2/2 | 60 min | 30 min |
 
 **Recent Trend:**
-- Last 5 plans: 04-02 ✓, 05-01 ✓, 06-01 ✓, 07-01 ✓
+- Last 5 plans: 05-01 ✓, 06-01 ✓, 07-01 ✓, 07-02 ✓
 - Trend: Verification plans are fast (~25 min)
 
 ## Accumulated Context
@@ -91,6 +91,7 @@ Progress: ██████░░░░ 50%
 - ~~graph_has_violation 13.7K orphans~~ — **FIXED** in 02-02 (0 orphans); 5,209 new orphans from PLUTO expansion (0.048%, accepted)
 - MinIO HTTP change needs syncing to local infra/ directory
 - neighborhood_portrait returns skeleton-only data (known limitation)
+- entity_xray crashes on "HAMILTON HOUSE 79 LLC" — float conversion error on fee/rate field (`'300 to 600 per hour'`)
 - graph_owns uncapped (172K max buildings per owner) — capped only in graph_shared_owner; cosmetic issue in worst_landlords top results
 
 ### Blockers/Concerns
@@ -100,5 +101,5 @@ Progress: ██████░░░░ 50%
 ## Session Continuity
 
 Last session: 2026-03-26
-Stopped at: 07-01 complete. Bridge tables: 578K links, 597K multi-domain entities, nyc_unified graph with 5 vertex + 5 edge types. Ready for 07-02 (verify cross-domain MATCH queries, build MCP tools).
+Stopped at: 07-02 complete. Phase 7 done. 48 graph tables, ~86M+ rows, 12/13 tools pass. Ready for Phase 8 (PageRank).
 Resume file: None
