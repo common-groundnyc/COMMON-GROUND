@@ -58,7 +58,7 @@ Plans:
 
 Plans:
 - [x] 02-01: Infrastructure fixes — S3 creds (reconnect path), duckpgq (FORCE INSTALL), MinIO HTTP ✓
-- [ ] 02-02: Data fixes — property_history sort, graph_corps dedup, orphaned violations + full MCP re-test
+- [x] 02-02: Data fixes — property_history sort, graph_corps dedup, orphaned violations + full MCP re-test ✓
 
 ### Phase 3: Ownership Graph Rebuild
 **Goal**: Rebuild the housing ownership graph from registrationid-based (489 shared edges) to name-based (31K+ shared edges). Expand graph_buildings from HPD-only (348K) to include PLUTO (860K lots). Fix null owner names (34K records).
@@ -146,7 +146,7 @@ Plans:
 | Phase | Plans | Status | Completed |
 |-------|-------|--------|-----------|
 | 1. Data Audit | 2/2 | Complete | 2026-03-26 |
-| 2. Bug Fixes | 1/2 | In progress | — |
+| 2. Bug Fixes | 2/2 | Complete | 2026-03-26 |
 | 3. Ownership Rebuild | 0/2 | Not started | — |
 | 4. Corporate Web Rebuild | 0/2 | Not started | — |
 | 5. Transaction Expansion | 0/1 | Not started | — |
