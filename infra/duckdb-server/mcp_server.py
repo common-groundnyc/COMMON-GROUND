@@ -542,7 +542,15 @@ def _execute(conn, sql, params=None):
             rows = cur.fetchmany(MAX_QUERY_ROWS)
             return cols, rows
         except duckdb.Error as e:
-            raise ToolError(f"SQL error: {e}")
+            err = str(e)
+            hint = ""
+            if "does not exist" in err.lower():
+                hint = " Use data_catalog(keyword) to find table names, or list_tables(schema) to browse a schema."
+            elif "not found" in err.lower():
+                hint = " Use describe_table(schema, table) to check column names."
+            elif "permission" in err.lower() or "read-only" in err.lower():
+                hint = " Only SELECT queries are allowed. Use sql_query() for reads."
+            raise ToolError(f"SQL error: {e}{hint}")
 
 
 def _build_catalog(conn):
@@ -2550,7 +2558,7 @@ def sql_admin(sql: Annotated[str, Field(description="DDL statement. Only CREATE 
             ctx.lifespan_context["catalog"] = _build_catalog(db)
             return "OK — view created successfully."
         except duckdb.Error as e:
-            raise ToolError(f"DDL error: {e}")
+            raise ToolError(f"DDL error: {e}. Only CREATE OR REPLACE VIEW is allowed.")
 
 
 @mcp.tool(annotations=READONLY, tags={"discovery"})
@@ -3499,15 +3507,14 @@ def gentrification_tracker(zip_codes: Annotated[list[str], Field(description="1-
         with _db_lock:
             tbl = "_gent_tmp"
             db.execute(f"DROP TABLE IF EXISTS {tbl}")
-            db.execute(f"""
-                CREATE TEMP TABLE {tbl} AS
-                SELECT * FROM (
-                    VALUES {', '.join(
-                        f"('{r[0]}', CAST('{r[1]}' AS TIMESTAMP), {r[2]}, {r[3]}, {r[4]}, {r[5]}, {r[6]})"
-                        for r in rows
-                    )}
-                ) AS t(zip, q, new_restaurants, hpd_complaints, noise_calls, dob_violations, construction_complaints)
-            """)
+            db.execute(f"""CREATE TEMP TABLE {tbl} (
+                zip VARCHAR, q TIMESTAMP,
+                new_restaurants INTEGER, hpd_complaints INTEGER,
+                noise_calls INTEGER, dob_violations INTEGER,
+                construction_complaints INTEGER
+            )""")
+            if rows:
+                db.executemany(f"INSERT INTO {tbl} VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
 
             for signal in signals:
                 try:
@@ -5701,8 +5708,7 @@ def school_compare(
     db = ctx.lifespan_context["db"]
     t0 = time.time()
 
-    placeholders = ",".join(["?"] * len(dbns))
-    sql = SCHOOL_COMPARE_SCORES_SQL.replace("{placeholders}", placeholders)
+    sql = _fill_placeholders(SCHOOL_COMPARE_SCORES_SQL, dbns)
     _, rows = _safe_query(db, sql, dbns)
 
     if not rows:
@@ -5903,6 +5909,225 @@ def district_report(
         content="\n".join(lines),
         structured_content={"district": district, "school_count": a[0], "total_students": a[1]},
         meta={"district": district, "query_time_ms": elapsed},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Due Diligence — Professional & Financial Background Check
+# ---------------------------------------------------------------------------
+
+DUE_DILIGENCE_ATTORNEY_SQL = """
+SELECT first_name, last_name, middle_name, status, year_admitted,
+       law_school, company_name, city, state, registration_number,
+       judicial_department_of_admission
+FROM lake.financial.nys_attorney_registrations
+WHERE (last_name ILIKE ? AND (first_name ILIKE ? OR first_name ILIKE ?))
+ORDER BY year_admitted DESC NULLS LAST
+LIMIT 10
+"""
+
+DUE_DILIGENCE_BROKER_SQL = """
+SELECT license_holder_name, license_type, license_number,
+       license_expiration_date, business_name, business_city, business_state
+FROM lake.financial.nys_re_brokers
+WHERE license_holder_name ILIKE '%' || ? || '%'
+ORDER BY license_expiration_date DESC NULLS LAST
+LIMIT 10
+"""
+
+DUE_DILIGENCE_TAX_WARRANT_SQL = """
+SELECT debtor_name_1, debtor_name_2, city, state,
+       warrant_filed_amount, warrant_filed_date, status_code,
+       warrant_satisfaction_date, warrant_expiration_date
+FROM lake.financial.nys_tax_warrants
+WHERE debtor_name_1 ILIKE '%' || ? || '%'
+   OR debtor_name_2 ILIKE '%' || ? || '%'
+ORDER BY TRY_CAST(warrant_filed_date AS DATE) DESC NULLS LAST
+LIMIT 10
+"""
+
+DUE_DILIGENCE_CHILD_SUPPORT_SQL = """
+SELECT debtor_name, city, state,
+       warrant_filed_amount, warrant_filed_date, status_code_a_c_u,
+       warrant_satisfaction_date, warrant_expiration_date
+FROM lake.financial.nys_child_support_warrants
+WHERE debtor_name ILIKE '%' || ? || '%'
+ORDER BY TRY_CAST(warrant_filed_date AS DATE) DESC NULLS LAST
+LIMIT 10
+"""
+
+DUE_DILIGENCE_CONTRACTOR_SQL = """
+SELECT business_name, business_officers, status, certificate_number,
+       business_has_been_debarred, debarment_start_date, debarment_end_date,
+       business_has_outstanding_wage_assessments,
+       business_has_workers_compensation_insurance
+FROM lake.business.nys_contractor_registry
+WHERE business_name ILIKE '%' || ? || '%'
+   OR business_officers ILIKE '%' || ? || '%'
+LIMIT 10
+"""
+
+DUE_DILIGENCE_DEBARRED_SQL = """
+SELECT nonresponsiblecontractor, agencyauthorityname,
+       datenonresponsibilitydetermination
+FROM lake.business.nys_non_responsible
+WHERE nonresponsiblecontractor ILIKE '%' || ? || '%'
+LIMIT 10
+"""
+
+DUE_DILIGENCE_ETHICS_SQL = """
+SELECT case_name, case_number, agency, date,
+       fine_paid_to_coib, other_penalty, suspension_of_days
+FROM lake.city_government.coib_enforcement
+WHERE case_name ILIKE '%' || ? || '%'
+ORDER BY TRY_CAST(date AS DATE) DESC NULLS LAST
+LIMIT 10
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"investigation"})
+def due_diligence(
+    name: NAME,
+    ctx: Context,
+) -> ToolResult:
+    """Professional and financial background check — licensed attorney? Active real estate broker? Tax warrants? Child support warrants? Debarred contractor? Ethics violations? Enter a person or business name to check across 7 NYS/NYC databases. Use this for due diligence on anyone you're doing business with. For political connections, use money_trail(name). For cross-domain entity search, use entity_xray(name)."""
+    name = name.strip()
+    if len(name) < 3:
+        raise ToolError("Name must be at least 3 characters.")
+
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    # Parse first/last for attorney search
+    parts = name.split()
+    if len(parts) >= 2:
+        first_guess = parts[0]
+        last_guess = parts[-1]
+    else:
+        first_guess = name
+        last_guess = name
+
+    # Attorney (exact last + fuzzy first)
+    _, atty_rows = _safe_query(db, DUE_DILIGENCE_ATTORNEY_SQL,
+                                [f"{last_guess}%", f"{first_guess}%", f"{'%' + first_guess + '%'}"])
+    # Broker
+    _, broker_rows = _safe_query(db, DUE_DILIGENCE_BROKER_SQL, [name])
+    # Tax warrants
+    _, tax_rows = _safe_query(db, DUE_DILIGENCE_TAX_WARRANT_SQL, [name, name])
+    # Child support warrants
+    _, cs_rows = _safe_query(db, DUE_DILIGENCE_CHILD_SUPPORT_SQL, [name])
+    # Contractor
+    _, contractor_rows = _safe_query(db, DUE_DILIGENCE_CONTRACTOR_SQL, [name, name])
+    # Debarred
+    _, debarred_rows = _safe_query(db, DUE_DILIGENCE_DEBARRED_SQL, [name])
+    # Ethics
+    _, ethics_rows = _safe_query(db, DUE_DILIGENCE_ETHICS_SQL, [name])
+
+    sections_found = sum(1 for r in [atty_rows, broker_rows, tax_rows, cs_rows,
+                                      contractor_rows, debarred_rows, ethics_rows] if r)
+
+    if sections_found == 0:
+        raise ToolError(f"No records found for '{name}' in any professional/financial database. Try a different name spelling.")
+
+    lines = [f"DUE DILIGENCE — {name}", "=" * 55]
+
+    # Attorneys
+    if atty_rows:
+        lines.append(f"\nATTORNEY REGISTRATIONS ({len(atty_rows)} matches):")
+        for r in atty_rows:
+            fname, lname, mname, status, year_adm, school, company, city, state, reg_num, dept = r
+            full = f"{fname or ''} {mname or ''} {lname or ''}".strip()
+            lines.append(f"  {full} — {status or '?'}")
+            lines.append(f"    Reg #{reg_num} | Admitted {year_adm or '?'} | {dept or ''}")
+            if school:
+                lines.append(f"    Law school: {school}")
+            if company:
+                lines.append(f"    Firm: {company}, {city or ''} {state or ''}")
+
+    # Brokers
+    if broker_rows:
+        lines.append(f"\nREAL ESTATE LICENSES ({len(broker_rows)} matches):")
+        for r in broker_rows:
+            holder, lic_type, lic_num, exp, biz, bcity, bstate = r
+            lines.append(f"  {holder} — {lic_type or '?'} (#{lic_num})")
+            lines.append(f"    Expires: {exp or '?'} | {biz or ''}, {bcity or ''} {bstate or ''}")
+
+    # Tax warrants
+    if tax_rows:
+        lines.append(f"\n⚠️  TAX WARRANTS ({len(tax_rows)} matches):")
+        for r in tax_rows:
+            dn1, dn2, city, state, amt, filed, status, satisfied, expires = r
+            amt_str = f"${float(amt):,.2f}" if amt else "?"
+            lines.append(f"  {dn1} — {amt_str} ({status or '?'})")
+            lines.append(f"    Filed: {filed or '?'} | {city or ''}, {state or ''}")
+            if satisfied:
+                lines.append(f"    Satisfied: {satisfied}")
+
+    # Child support warrants
+    if cs_rows:
+        lines.append(f"\n⚠️  CHILD SUPPORT WARRANTS ({len(cs_rows)} matches):")
+        for r in cs_rows:
+            dn, city, state, amt, filed, status, satisfied, expires = r
+            amt_str = f"${float(amt):,.2f}" if amt else "?"
+            lines.append(f"  {dn} — {amt_str} (Status: {status or '?'})")
+            lines.append(f"    Filed: {filed or '?'} | {city or ''}, {state or ''}")
+
+    # Contractors
+    if contractor_rows:
+        lines.append(f"\nCONTRACTOR REGISTRY ({len(contractor_rows)} matches):")
+        for r in contractor_rows:
+            biz, officers, status, cert, debarred, debar_start, debar_end, wages, wc = r
+            lines.append(f"  {biz} — {status or '?'} (Cert #{cert})")
+            if officers:
+                lines.append(f"    Officers: {officers[:100]}")
+            flags = []
+            if debarred and debarred.lower() in ('true', 'yes', '1'):
+                flags.append(f"DEBARRED {debar_start or ''}–{debar_end or ''}")
+            if wages and wages.lower() in ('true', 'yes', '1'):
+                flags.append("OUTSTANDING WAGE ASSESSMENTS")
+            if wc and wc.lower() in ('false', 'no', '0'):
+                flags.append("NO WORKERS COMP INSURANCE")
+            if flags:
+                lines.append(f"    ⚠️  {', '.join(flags)}")
+
+    # Debarred
+    if debarred_rows:
+        lines.append(f"\n⚠️  DEBARRED / NON-RESPONSIBLE ({len(debarred_rows)} matches):")
+        for r in debarred_rows:
+            contractor, agency, date = r
+            lines.append(f"  {contractor} — by {agency or '?'} ({date or '?'})")
+
+    # Ethics
+    if ethics_rows:
+        lines.append(f"\n⚠️  ETHICS VIOLATIONS ({len(ethics_rows)} matches):")
+        for r in ethics_rows:
+            case, num, agency, date, fine, penalty, suspension = r
+            lines.append(f"  {case} — {agency or '?'} ({date or '?'})")
+            parts = []
+            if fine: parts.append(f"Fine: ${fine}")
+            if penalty: parts.append(f"Penalty: {penalty}")
+            if suspension: parts.append(f"Suspension: {suspension} days")
+            if parts:
+                lines.append(f"    {', '.join(parts)}")
+
+    lines.append(f"\n{sections_found} of 7 databases returned results.")
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={
+            "name": name,
+            "attorney_matches": len(atty_rows),
+            "broker_matches": len(broker_rows),
+            "tax_warrants": len(tax_rows),
+            "child_support_warrants": len(cs_rows),
+            "contractor_matches": len(contractor_rows),
+            "debarred": len(debarred_rows),
+            "ethics_violations": len(ethics_rows),
+        },
+        meta={"name": name, "sections_found": sections_found, "query_time_ms": elapsed},
     )
 
 
@@ -9954,6 +10179,12 @@ def shell_detector(ctx: Context, borough: Annotated[str, Field(description="Boro
     t0 = time.time()
     min_corps = min(max(min_corps, 2), 50)
 
+    borough_clause = ""
+    borough_params = []
+    if borough.strip():
+        borough_clause = "WHERE UPPER(corp.county) LIKE UPPER('%' || ? || '%')"
+        borough_params = [borough.strip()]
+
     try:
         cols, rows = _execute(db, f"""
             WITH wcc AS (
@@ -9972,12 +10203,12 @@ def shell_detector(ctx: Context, borough: Annotated[str, Field(description="Boro
             FROM clusters c
             JOIN wcc w ON c.componentid = w.componentid
             JOIN main.graph_corps corp ON w.dos_id = corp.dos_id
-            {"WHERE UPPER(corp.county) LIKE UPPER('%" + borough.strip().replace("'", "") + "%')" if borough.strip() else ""}
+            {borough_clause}
             ORDER BY c.cluster_size DESC, c.componentid, corp.current_entity_name
             LIMIT 500
-        """)
+        """, borough_params)
     except Exception as e:
-        raise ToolError(f"Shell detection failed: {e}")
+        raise ToolError(f"Shell detection failed: {e}. The DuckPGQ graph may not be ready. Try corporate_web(name) instead.")
 
     elapsed = int((time.time() - t0) * 1000)
 
@@ -10326,6 +10557,7 @@ Build a profile covering:
 
 # Store client info per session (populated on initialize, read on tool calls)
 _session_clients: dict[str, dict] = {}
+_SESSION_MAX = 1000
 
 
 class PostHogMiddleware(Middleware):
@@ -10349,6 +10581,11 @@ class PostHogMiddleware(Middleware):
                 "client_version": getattr(client_info, "version", "unknown"),
                 "client_ip": client_ip,
             }
+            # Prune old sessions if over limit
+            if len(_session_clients) > _SESSION_MAX:
+                excess = len(_session_clients) - _SESSION_MAX
+                for key in list(_session_clients.keys())[:excess]:
+                    del _session_clients[key]
         except Exception:
             pass
         return result
@@ -10432,6 +10669,11 @@ _NOT_FOUND = JSONResponse({"error": "not_found"}, status_code=404)
 
 async def _oauth_stub(request: Request) -> JSONResponse:
     return _NOT_FOUND
+
+@mcp.custom_route("/health", methods=["GET"])
+async def _health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
 
 _well_known_routes = [
     Route("/.well-known/oauth-authorization-server", _oauth_stub, methods=["GET"]),
