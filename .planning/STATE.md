@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 4 complete — Corporate Web Rebuild done, ready for Phase 5
+**Current focus:** Phase 5 complete — Transaction Network Expansion done, ready for Phase 6
 
 ## Current Position
 
-Phase: 4 of 10 (Corporate Web Rebuild) — COMPLETE
-Plan: 2 of 2 complete
-Status: All 12 graph-dependent MCP tools passing, property_history date sort bug fixed
-Last activity: 2026-03-26 — Completed 04-02 (full MCP tool re-test, property_history fix, graph stats collected)
+Phase: 5 of 10 (Transaction Network Expansion) — COMPLETE
+Plan: 1 of 1 complete
+Status: TX graph expanded 103% entities, 356% edges. All 10 MCP tools passing.
+Last activity: 2026-03-26 — Completed 05-01 (tx graph expansion to MTGE/ASST/SAT/AGMT, full MCP re-test 10/10)
 
-Progress: ████░░░░░░ 35%
+Progress: ████░░░░░░ 40%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8 (v2.0) / 8 (v1.0)
-- Average duration: ~60 min
-- Total execution time: 7.7 hours
+- Total plans completed: 9 (v2.0) / 8 (v1.0)
+- Average duration: ~58 min
+- Total execution time: 8.5 hours
 
 **By Phase:**
 
@@ -31,9 +31,10 @@ Progress: ████░░░░░░ 35%
 | 2. Bug Fixes | 2/2 | 135 min | 68 min |
 | 3. Ownership Rebuild | 2/2 | 150 min | 75 min |
 | 4. Corporate Web Rebuild | 2/2 | 115 min | 58 min |
+| 5. Transaction Expansion | 1/1 | 45 min | 45 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-01 ✓, 03-02 ✓, 04-01 ✓, 04-02 ✓
+- Last 5 plans: 03-02 ✓, 04-01 ✓, 04-02 ✓, 05-01 ✓
 - Trend: Verification plans are fast (~25 min)
 
 ## Accumulated Context
@@ -65,6 +66,9 @@ Progress: ████░░░░░░ 35%
 - **Working mcp_server.py lives in Docker overlay, not image** — image has old code; docker-cp'd versions accumulate in overlay layers (04-01)
 - **OATH respondent column is respondent_last_name** — not respondent_name; corps stored in last_name field (04-01)
 - **Campaign contributions in city_government schema** — not financial schema (04-01)
+- **TX graph 3-stage incremental staging** — deeds, mortgages, assignments/satisfactions as separate temp tables to avoid 48M-row OOM (05-01)
+- **Mega-entity cap 200 + per-doc party cap 20** — banks/title companies with 500+ tx caused OOM on self-join; double cap needed (05-01)
+- **GRANTOR/GRANTEE role labels** — replaced SOLD/BOUGHT for accuracy across mortgages/assignments (05-01)
 
 ### Prior Milestone Context (v1.0 Entity Resolution)
 
@@ -90,5 +94,5 @@ Progress: ████░░░░░░ 35%
 ## Session Continuity
 
 Last session: 2026-03-26
-Stopped at: 04-02 complete. All 12 graph tools passing. Phase 4 done. Ready for Phase 5 (Transaction Network Expansion).
+Stopped at: 05-01 complete. TX graph: 3.97M entities, 40.6M edges, 8.2M shared. All 10 MCP tools passing. Phase 5 done. Ready for Phase 6 (Influence Network Expansion).
 Resume file: None

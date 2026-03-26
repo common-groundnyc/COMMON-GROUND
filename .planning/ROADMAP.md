@@ -87,7 +87,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 05-01: Expand graph_tx_entities, add personal property (pp_*) tables, rebuild shared edges
+- [x] 05-01: Expand tx graph from DEED-only to DEED+MTGE+ASST+SAT+AGMT — 3.97M entities (+103%), 40.6M edges (+356%), 8.2M shared (+107%) ✓
 
 ### Phase 6: Influence Network Expansion
 **Goal**: Expand political influence graph to include lobbying registrations, city contracts (doing business disclosures), COIB donor network, and off-year contributions. Currently 311K entities from 1.67M contributions.
@@ -149,7 +149,7 @@ Plans:
 | 2. Bug Fixes | 2/2 | Complete | 2026-03-26 |
 | 3. Ownership Rebuild | 2/2 | Complete | 2026-03-26 |
 | 4. Corporate Web Rebuild | 2/2 | Complete | 2026-03-26 |
-| 5. Transaction Expansion | 0/1 | Not started | — |
+| 5. Transaction Expansion | 1/1 | Complete | 2026-03-26 |
 | 6. Influence Expansion | 0/1 | Not started | — |
 | 7. Cross-Domain Graph | 0/2 | Not started | — |
 | 8. PageRank Integration | 0/1 | Not started | — |
