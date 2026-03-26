@@ -9,7 +9,7 @@ RUN echo "deb http://deb.debian.org/debian bullseye main" > /etc/apt/sources.lis
     rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
-    duckdb==1.5.1 \
+    duckdb==1.5.0 \
     "fastmcp[http]==3.1.1" \
     posthog \
     onnxruntime \
