@@ -11,10 +11,11 @@ from dagster_pipeline.defs.name_index_asset import name_index
 from dagster_pipeline.defs.resolved_entities_asset import resolved_entities
 from dagster_pipeline.defs.flush_sensor import flush_ducklake_sensor
 from dagster_pipeline.defs.foundation_assets import h3_index, phonetic_index, row_fingerprints
+from dagster_pipeline.defs.quality_assets import data_health
 from dagster_pipeline.resources.ducklake import DuckLakeResource
 
 all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, name_index, resolved_entities,
-              h3_index, phonetic_index, row_fingerprints]
+              h3_index, phonetic_index, row_fingerprints, data_health]
 
 from dagster_pipeline.sources.datasets import (
     STATIC_DATASETS, MONTHLY_DATASETS, SOCRATA_DATASETS,
