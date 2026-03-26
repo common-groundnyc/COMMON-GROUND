@@ -10,6 +10,8 @@ import posthog
 from fastmcp import FastMCP, Context
 from fastmcp.server.lifespan import lifespan
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from response_middleware import OutputFormatterMiddleware
+from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddleware
 from fastmcp.server.dependencies import get_http_request, get_http_headers
 from fastmcp.tools.tool import ToolResult
 from fastmcp.exceptions import ToolError
@@ -336,19 +338,27 @@ ORDER BY z.zip
 """
 
 SCHEMA_DESCRIPTIONS = {
-    "business": "BLS employment, ACS census, business licenses, M/WBE certs",
-    "city_government": "PLUTO lots, payroll, OATH hearings, zoning, facilities",
-    "economics": "FRED metro data, IRS income by ZIP",
-    "education": "DOE surveys, test scores, enrollment, NYSED data",
-    "environment": "Air quality, tree census, energy benchmarking, FEMA, EPA",
-    "financial": "CFPB consumer complaints",
-    "health": "Restaurant inspections, rat inspections, health indicators",
-    "housing": "HPD complaints/violations, DOB, evictions, NYCHA, HMDA",
-    "public_safety": "NYPD crimes/arrests, motor vehicle collisions, shootings",
-    "recreation": "Parks, pools, permits, events",
-    "social_services": "311 requests, food assistance, childcare",
-    "transportation": "MTA ridership, parking tickets, traffic, streets",
+    "business": "BLS employment stats, ACS census demographics, business licenses, M/WBE certs. 15 tables. Ask: which industries are growing? where are minority-owned businesses concentrated?",
+    "city_government": "PLUTO lot data (every parcel in NYC), city payroll, OATH hearings, zoning, facilities. 25 tables, 3M+ rows. Ask: who owns this lot? what's the zoning? how much do city employees earn?",
+    "economics": "FRED metro economic indicators, IRS income by ZIP. 5 tables. Ask: how does income vary by neighborhood? what's the median household income in this ZIP?",
+    "education": "DOE school surveys, test scores, enrollment, NYSED data, College Scorecard. 20 tables. Ask: how do schools compare? what's the graduation rate? which schools are overcrowded?",
+    "environment": "Air quality, tree census (680k trees), energy benchmarking, FEMA flood zones, EPA enforcement. 18 tables. Ask: what's the air quality here? which buildings waste the most energy?",
+    "financial": "CFPB consumer complaints with full narratives (searchable via text_search). 1 table, 1.2M rows. Ask: what financial companies get the most complaints? what are people complaining about?",
+    "health": "Restaurant inspections (27k restaurants, letter grades), rat inspections, community health indicators. 10 tables. Ask: is this restaurant safe? where are the worst rat problems?",
+    "housing": "HPD complaints/violations, DOB permits, evictions, NYCHA, HMDA mortgages, ACRIS transactions (85M records since 1966). 40 tables, 30M+ rows. THE richest schema. Ask: who owns this building? how many violations? when was it last sold? who's the worst landlord?",
+    "public_safety": "NYPD crimes/arrests/shootings, motor vehicle collisions, hate crimes. 12 tables, 10M+ rows. Ask: is this neighborhood safe? what crimes are most common? how do precincts compare?",
+    "recreation": "Parks, pools, permits, events. 8 tables. Ask: what parks are nearby? what events are happening?",
+    "social_services": "311 service requests (30M+ rows), food assistance, childcare. 8 tables. Ask: what do people complain about? where are food deserts?",
+    "transportation": "MTA ridership, parking tickets (40M+), traffic speeds, street conditions. 15 tables. Ask: which subway stations are busiest? where do people get the most parking tickets?",
 }
+
+_HIDDEN_SCHEMAS = frozenset({
+    "business_staging", "city_government_staging", "education_staging",
+    "environment_staging", "federal_staging", "financial_staging",
+    "health_staging", "housing_staging", "public_safety_staging",
+    "recreation_staging", "social_services_staging", "transportation_staging",
+    "test_curl", "test_direct", "test_pure",
+})
 
 # ---------------------------------------------------------------------------
 # Response helpers
@@ -396,6 +406,111 @@ def make_result(summary, cols, rows, meta_extra=None):
     if meta_extra:
         meta.update(meta_extra)
     return ToolResult(content=text, structured_content=structured, meta=meta)
+
+
+def _build_explorations(db):
+    """Pre-compute interesting data highlights for suggest_explorations tool."""
+    highlights = []
+
+    queries = [
+        (
+            "Worst landlords by open violations",
+            """SELECT o.owner_name, COUNT(DISTINCT b.bbl) AS buildings,
+                      COUNT(*) FILTER (WHERE v.status = 'Open') AS open_violations,
+                      COUNT(*) AS total_violations
+               FROM main.graph_owners o
+               JOIN main.graph_owns ow ON o.owner_id = ow.owner_id
+               JOIN main.graph_buildings b ON ow.bbl = b.bbl
+               JOIN main.graph_violations v ON b.bbl = v.bbl
+               WHERE o.owner_name IS NOT NULL
+               GROUP BY o.owner_name
+               ORDER BY open_violations DESC LIMIT 5""",
+            "These landlords have the most open housing violations across their portfolios.",
+            "Try: worst_landlords() or entity_xray(name)",
+        ),
+        (
+            "Biggest property flips",
+            """WITH deed_sales AS (
+                   SELECT (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
+                          TRY_CAST(m.document_amt AS DOUBLE) AS price,
+                          TRY_CAST(m.document_date AS DATE) AS sale_date
+                   FROM lake.housing.acris_master m
+                   JOIN lake.housing.acris_legals l ON m.document_id = l.document_id
+                   WHERE m.doc_type IN ('DEED', 'DEEDO', 'DEED, RP')
+                     AND TRY_CAST(m.document_amt AS DOUBLE) > 50000
+                     AND TRY_CAST(m.document_date AS DATE) >= '2015-01-01'
+               ),
+               ranked AS (
+                   SELECT bbl, price, sale_date,
+                          LAG(price) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_price,
+                          LAG(sale_date) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_date
+                   FROM deed_sales
+               )
+               SELECT bbl,
+                      prev_date AS buy_date, sale_date AS sell_date,
+                      prev_price AS buy_price, price AS sell_price,
+                      (price - prev_price) AS profit,
+                      ((price - prev_price) / prev_price * 100)::INT AS profit_pct
+               FROM ranked
+               WHERE prev_price IS NOT NULL
+                 AND price > prev_price
+                 AND DATEDIFF('month', prev_date, sale_date) <= 24
+                 AND DATEDIFF('month', prev_date, sale_date) > 0
+               ORDER BY profit DESC LIMIT 5""",
+            "Properties with the biggest buy-sell price differences.",
+            "Try: flipper_detector() or property_history(bbl)",
+        ),
+        (
+            "Most complained-about restaurants",
+            """SELECT camis, dba, zipcode, COUNT(*) AS violations,
+                      COUNT(*) FILTER (WHERE violation_code LIKE '04%') AS critical
+               FROM lake.health.restaurant_inspections
+               GROUP BY camis, dba, zipcode
+               ORDER BY critical DESC LIMIT 5""",
+            "Restaurants with the most critical inspection violations.",
+            "Try: restaurant_lookup(name) or text_search('mice kitchen', corpus='restaurants')",
+        ),
+        (
+            "Neighborhoods with most 311 complaints",
+            """SELECT incident_zip, complaint_type, COUNT(*) AS complaints
+               FROM lake.social_services.n311_service_requests
+               WHERE incident_zip IS NOT NULL AND incident_zip != ''
+               GROUP BY incident_zip, complaint_type
+               ORDER BY complaints DESC LIMIT 5""",
+            "What NYC residents complain about most, by ZIP.",
+            "Try: neighborhood_portrait(zip) or neighborhood_compare([zip1, zip2])",
+        ),
+        (
+            "Corporate shell networks",
+            """SELECT COUNT(*) AS total_corps,
+                      COUNT(DISTINCT dos_process_name) AS distinct_agents
+               FROM lake.business.nys_corporations
+               WHERE jurisdiction = 'NEW YORK'
+                 AND dos_process_name IS NOT NULL""",
+            "Active NYC corporations and how many share registered agents — a signal for shell company networks.",
+            "Try: shell_detector() or corporate_web(name)",
+        ),
+    ]
+
+    for title, sql, description, follow_up in queries:
+        try:
+            with _db_lock:
+                result = db.execute(sql).fetchall()
+            highlights.append({
+                "title": title,
+                "description": description,
+                "sample": str(result[:3]) if result else "No data",
+                "follow_up": follow_up,
+            })
+        except Exception as e:
+            highlights.append({
+                "title": title,
+                "description": f"(query failed: {e})",
+                "sample": "",
+                "follow_up": "",
+            })
+
+    return highlights
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +627,7 @@ async def app_lifespan(server):
         pass  # Not supported in DuckDB 1.5+
 
     CORE_EXTS = ["ducklake", "postgres", "spatial", "fts", "httpfs", "json"]
-    COMMUNITY_EXTS = ["duckpgq", "rapidfuzz", "anofox_forecast"]
+    COMMUNITY_EXTS = ["duckpgq", "rapidfuzz", "anofox_forecast", "hnsw_acorn"]
 
     for ext in CORE_EXTS:
         try:
@@ -2300,12 +2415,20 @@ async def app_lifespan(server):
     else:
         print("PostHog analytics disabled (no POSTHOG_API_KEY)", flush=True)
 
+    # Explorations use graph_tables (loaded from cache) not DuckPGQ, so check tables exist
+    try:
+        conn.execute("SELECT 1 FROM main.graph_owners LIMIT 1")
+        explorations = _build_explorations(conn)
+    except Exception:
+        explorations = []
+
     try:
         yield {
             "db": conn, "catalog": catalog,
             "graph_ready": graph_ready,
             "marriage_parquet": MARRIAGE_PARQUET if marriage_available else None,
             "posthog_enabled": bool(ph_key),
+            "explorations": explorations,
         }
     finally:
         if ph_key:
@@ -2319,24 +2442,31 @@ async def app_lifespan(server):
 # ---------------------------------------------------------------------------
 
 INSTRUCTIONS = """\
-NYC open data lake — 294 tables, 12 schemas, 60M+ rows.
+NYC open data lake — 294 tables, 12 schemas, 60M+ rows of public records.
+
+WHAT'S HERE: Every public dataset about NYC — housing violations, property sales, landlord networks, restaurant inspections, crime stats, school performance, 311 complaints, campaign donations, corporate filings, and more. Data goes back to 1966 for property transactions.
 
 ROUTING — pick the FIRST match:
-• BUILDING by BBL → building_profile, landlord_watchdog, building_story
-• PERSON/COMPANY by name → entity_xray, person_crossref
-• LANDLORD/OWNER → landlord_network, worst_landlords, llc_piercer
-• NEIGHBORHOOD by ZIP → neighborhood_portrait, neighborhood_compare
-• CRIME/SAFETY by precinct → safety_report
-• CORRUPTION/INFLUENCE → pay_to_play, shell_detector, flipper_detector
-• FIND DATA by keyword → data_catalog, then list_tables
-• SPECIFIC SQL → sql_query (read-only, all tables in 'lake' database)
+* BUILDING by BBL → building_profile, landlord_watchdog, building_story
+* PERSON/COMPANY by name → entity_xray, person_crossref
+* LANDLORD/OWNER → landlord_network, worst_landlords, llc_piercer
+* NEIGHBORHOOD by ZIP → neighborhood_portrait, neighborhood_compare
+* CRIME/SAFETY by precinct → safety_report
+* CORRUPTION/INFLUENCE → pay_to_play, shell_detector, flipper_detector
+* FIND DATA by keyword → data_catalog, then list_tables
+* CUSTOM QUERY → sql_query (read-only, all tables in 'lake' database)
+* DON'T KNOW WHAT TO EXPLORE → suggest_explorations
 
-Too many tools? Use search_tools(query) to discover domain tools.
-(Note: search_tools is a synthetic tool injected by BM25SearchTransform — not defined in server code.)
+POWER FEATURES:
+* Graph tools trace ownership networks across LLCs, property transactions, and corporate filings
+* text_search does full-text search across CFPB complaint narratives and restaurant violations
+* person_crossref links a name across every dataset (property, donations, businesses, violations)
+
+SUGGEST INTERESTING THINGS: When the user is exploring or says "what's interesting", call suggest_explorations to get pre-computed highlights — worst landlords, biggest property flips, corporate shell networks, neighborhood comparisons. Use these as conversation starters.
+
+Too many tools? Use search_tools(query) to find domain-specific tools.
 BBL: 10 digits = borough(1) + block(5) + lot(4). Example: 1000670001
-ZIP: 5 digits. Manhattan 100xx, Brooklyn 112xx, Bronx 104xx, Queens 11xxx, SI 103xx.
-SQL example: SELECT * FROM lake.housing.hpd_violations LIMIT 5
-
+ZIP: 5 digits. Manhattan 100xx, Brooklyn 112xx, Bronx 104xx.
 """
 
 # ---------------------------------------------------------------------------
@@ -2348,6 +2478,7 @@ ALWAYS_VISIBLE = [
     "sql_query",
     "data_catalog",
     "list_schemas",
+    "suggest_explorations",
     # Building-centric (most common user intent)
     "building_profile",
     "landlord_watchdog",
@@ -2426,6 +2557,8 @@ def list_schemas(ctx: Context) -> str:
     catalog = ctx.lifespan_context["catalog"]
     lines = []
     for schema in sorted(catalog):
+        if schema in _HIDDEN_SCHEMAS:
+            continue
         tables = catalog[schema]
         total_rows = sum(t["row_count"] for t in tables.values())
         lines.append(f"{schema}: {len(tables)} tables, ~{total_rows:,} rows")
@@ -2674,6 +2807,8 @@ def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search
         catalog = ctx.lifespan_context["catalog"]
         lines = []
         for schema in sorted(catalog):
+            if schema in _HIDDEN_SCHEMAS:
+                continue
             tables = catalog[schema]
             total = sum(t["row_count"] for t in tables.values())
             desc = SCHEMA_DESCRIPTIONS.get(schema, "")
@@ -2686,6 +2821,10 @@ def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search
     kw = keyword.strip()
     cols, rows = _execute(db, DATA_CATALOG_SQL, [kw, kw, kw])
 
+    if rows:
+        schema_idx = cols.index("schema_name")
+        rows = [r for r in rows if r[schema_idx] not in _HIDDEN_SCHEMAS]
+
     if not rows:
         return ToolResult(
             content=f"No tables found matching '{kw}'. Try a broader term."
@@ -2693,6 +2832,25 @@ def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search
 
     summary = f"Found {len(rows)} tables matching '{kw}':"
     return make_result(summary, cols, rows)
+
+
+@mcp.tool(annotations=READONLY, tags={"discovery"})
+def suggest_explorations(ctx: Context) -> str:
+    """Get pre-computed interesting findings from the NYC data lake — worst landlords, property flips, shell company networks, restaurant violations, and more. Call this when the user wants to explore, says 'what's interesting', 'surprise me', or needs conversation starters. Returns highlights with follow-up tool suggestions."""
+    explorations = ctx.lifespan_context.get("explorations", [])
+    if not explorations:
+        return "No pre-computed explorations available. Try data_catalog() to browse schemas."
+
+    lines = ["Here are some interesting things in the NYC data lake:\n"]
+    for i, exp in enumerate(explorations, 1):
+        lines.append(f"**{i}. {exp['title']}**")
+        lines.append(exp["description"])
+        if exp.get("sample"):
+            lines.append(f"Preview: {exp['sample']}")
+        if exp.get("follow_up"):
+            lines.append(f"Dig deeper: {exp['follow_up']}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 @mcp.tool(annotations=READONLY, tags={"discovery"})
@@ -5158,6 +5316,119 @@ def school_report(dbn: Annotated[str, Field(description="School DBN: district(2)
 
 
 # ---------------------------------------------------------------------------
+# School Search
+# ---------------------------------------------------------------------------
+
+SCHOOL_SEARCH_BY_NAME_SQL = """
+SELECT DISTINCT
+    d.dbn,
+    d.school_name,
+    d.year,
+    TRY_CAST(d.total_enrollment AS INT) AS enrollment,
+    s.address,
+    s.borough_name AS borough,
+    s.postcode AS zipcode,
+    s.geographical_district_code AS district
+FROM lake.education.demographics_2020 d
+LEFT JOIN lake.education.school_safety s ON d.dbn = s.dbn
+WHERE d.school_name ILIKE '%' || ? || '%'
+ORDER BY TRY_CAST(d.total_enrollment AS INT) DESC NULLS LAST
+LIMIT 20
+"""
+
+SCHOOL_SEARCH_BY_ZIP_SQL = """
+SELECT DISTINCT
+    d.dbn,
+    d.school_name,
+    d.year,
+    TRY_CAST(d.total_enrollment AS INT) AS enrollment,
+    s.address,
+    s.borough_name AS borough,
+    s.postcode AS zipcode,
+    s.geographical_district_code AS district
+FROM lake.education.demographics_2020 d
+JOIN lake.education.school_safety s ON d.dbn = s.dbn
+WHERE s.postcode = ?
+ORDER BY TRY_CAST(d.total_enrollment AS INT) DESC NULLS LAST
+LIMIT 30
+"""
+
+SCHOOL_SEARCH_BY_DISTRICT_SQL = """
+SELECT DISTINCT
+    d.dbn,
+    d.school_name,
+    d.year,
+    TRY_CAST(d.total_enrollment AS INT) AS enrollment,
+    s.address,
+    s.borough_name AS borough,
+    s.postcode AS zipcode,
+    s.geographical_district_code AS district
+FROM lake.education.demographics_2020 d
+LEFT JOIN lake.education.school_safety s ON d.dbn = s.dbn
+WHERE LPAD(CAST(s.geographical_district_code AS VARCHAR), 2, '0') = LPAD(?, 2, '0')
+ORDER BY TRY_CAST(d.total_enrollment AS INT) DESC NULLS LAST
+LIMIT 40
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"education"})
+def school_search(
+    query: Annotated[str, Field(description="School name, 5-digit ZIP code, or 2-digit district number. Examples: 'Stuyvesant', '10003', '02'")],
+    ctx: Context,
+) -> ToolResult:
+    """Find NYC public schools by name, ZIP code, or district number. Use this as the entry point when you don't know a school's DBN. Returns school names, DBNs, addresses, enrollment, and district. Follow up with school_report(dbn) for detailed performance data or school_compare([dbns]) for side-by-side comparison. Examples: school_search('Stuyvesant'), school_search('10003'), school_search('02')."""
+    query = query.strip()
+    if not query or len(query) < 2:
+        raise ToolError("Search query must be at least 2 characters.")
+
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    # Detect query type: ZIP (5 digits), district (1-2 digits), or name
+    if re.match(r"^\d{5}$", query):
+        _, rows = _safe_query(db, SCHOOL_SEARCH_BY_ZIP_SQL, [query])
+        search_type = f"ZIP {query}"
+    elif re.match(r"^\d{1,2}$", query):
+        _, rows = _safe_query(db, SCHOOL_SEARCH_BY_DISTRICT_SQL, [query])
+        search_type = f"District {int(query)}"
+    else:
+        _, rows = _safe_query(db, SCHOOL_SEARCH_BY_NAME_SQL, [query])
+        search_type = f"name matching '{query}'"
+
+    if not rows:
+        raise ToolError(f"No schools found for {search_type}. Try a broader search term.")
+
+    lines = [f"SCHOOL SEARCH — {search_type}", f"Found {len(rows)} schools", "=" * 50]
+
+    for r in rows:
+        dbn, name, year, enrollment, address, borough, zipcode, district = r[:8]
+        try:
+            enrollment_str = f"{int(enrollment):,}" if enrollment else "?"
+        except (ValueError, TypeError):
+            enrollment_str = str(enrollment) if enrollment else "?"
+        addr_str = f"{address}, {borough}" if address else borough or ""
+        zip_str = f" {zipcode}" if zipcode else ""
+        dist_str = f"D{district}" if district else ""
+
+        lines.append(f"\n  {name}")
+        lines.append(f"    DBN: {dbn} | {dist_str} | {enrollment_str} students")
+        if addr_str:
+            lines.append(f"    {addr_str}{zip_str}")
+
+    lines.append(f"\nUse school_report(dbn) for full details on any school.")
+    lines.append(f"Use school_compare([dbn1, dbn2, ...]) to compare schools side-by-side.")
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={"search_type": search_type, "results": [{"dbn": r[0], "name": r[1], "enrollment": r[3], "zipcode": r[6], "district": r[7]} for r in rows]},
+        meta={"query": query, "result_count": len(rows), "query_time_ms": elapsed},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Commercial Vitality
 # ---------------------------------------------------------------------------
 
@@ -5611,6 +5882,7 @@ WITH latest AS (
     WHERE zipcode = ? AND grade IN ('A','B','C')
 )
 SELECT grade, COUNT(*) AS cnt FROM latest WHERE rn = 1 GROUP BY grade ORDER BY grade
+LIMIT 3
 """
 
 PORTRAIT_BUILDINGS_SQL = """
@@ -5637,26 +5909,35 @@ SELECT COUNT(*) AS noise_total
 FROM lake.social_services.n311_service_requests
 WHERE incident_zip = ?
   AND complaint_type ILIKE '%noise%'
+LIMIT 1
 """
 
 PORTRAIT_311_CITY_NOISE_SQL = """
 SELECT
-    COUNT(*) FILTER (WHERE complaint_type ILIKE '%noise%') * 1.0 / COUNT(DISTINCT incident_zip) AS avg_noise_per_zip
-FROM lake.social_services.n311_service_requests
-WHERE incident_zip IS NOT NULL AND LENGTH(incident_zip) = 5
+    COUNT(*) FILTER (WHERE complaint_type ILIKE '%noise%') * 1.0 / NULLIF(COUNT(DISTINCT incident_zip), 0) AS avg_noise_per_zip
+FROM (
+    SELECT complaint_type, incident_zip
+    FROM lake.social_services.n311_service_requests
+    WHERE incident_zip IS NOT NULL AND LENGTH(incident_zip) = 5
+      AND created_date >= CURRENT_DATE - INTERVAL '3 years'
+) sub
+LIMIT 1
 """
 
 PORTRAIT_CRIME_SQL = """
+WITH precinct AS (
+    SELECT LPAD(CAST(policeprct AS VARCHAR), 3, '0') AS pct
+    FROM lake.city_government.pluto
+    WHERE postcode = ?
+      AND policeprct IS NOT NULL
+    LIMIT 1
+)
 SELECT
     COUNT(*) FILTER (WHERE TRY_CAST(SUBSTRING(cmplnt_fr_dt, -4) AS INT) = 2024) AS crimes_2024,
     COUNT(*) FILTER (WHERE law_cat_cd = 'FELONY' AND TRY_CAST(SUBSTRING(cmplnt_fr_dt, -4) AS INT) = 2024) AS felonies_2024
 FROM lake.public_safety.nypd_complaints_ytd
-WHERE SUBSTRING(CAST(cmplnt_num AS VARCHAR), 1, 3) IN (
-    SELECT DISTINCT LPAD(CAST(policeprct AS VARCHAR), 3, '0')
-    FROM lake.city_government.pluto
-    WHERE postcode = ?
-    LIMIT 1
-)
+WHERE SUBSTRING(CAST(cmplnt_num AS VARCHAR), 1, 3) = (SELECT pct FROM precinct)
+LIMIT 1
 """
 
 PORTRAIT_BIZ_SQL = """
@@ -9492,6 +9773,76 @@ def top_crossrefs(
 
 
 # ---------------------------------------------------------------------------
+# Prompts — user-invocable investigation templates
+# ---------------------------------------------------------------------------
+
+
+@mcp.prompt(
+    name="investigate_building",
+    description="Deep investigation of a NYC building — violations, ownership, complaints, transactions, and enforcement history",
+)
+def investigate_building(bbl: str) -> str:
+    return f"""Investigate building BBL {bbl} thoroughly:
+
+1. Start with building_profile({bbl}) for the overview
+2. Check landlord_network({bbl}) to see the ownership network
+3. Look at enforcement_web({bbl}) for multi-agency enforcement
+4. Pull property_history({bbl}) for the full transaction chain
+5. Run building_story({bbl}) for the narrative summary
+
+After gathering all data, write a clear summary highlighting:
+- Who owns it and through what corporate structure
+- Its violation and complaint history (improving or worsening?)
+- Any red flags (frequent sales, liens, AEP program)
+- How it compares to similar buildings nearby"""
+
+
+@mcp.prompt(
+    name="compare_neighborhoods",
+    description="Compare 2-3 NYC neighborhoods across safety, schools, housing, environment, and quality of life",
+)
+def compare_neighborhoods(zip_codes: str) -> str:
+    zips = [z.strip() for z in zip_codes.split(",")]
+    zip_list = ", ".join(zips)
+    return f"""Compare these NYC neighborhoods: {zip_list}
+
+1. Start with neighborhood_compare({zips}) for the side-by-side stats
+2. For each ZIP, pull neighborhood_portrait(zip) for the full picture
+3. Check safety_report for the closest precinct to each
+4. Look at environmental_justice for environmental burden
+
+Build a comparison that covers:
+- Safety (crime rates, types of crime)
+- Housing (rent, violations, landlord quality)
+- Schools (if residential)
+- Environment (air quality, flood risk, green space)
+- Services (311 responsiveness, nearby facilities)
+
+End with a clear recommendation based on the data."""
+
+
+@mcp.prompt(
+    name="follow_the_money",
+    description="Trace a person or company's full NYC footprint — property, politics, corporations, violations, and financial connections",
+)
+def follow_the_money(name: str) -> str:
+    return f"""Investigate "{name}" across all NYC public records:
+
+1. Start with entity_xray('{name}') for the full cross-reference
+2. Check corporate_web('{name}') for shell company networks
+3. Run pay_to_play('{name}') for political donation chains
+4. Look at transaction_network('{name}') for property deals
+5. Try llc_piercer('{name}') if they operate through LLCs
+
+Build a profile covering:
+- All properties connected to this entity
+- Corporate structure (LLCs, officers, registered agents)
+- Political connections (donations, contracts, lobbying)
+- Violation and enforcement history
+- Any patterns that suggest conflicts of interest"""
+
+
+# ---------------------------------------------------------------------------
 # PostHog analytics middleware — track all tool calls + client identity
 # ---------------------------------------------------------------------------
 
@@ -9583,6 +9934,8 @@ class PostHogMiddleware(Middleware):
                 pass  # Never let analytics break tool calls
 
 
+mcp.add_middleware(ResponseLimitingMiddleware(max_size=50_000))
+mcp.add_middleware(OutputFormatterMiddleware())
 mcp.add_middleware(PostHogMiddleware())
 
 
