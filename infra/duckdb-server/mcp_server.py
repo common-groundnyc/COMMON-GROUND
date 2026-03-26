@@ -12055,6 +12055,149 @@ async def _health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+# ---------------------------------------------------------------------------
+# Public HTTP API — catalog endpoint for data health page
+# ---------------------------------------------------------------------------
+
+import json as _json
+import datetime as _dt
+
+
+def _catalog_connect():
+    """Open a fresh read-only DuckDB connection attached to DuckLake."""
+    conn = duckdb.connect(config={"allow_unsigned_extensions": "true"})
+    conn.execute("PRAGMA disable_checkpoint_on_shutdown")
+
+    from extensions import load_extensions
+    load_extensions(conn)
+
+    minio_user = os.environ.get("MINIO_ROOT_USER", "minioadmin")
+    minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "")
+    conn.execute("SET s3_region = 'us-east-1'")
+    conn.execute("SET s3_endpoint = 'minio:9000'")
+    conn.execute(f"SET s3_access_key_id = '{minio_user}'")
+    conn.execute(f"SET s3_secret_access_key = '{minio_pass}'")
+    conn.execute("SET s3_use_ssl = false")
+    conn.execute("SET s3_url_style = 'path'")
+
+    pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "\\'")
+    conn.execute(f"""
+        ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
+        AS lake (METADATA_SCHEMA 'lake')
+    """)
+    return conn
+
+
+@mcp.custom_route("/api/catalog", methods=["GET", "OPTIONS"])
+async def catalog_json(request: Request) -> JSONResponse:
+    """Return table catalog as JSON for the data health page."""
+
+    # Handle CORS preflight
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+
+    db = None
+    try:
+        db = _catalog_connect()
+
+        # Query table stats from DuckDB metadata
+        cols, rows = _execute(db, """
+            SELECT
+                t.schema_name,
+                t.table_name,
+                t.estimated_size,
+                (SELECT COUNT(*) FROM duckdb_columns() c
+                 WHERE c.schema_name = t.schema_name AND c.table_name = t.table_name) AS column_count
+            FROM duckdb_tables() t
+            WHERE t.schema_name NOT LIKE '%staging%'
+              AND t.schema_name NOT LIKE 'test%'
+              AND t.schema_name NOT LIKE 'ducklake%'
+              AND t.schema_name NOT LIKE 'information%'
+            ORDER BY t.schema_name, t.estimated_size DESC
+        """)
+
+        # Try to get DuckLake file metadata separately (may fail if schema differs)
+        ducklake_info = {}
+        try:
+            _, dl_rows = _execute(db, "SELECT table_name, file_count, file_size_bytes, table_uuid FROM ducklake_table_info('lake')")
+            for dlr in dl_rows:
+                ducklake_info[dlr[0]] = {"file_count": dlr[1], "file_size_bytes": dlr[2], "table_uuid": str(dlr[3]) if dlr[3] else None}
+        except Exception:
+            pass  # DuckLake metadata unavailable — continue without it
+
+        tables = []
+        schema_stats = {}
+        total_rows = 0
+
+        for row in rows:
+            schema, table, est_size, col_count = row[:4]
+            if table.startswith('_dlt_') or table.startswith('_pipeline'):
+                continue
+
+            dl = ducklake_info.get(table, {})
+            file_count = dl.get("file_count", 0)
+            file_size = dl.get("file_size_bytes", 0)
+            table_uuid = dl.get("table_uuid")
+
+            # Extract creation timestamp from UUIDv7 (first 48 bits = epoch ms)
+            created_at = None
+            if table_uuid:
+                try:
+                    hex_str = table_uuid.replace('-', '')
+                    if len(hex_str) >= 13 and hex_str[12] == '7':  # UUIDv7 version check
+                        epoch_ms = int(hex_str[:12], 16)
+                        created_at = _dt.datetime.fromtimestamp(epoch_ms / 1000, tz=_dt.timezone.utc).isoformat()
+                except (ValueError, OSError):
+                    pass
+
+            tables.append({
+                "schema": schema,
+                "table": table,
+                "rows": est_size or 0,
+                "columns": col_count or 0,
+                "files": file_count or 0,
+                "size_bytes": file_size or 0,
+                "created_at": created_at,
+            })
+            total_rows += (est_size or 0)
+            if schema not in schema_stats:
+                schema_stats[schema] = {"tables": 0, "rows": 0}
+            schema_stats[schema]["tables"] += 1
+            schema_stats[schema]["rows"] += (est_size or 0)
+
+        result = {
+            "as_of": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "summary": {
+                "schemas": len(schema_stats),
+                "tables": len(tables),
+                "total_rows": total_rows,
+            },
+            "schemas": schema_stats,
+            "tables": tables,
+        }
+
+        return JSONResponse(
+            result,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=300",
+            },
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        if db:
+            db.close()
+
+
 _well_known_routes = [
     Route("/.well-known/oauth-authorization-server", _oauth_stub, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server/{path:path}", _oauth_stub, methods=["GET"]),
