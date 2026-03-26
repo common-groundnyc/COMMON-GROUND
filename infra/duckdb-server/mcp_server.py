@@ -9400,6 +9400,30 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     # matching "Perlbinder, Barton M" or last_name=PERLBINDER first_name=BARTON)
     words = [w for w in search.split() if len(w) >= 2]
 
+    # Vector pre-pass: find similar names to expand search
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(search)
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:  # high similarity threshold — only very close matches
+                    extra_names.add(matched_name.upper())
+            # Remove the search term itself to avoid duplicating the base query
+            extra_names.discard(search)
+        except Exception:
+            pass
+
     # Splink probabilistic name resolution — find all name variants in the same cluster
     name_variants = _resolve_name_variants(db, name)
 
@@ -10095,6 +10119,15 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             loc = f"{r[3] or ''} {r[4] or ''}".strip() or "?"
             lines.append(f"    {r[1] or ''}, {r[2] or ''} | {loc} | cluster={r[5]}")
         lines.append("")
+
+    # Vector-matched name variants
+    if extra_names:
+        lines.append(f"\n{'='*45}")
+        lines.append("SIMILAR NAMES (vector match):")
+        lines.append("These names are similar and may be the same entity:")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
+        lines.append("Run entity_xray(name) on any of these for their full X-ray.")
 
     lines.append(f"({elapsed}ms)")
 
