@@ -22,6 +22,9 @@ from fastmcp.server.transforms.search import BM25SearchTransform
 from typing import Annotated
 from pydantic import Field
 
+from entity import phonetic_search_sql, fuzzy_name_sql
+from spatial import h3_kring_sql, h3_aggregate_sql, h3_heatmap_sql
+
 # ---------------------------------------------------------------------------
 # Reusable annotated types
 # ---------------------------------------------------------------------------
@@ -182,6 +185,11 @@ column_matches AS (
          AND c.table_name = t.table_name AND t.database_name = 'lake'
     WHERE c.database_name = 'lake'
 ),
+h3_tables AS (
+    SELECT DISTINCT source_table, COUNT(*) AS geo_rows
+    FROM lake.foundation.h3_index
+    GROUP BY source_table
+),
 all_matches AS (
     SELECT schema_name, table_name, comment, column_count, estimated_size,
            match_type, MAX(score) AS score
@@ -192,10 +200,14 @@ all_matches AS (
     )
     GROUP BY schema_name, table_name, comment, column_count, estimated_size, match_type
 )
-SELECT schema_name, table_name, comment, estimated_size, column_count, match_type, score
-FROM all_matches
-WHERE score >= 60
-ORDER BY score DESC, estimated_size DESC
+SELECT a.schema_name, a.table_name, a.comment, a.estimated_size, a.column_count,
+       a.match_type, a.score,
+       h.geo_rows IS NOT NULL AS has_geo,
+       COALESCE(h.geo_rows, 0) AS geo_row_count
+FROM all_matches a
+LEFT JOIN h3_tables h ON (a.schema_name || '.' || a.table_name) = h.source_table
+WHERE a.score >= 60
+ORDER BY a.score DESC, a.estimated_size DESC
 LIMIT 30
 """
 
@@ -10148,6 +10160,31 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             lines.append(f"    {r[1] or ''}, {r[2] or ''} | {loc} | cluster={r[5]}")
         lines.append("")
 
+    # Phonetic cross-reference (catches typos, spelling variants)
+    phonetic_matches = []
+    try:
+        parts = name.strip().split()
+        if len(parts) >= 2:
+            phonetic_sql = phonetic_search_sql(
+                first_name=parts[0], last_name=parts[-1], min_score=0.7, limit=20
+            )
+        else:
+            phonetic_sql = phonetic_search_sql(
+                first_name=None, last_name=name, min_score=0.7, limit=20
+            )
+        ph_cols, ph_rows = _execute(db, phonetic_sql)
+        phonetic_matches = [dict(zip(ph_cols, r)) for r in ph_rows]
+    except Exception:
+        pass  # Phonetic index may not exist yet
+
+    if phonetic_matches:
+        lines.append(f"--- PHONETIC MATCHES ({len(phonetic_matches)} cross-references) ---")
+        for m in phonetic_matches[:10]:
+            score = m.get("combined_score", 0)
+            src = m.get("source_table", "?")
+            lines.append(f"  {m.get('first_name', '')} {m.get('last_name', '')} | {src} | score: {score:.2f}")
+        lines.append("")
+
     # Vector-matched name variants
     if extra_names:
         lines.append(f"\n{'='*45}")
@@ -10192,6 +10229,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
                                 "city": r[3], "zip": r[4], "cluster_id": r[5]}
                                for r in splink_cluster_rows],
             "name_variants": [{"last_name": ln, "first_name": fn} for ln, fn in name_variants],
+            "phonetic_matches": phonetic_matches,
         },
         meta={"total_matches": total, "query_time_ms": elapsed},
     )
@@ -11872,6 +11910,129 @@ def top_crossrefs(
         return ToolResult(
             content=f"Top cross-refs lookup failed (resolved_entities may not exist): {e}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Spatial + phonetic tools (Tasks 13, 14, 16)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=READONLY)
+def hotspot_map(
+    latitude: Annotated[float, Field(description="Center latitude. Example: 40.7128")],
+    longitude: Annotated[float, Field(description="Center longitude. Example: -74.006")],
+    ctx: Context,
+    category: Annotated[str, Field(description="Data category: 'crime', 'violations', 'complaints', '311', 'restaurants'")] = "crime",
+    radius: Annotated[int, Field(description="H3 k-ring radius (1-5). 1=~200m, 3=~600m, 5=~1km")] = 3,
+) -> str:
+    """H3 hex heatmap around a point — see density of crime, violations, complaints."""
+    TABLE_MAP = {
+        "crime": "public_safety.nypd_complaints_ytd",
+        "violations": "housing.hpd_violations",
+        "complaints": "housing.hpd_complaints",
+        "311": "social_services.n311_service_requests",
+        "restaurants": "health.restaurant_inspections",
+    }
+    source = TABLE_MAP.get(category)
+    if not source:
+        raise ToolError(f"Unknown category '{category}'. Use: {', '.join(TABLE_MAP.keys())}")
+
+    db = ctx.lifespan_context["db"]
+    sql = h3_heatmap_sql(
+        source_table="lake.foundation.h3_index",
+        filter_table=source,
+        lat=latitude, lng=longitude,
+        radius_rings=min(radius, 5),
+    )
+    cols, raw_rows = _execute(db, sql)
+    if not raw_rows:
+        return f"No {category} data found near ({latitude}, {longitude}). Foundation H3 index may need materialization."
+
+    rows = [dict(zip(cols, r)) for r in raw_rows]
+    total = sum(r["count"] for r in rows)
+    hottest = rows[0]
+    return (
+        f"## {category.title()} Hotspot Map ({len(rows)} hex cells)\n\n"
+        f"**Center:** ({latitude}, {longitude}) | **Radius:** {radius} rings (~{radius * 200}m)\n"
+        f"**Total events:** {total:,}\n"
+        f"**Hottest cell:** {hottest['count']:,} events at ({hottest['cell_lat']:.4f}, {hottest['cell_lng']:.4f})\n\n"
+        + "\n".join(
+            f"| {r['h3_cell']} | {r['cell_lat']:.4f} | {r['cell_lng']:.4f} | {r['count']:,} |"
+            for r in rows[:20]
+        )
+    )
+
+
+@mcp.tool(annotations=READONLY)
+def name_variants(
+    name: NAME,
+    ctx: Context,
+) -> str:
+    """Find all phonetic matches for a name across the entire data lake.
+    Catches typos, maiden names, spelling variants, nicknames."""
+    db = ctx.lifespan_context["db"]
+    parts = name.strip().split()
+    if len(parts) >= 2:
+        sql = phonetic_search_sql(first_name=parts[0], last_name=parts[-1], limit=50)
+    else:
+        sql = phonetic_search_sql(first_name=None, last_name=name, limit=50)
+
+    cols, raw_rows = _execute(db, sql)
+    if not raw_rows:
+        return f"No phonetic matches for '{name}'. The phonetic index may need materialization."
+
+    rows = [dict(zip(cols, r)) for r in raw_rows]
+
+    by_source = {}
+    for r in rows:
+        src = r.get("source_table", "unknown")
+        by_source.setdefault(src, []).append(r)
+
+    lines = [f"## Name Variants for '{name}' ({len(rows)} matches across {len(by_source)} tables)\n"]
+    for src, matches in sorted(by_source.items(), key=lambda x: -len(x[1])):
+        lines.append(f"\n### {src} ({len(matches)} matches)")
+        for m in matches[:5]:
+            score = m.get("combined_score", 0)
+            lines.append(f"- {m.get('first_name', '')} {m.get('last_name', '')} (score: {score:.2f})")
+
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=READONLY)
+def lake_health(
+    ctx: Context,
+    schema: Annotated[str | None, Field(description="Filter to specific schema. Example: 'housing'")] = None,
+) -> str:
+    """Data lake health dashboard — row counts, null rates, freshness per table."""
+    db = ctx.lifespan_context["db"]
+    where = f"WHERE schema_name = '{schema}'" if schema else ""
+    cols, raw_rows = _execute(db, f"""
+        SELECT schema_name, table_name, row_count, column_count, high_null_columns, profiled_at
+        FROM lake.foundation.data_health
+        {where}
+        ORDER BY row_count DESC
+    """)
+    if not raw_rows:
+        return "No health data. Run the foundation_rebuild job first."
+
+    rows = [dict(zip(cols, r)) for r in raw_rows]
+    total_rows = sum(r["row_count"] for r in rows)
+    unhealthy = [r for r in rows if r["high_null_columns"] > 0]
+
+    lines = [
+        f"## Data Lake Health ({len(rows)} tables, {total_rows:,} total rows)\n",
+        f"**Tables with high-null columns:** {len(unhealthy)}\n",
+        "| Schema | Table | Rows | Cols | High-Null Cols |",
+        "|--------|-------|------|------|----------------|",
+    ]
+    for r in rows[:30]:
+        flag = " !" if r["high_null_columns"] > 0 else ""
+        lines.append(
+            f"| {r['schema_name']} | {r['table_name']} | {r['row_count']:,} | "
+            f"{r['column_count']} | {r['high_null_columns']}{flag} |"
+        )
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
