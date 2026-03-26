@@ -3102,12 +3102,46 @@ def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search
         schema_idx = cols.index("schema_name")
         rows = [r for r in rows if r[schema_idx] not in _HIDDEN_SCHEMAS]
 
+    # Semantic fallback: when rapidfuzz finds < 3 tables, try vector similarity on descriptions
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    semantic_note = ""
+    if embed_fn and len(rows) < 3:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(kw)
+            vec_literal = vec_to_sql(query_vec)
+            sem_sql = f"""
+                SELECT schema_name, table_name, description,
+                       array_cosine_distance(embedding, {vec_literal}) AS distance
+                FROM main.catalog_embeddings
+                WHERE table_name != '__schema__'
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sem_rows = db.execute(sem_sql).fetchall()
+            # Only include if similarity > 0.3 (distance < 0.7)
+            good_matches = [(s, t, d) for s, t, d, dist in sem_rows if dist < 0.7]
+            if good_matches:
+                semantic_note = "\n\nSemantic matches (by description similarity):\n"
+                for s, t, d in good_matches:
+                    semantic_note += f"  {s}.{t}: {d}\n"
+        except Exception:
+            pass
+
+    if not rows and semantic_note:
+        return ToolResult(content=f"No exact matches for '{kw}', but found related tables:{semantic_note}")
+
     if not rows:
         return ToolResult(
             content=f"No tables found matching '{kw}'. Try a broader term."
         )
 
     summary = f"Found {len(rows)} tables matching '{kw}':"
+    if semantic_note:
+        result = make_result(summary, cols, rows)
+        result = ToolResult(content=result.content + semantic_note)
+        return result
     return make_result(summary, cols, rows)
 
 
