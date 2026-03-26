@@ -10011,6 +10011,82 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     )
 
 
+VALID_ENTITY_SOURCES = frozenset({"owner", "corp_officer", "donor", "tx_party"})
+
+
+@mcp.tool(annotations=READONLY, tags={"entity"})
+def fuzzy_entity_search(
+    name: NAME,
+    ctx: Context,
+    source: Annotated[str, Field(description="Filter by source: 'owner', 'corp_officer', 'donor', 'tx_party', or 'all'")] = "all",
+    limit: Annotated[int, Field(description="Max results (1-50). Default: 20", ge=1, le=50)] = 20,
+) -> ToolResult:
+    """Find entities with similar names using vector similarity. Catches variations that exact search misses: 'Bob Smith' finds 'Robert Smith', 'R. Smith', 'Smith, Robert J.' Use this when entity_xray returns too few results. Sources: property owners, corporate officers, campaign donors, ACRIS transaction parties. Follow up with entity_xray(name) for full X-ray."""
+    if source != "all" and source not in VALID_ENTITY_SOURCES:
+        raise ToolError(
+            f"Invalid source '{source}'. Must be one of: {', '.join(sorted(VALID_ENTITY_SOURCES))}, or 'all'"
+        )
+
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    if embed_fn is None:
+        raise ToolError(
+            "Fuzzy entity search is unavailable — embedding model not loaded. Use entity_xray() for exact name matching instead."
+        )
+
+    from embedder import vec_to_sql
+
+    t0 = time.time()
+    vec = embed_fn(name.strip())
+    vec_literal = vec_to_sql(vec)
+
+    source_filter = f"WHERE source = '{source}'" if source != "all" else ""
+
+    sql = f"""
+        SELECT source, name,
+               1.0 - array_cosine_distance(embedding, {vec_literal}) AS similarity
+        FROM main.entity_name_embeddings
+        {source_filter}
+        ORDER BY array_cosine_distance(embedding, {vec_literal})
+        LIMIT {limit}
+    """
+
+    with _db_lock:
+        try:
+            db = ctx.lifespan_context["db"]
+            cur = db.execute(sql)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        except Exception as e:
+            raise ToolError(f"Fuzzy entity search failed: {e}")
+
+    elapsed = round((time.time() - t0) * 1000)
+
+    if not rows:
+        return ToolResult(
+            content=f"No similar entities found for '{name}'. Try a shorter name or check spelling.",
+            meta={"query_time_ms": elapsed},
+        )
+
+    lines = [f"Top {len(rows)} similar entities for '{name}' ({elapsed}ms)\n"]
+    for i, row in enumerate(rows, 1):
+        rec = dict(zip(cols, row))
+        pct = round(rec["similarity"] * 100, 1)
+        lines.append(f"{i}. [{rec['source']}] {rec['name']} — {pct}% similarity")
+
+    lines.append(
+        "\nUse entity_xray(name) to get the full X-ray for any matched entity."
+    )
+
+    content = "\n".join(lines)
+    structured = [dict(zip(cols, row)) for row in rows]
+
+    return ToolResult(
+        content=content,
+        structured_content=structured,
+        meta={"query_time_ms": elapsed, "result_count": len(rows), "source_filter": source},
+    )
+
+
 @mcp.tool(annotations=READONLY, tags={"investigation"})
 def marriage_search(surname: Annotated[str, Field(description="Last name to search. Matches both bride and groom. Example: 'SMITH'")], first_name: Annotated[str, Field(description="Optional first name filter. Example: 'JOHN'")] = "", ctx: Context = None) -> ToolResult:
     """Search NYC marriage records (1866-2017, ~10M records) by bride or groom surname. Combines marriage certificates 1866-1937 and marriage index 1950-2017. Use this to find marriage record matches, confirm family relationships, or trace wedding and family history. Parameters: surname (required), first_name (optional filter). Example: marriage_search("PERLBINDER", "BARTON"). For broader person search, use entity_xray(name) or person_crossref(name)."""
