@@ -7,7 +7,7 @@ Full rebuild of the DuckPGQ property graph layer powering 60+ MCP tools in the C
 ## Milestones
 
 - ✅ **v1.0 Entity Resolution** — Phases 1-8 (shipped 2026-03-17)
-- 🚧 **v2.0 DuckPGQ Graph Rebuild** — Phases 1-10 (in progress)
+- ✅ **v2.0 DuckPGQ Graph Rebuild** — Phases 1-10 (shipped 2026-03-26)
 
 ## Domain Expertise
 
@@ -22,7 +22,7 @@ Splink probabilistic entity resolution across 44 tables, 55.5M records, producin
 
 </details>
 
-### 🚧 v2.0 DuckPGQ Graph Rebuild
+### ✅ v2.0 DuckPGQ Graph Rebuild
 
 **Milestone Goal:** Rebuild every property graph to maximum data coverage, fix all broken tools, unlock unused DuckPGQ algorithms, and enable cross-domain entity tracing.
 
@@ -136,8 +136,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 10-01: Add SQL fallbacks to all graph tools, add graph_health diagnostic tool
-- [ ] 10-02: Full MCP Inspector test suite — verify every tool passes, fix any remaining failures
+- [x] 10-01: Permanent property_history fix + graph_health tool + entity_xray float fix + full 18/18 MCP test suite ✓
+- ~~10-02: Merged into 10-01 — full test suite run as part of validation~~
 
 ## Progress
 
@@ -154,4 +154,4 @@ Plans:
 | 7. Cross-Domain Graph | 2/2 | Complete | 2026-03-26 |
 | 8. PageRank Integration | 1/1 | Complete | 2026-03-26 |
 | 9. Path-Finding Tools | 1/1 | Complete | 2026-03-26 |
-| 10. Validation & Hardening | 0/2 | Not started | — |
+| 10. Validation & Hardening | 1/1 | Complete | 2026-03-26 |
