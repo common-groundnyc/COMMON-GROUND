@@ -15,7 +15,7 @@ from fastmcp.tools.tool import ToolResult
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from fastmcp.server.transforms.search import BM25SearchTransform
-from fastmcp.experimental.transforms.code_mode import CodeMode
+
 from typing import Annotated
 from pydantic import Field
 
@@ -2314,7 +2314,7 @@ Too many tools? Use search_tools(query) to discover domain tools.
 BBL: 10 digits = borough(1) + block(5) + lot(4). Example: 1000670001
 ZIP: 5 digits. Manhattan 100xx, Brooklyn 112xx, Bronx 104xx, Queens 11xxx, SI 103xx.
 SQL example: SELECT * FROM lake.housing.hpd_violations LIMIT 5
-POWER USER: Use execute_code to chain multiple tool calls in one step.
+
 """
 
 # ---------------------------------------------------------------------------
@@ -2348,7 +2348,6 @@ mcp = FastMCP(
             max_results=5,
             always_visible=ALWAYS_VISIBLE,
         ),
-        CodeMode(),
     ],
 )
 
