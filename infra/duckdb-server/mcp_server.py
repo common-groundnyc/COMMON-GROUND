@@ -2310,35 +2310,21 @@ SQL example: SELECT * FROM lake.housing.hpd_violations LIMIT 5
 # ---------------------------------------------------------------------------
 
 ALWAYS_VISIBLE = [
+    # Data discovery (always needed)
     "sql_query",
     "data_catalog",
     "list_schemas",
-    "list_tables",
-    "describe_table",
+    # Building-centric (most common user intent)
     "building_profile",
     "landlord_watchdog",
-    "safety_report",
-    "environmental_justice",
-    "resource_finder",
-    "gentrification_tracker",
-    "building_story",
-    "neighborhood_portrait",
-    "nyc_twins",
-    "block_timeline",
-    "building_context",
-    "landlord_network",
-    "ownership_clusters",
-    "worst_landlords",
-    "llc_piercer",
+    # Person/entity investigation
     "entity_xray",
-    "property_history",
-    "enforcement_web",
-    "flipper_detector",
-    "transaction_network",
-    "corporate_web",
-    "shell_detector",
-    "pay_to_play",
-    "contractor_network",
+    "person_crossref",
+    # Neighborhood/area
+    "neighborhood_portrait",
+    "safety_report",
+    # Graph power tools
+    "landlord_network",
 ]
 
 mcp = FastMCP(
