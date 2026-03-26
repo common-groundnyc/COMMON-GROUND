@@ -67,7 +67,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: Rebuild graph_owners with name-based keys, expand graph_buildings from PLUTO
+- [x] 03-01: Rebuild graph_owners with name-based keys, expand graph_buildings from PLUTO ✓
 - [ ] 03-02: Rebuild graph_shared_owner, graph_owns, verify nyc_housing + nyc_building_network graphs
 
 ### Phase 4: Corporate Web Rebuild
@@ -147,7 +147,7 @@ Plans:
 |-------|-------|--------|-----------|
 | 1. Data Audit | 2/2 | Complete | 2026-03-26 |
 | 2. Bug Fixes | 2/2 | Complete | 2026-03-26 |
-| 3. Ownership Rebuild | 0/2 | Not started | — |
+| 3. Ownership Rebuild | 1/2 | In progress | — |
 | 4. Corporate Web Rebuild | 0/2 | Not started | — |
 | 5. Transaction Expansion | 0/1 | Not started | — |
 | 6. Influence Expansion | 0/1 | Not started | — |

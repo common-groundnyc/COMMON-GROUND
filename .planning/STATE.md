@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 3 — Ownership Graph Rebuild (Phase 2 complete)
+**Current focus:** Phase 3 — Ownership Graph Rebuild (Plan 1 of 2 complete)
 
 ## Current Position
 
 Phase: 3 of 10 (Ownership Graph Rebuild)
-Plan: 0 of 2 complete
-Status: Ready to start
-Last activity: 2026-03-26 — Completed 02-02 (data bug fixes: property_history, graph_corps dedup, orphaned violations)
+Plan: 1 of 2 complete
+Status: Executing
+Last activity: 2026-03-26 — Completed 03-01 (core table rebuilds: name-based owners, PLUTO buildings, ownership edges)
 
-Progress: ███░░░░░░░ 20%
+Progress: ███▌░░░░░░ 25%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4 (v2.0) / 8 (v1.0)
-- Average duration: ~56 min
-- Total execution time: 3.25 hours
+- Total plans completed: 5 (v2.0) / 8 (v1.0)
+- Average duration: ~63 min
+- Total execution time: 4.75 hours
 
 **By Phase:**
 
@@ -29,10 +29,11 @@ Progress: ███░░░░░░░ 20%
 |-------|-------|-------|----------|
 | 1. Data Audit | 2/2 | 60 min | 30 min |
 | 2. Bug Fixes | 2/2 | 135 min | 68 min |
+| 3. Ownership Rebuild | 1/2 | 90 min | 90 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 ✓, 01-02 ✓, 02-01 ✓, 02-02 ✓
-- Trend: Data fixes faster than infrastructure (45 min vs 90 min)
+- Last 5 plans: 01-02 ✓, 02-01 ✓, 02-02 ✓, 03-01 ✓
+- Trend: Infrastructure changes (OOM debugging) slower than data fixes
 
 ## Accumulated Context
 
@@ -48,6 +49,12 @@ Progress: ███░░░░░░░ 20%
 - **Reconnect path is primary startup path** — warm-up always fails, all init must be in reconnect
 - **QUALIFY must be inside CTE** — not on outer `SELECT *` (02-02 discovery)
 - **docker cp required for container updates** — mcp_server.py baked into image, not mounted
+- **Name-based PK for graph_owners** — UPPER(TRIM(owner_name)) replaces registrationid (03-01)
+- **PLUTO BBL is float string** — use LEFT(bbl, 10) to extract 10-char BBL (03-01)
+- **Stage DuckLake reads as temp tables** — avoids full-table scans during UNION (03-01)
+- **Mega-owner filter (>100 buildings)** — prevents O(n^2) in graph_shared_owner self-join (03-01)
+- **DuckDB config options lock after startup** — must SET at initial connection, not dynamically (03-01)
+- **Memory tuning: 18GB limit, 4 threads, insertion order off** — required for expanded PLUTO data (03-01)
 
 ### Prior Milestone Context (v1.0 Entity Resolution)
 
@@ -71,6 +78,6 @@ Progress: ███░░░░░░░ 20%
 
 ## Session Continuity
 
-Last session: 2026-03-26 02:20
-Stopped at: 02-02 complete (data bug fixes). Phase 2 done. Ready for Phase 3 (Ownership Graph Rebuild).
+Last session: 2026-03-26 06:00
+Stopped at: 03-01 complete (core table rebuilds). graph_owners/buildings/owns rebuilt with name-based PK + PLUTO. Ready for 03-02.
 Resume file: None
