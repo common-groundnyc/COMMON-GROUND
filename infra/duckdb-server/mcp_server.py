@@ -6244,6 +6244,148 @@ def vital_records(
 
 
 # ---------------------------------------------------------------------------
+# Money Trail — Full Political Money Tracker
+# ---------------------------------------------------------------------------
+
+MONEY_NYS_DONATIONS_SQL = """
+SELECT filer_name, flng_ent_first_name, flng_ent_last_name,
+       SUM(TRY_CAST(org_amt AS DOUBLE)) AS total_donated,
+       COUNT(*) AS donations,
+       MIN(sched_date) AS first_donation,
+       MAX(sched_date) AS last_donation
+FROM lake.federal.nys_campaign_finance
+WHERE (flng_ent_last_name ILIKE ? AND flng_ent_first_name ILIKE ?)
+   OR filer_name ILIKE '%' || ? || '%'
+GROUP BY filer_name, flng_ent_first_name, flng_ent_last_name
+ORDER BY total_donated DESC NULLS LAST
+LIMIT 15
+"""
+
+MONEY_FEC_SQL = """
+SELECT cmte_id, name,
+       SUM(TRY_CAST(transaction_amt AS DOUBLE)) AS total,
+       COUNT(*) AS donations,
+       MIN(transaction_dt) AS first_date,
+       MAX(transaction_dt) AS last_date
+FROM lake.federal.fec_contributions
+WHERE name ILIKE '%' || ? || '%'
+GROUP BY cmte_id, name
+ORDER BY total DESC NULLS LAST
+LIMIT 15
+"""
+
+MONEY_NYC_DONATIONS_SQL = """
+SELECT recipname, occupation, empname, empstrno,
+       SUM(TRY_CAST(amnt AS DOUBLE)) AS total,
+       COUNT(*) AS donations
+FROM lake.city_government.campaign_contributions
+WHERE (name ILIKE '%' || ? || '%')
+   OR (empname ILIKE '%' || ? || '%')
+GROUP BY recipname, occupation, empname, empstrno
+ORDER BY total DESC NULLS LAST
+LIMIT 15
+"""
+
+MONEY_CONTRACTS_SQL = """
+SELECT vendor_name, contract_amount, agency_name, short_title, start_date, end_date
+FROM lake.city_government.contract_awards
+WHERE vendor_name ILIKE '%' || ? || '%'
+ORDER BY TRY_CAST(contract_amount AS DOUBLE) DESC NULLS LAST
+LIMIT 10
+"""
+
+MONEY_PROCUREMENT_SQL = """
+SELECT vendor_name, contract_amount, contracting_agency, contract_description
+FROM lake.financial.nys_procurement_state
+WHERE vendor_name ILIKE '%' || ? || '%'
+ORDER BY TRY_CAST(contract_amount AS DOUBLE) DESC NULLS LAST
+LIMIT 10
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"finance", "investigation"})
+def money_trail(
+    name: NAME,
+    ctx: Context,
+) -> ToolResult:
+    """Trace ALL political money for a person or entity — NYS campaign donations (69M records), federal FEC contributions (44M), NYC campaign finance, city contracts, and state procurement. Goes broader than pay_to_play which only covers city-level donations. Use this for political influence, donation history, or government contract analysis. For corporate network analysis, use corporate_web(name). For lobbying specifically, use pay_to_play(name)."""
+    name = name.strip()
+    if len(name) < 3:
+        raise ToolError("Name must be at least 3 characters.")
+
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    parts = name.split()
+    first = parts[0] if len(parts) >= 2 else "%"
+    last = parts[-1] if len(parts) >= 2 else name
+
+    _, nys_rows = _safe_query(db, MONEY_NYS_DONATIONS_SQL, [f"{last}%", f"{first}%", name])
+    _, fec_rows = _safe_query(db, MONEY_FEC_SQL, [name])
+    _, nyc_rows = _safe_query(db, MONEY_NYC_DONATIONS_SQL, [name, name])
+    _, contract_rows = _safe_query(db, MONEY_CONTRACTS_SQL, [name])
+    _, procurement_rows = _safe_query(db, MONEY_PROCUREMENT_SQL, [name])
+
+    total_sections = sum(1 for r in [nys_rows, fec_rows, nyc_rows, contract_rows, procurement_rows] if r)
+    if total_sections == 0:
+        raise ToolError(f"No political money records found for '{name}'.")
+
+    lines = [f"MONEY TRAIL — {name}", "=" * 55]
+
+    # NYS Campaign Finance
+    if nys_rows:
+        nys_total = sum(float(r[3] or 0) for r in nys_rows)
+        nys_count = sum(int(r[4] or 0) for r in nys_rows)
+        lines.append(f"\nNYS CAMPAIGN FINANCE ({nys_count} donations, ${nys_total:,.0f} total):")
+        for r in nys_rows[:8]:
+            filer, fn, ln, total, cnt, first_d, last_d = r
+            lines.append(f"  → {filer}: ${float(total or 0):,.0f} ({cnt} donations, {first_d or '?'}–{last_d or '?'})")
+
+    # FEC Federal
+    if fec_rows:
+        fec_total = sum(float(r[2] or 0) for r in fec_rows)
+        lines.append(f"\nFEDERAL (FEC) CONTRIBUTIONS (${fec_total:,.0f} total):")
+        for r in fec_rows[:8]:
+            cmte_id, contributor, total, cnt, first_d, last_d = r
+            lines.append(f"  → {cmte_id} ({contributor}): ${float(total or 0):,.0f} ({cnt} donations)")
+
+    # NYC CFB
+    if nyc_rows:
+        nyc_total = sum(float(r[4] or 0) for r in nyc_rows)
+        lines.append(f"\nNYC CAMPAIGN FINANCE (${nyc_total:,.0f} total):")
+        for r in nyc_rows[:8]:
+            recip, occ, emp, addr, total, cnt = r
+            lines.append(f"  → {recip}: ${float(total or 0):,.0f} ({cnt} donations)")
+            if emp:
+                lines.append(f"    Employer: {emp}")
+
+    # City contracts
+    if contract_rows:
+        lines.append(f"\nCITY CONTRACTS ({len(contract_rows)} awards):")
+        for r in contract_rows[:5]:
+            vendor, amount, agency, purpose, start, end = r
+            lines.append(f"  {vendor}: ${float(amount or 0):,.0f} — {agency or '?'}")
+            if purpose:
+                lines.append(f"    {purpose[:120]}")
+
+    # State procurement
+    if procurement_rows:
+        lines.append(f"\nSTATE PROCUREMENT ({len(procurement_rows)} contracts):")
+        for r in procurement_rows[:5]:
+            vendor, amount, agency, desc = r
+            lines.append(f"  {vendor}: ${float(amount or 0):,.0f} — {agency or '?'}")
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={"name": name, "nys_donations": len(nys_rows), "fec_donations": len(fec_rows), "nyc_donations": len(nyc_rows), "contracts": len(contract_rows)},
+        meta={"name": name, "query_time_ms": elapsed},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Commercial Vitality
 # ---------------------------------------------------------------------------
 
