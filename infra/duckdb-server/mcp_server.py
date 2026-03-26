@@ -5626,6 +5626,130 @@ def school_search(
 
 
 # ---------------------------------------------------------------------------
+# School Compare
+# ---------------------------------------------------------------------------
+
+SCHOOL_COMPARE_SCORES_SQL = """
+SELECT
+    d.dbn,
+    d.school_name,
+    TRY_CAST(d.total_enrollment AS INT) AS enrollment,
+    (SELECT COALESCE(level_3_4_1, level_3_4)
+     FROM lake.education.ela_results
+     WHERE geographic_subdivision = d.dbn AND report_category = 'School' AND grade = 'All Grades'
+     ORDER BY year DESC LIMIT 1) AS ela_proficient_pct,
+    (SELECT mean_scale_score
+     FROM lake.education.ela_results
+     WHERE geographic_subdivision = d.dbn AND report_category = 'School' AND grade = 'All Grades'
+     ORDER BY year DESC LIMIT 1) AS ela_mean,
+    (SELECT COALESCE(pct_level_3_and_4, num_level_3_and_4)
+     FROM lake.education.math_results
+     WHERE geographic_division = d.dbn AND report_category = 'School' AND grade = 'All Grades'
+     ORDER BY year DESC LIMIT 1) AS math_proficient_pct,
+    (SELECT mean_scale_score
+     FROM lake.education.math_results
+     WHERE geographic_division = d.dbn AND report_category = 'School' AND grade = 'All Grades'
+     -- NOTE: math_results uses geographic_division (not geographic_subdivision like ela_results)
+     ORDER BY year DESC LIMIT 1) AS math_mean,
+    (SELECT attendance
+     FROM lake.education.chronic_absenteeism
+     WHERE dbn = d.dbn AND grade = 'All Grades'
+     ORDER BY year DESC LIMIT 1) AS attendance_pct,
+    (SELECT chronically_absent_1
+     FROM lake.education.chronic_absenteeism
+     WHERE dbn = d.dbn AND grade = 'All Grades'
+     ORDER BY year DESC LIMIT 1) AS chronic_absent_pct,
+    (SELECT trust_score
+     FROM lake.education.survey_parents
+     WHERE dbn = d.dbn LIMIT 1) AS parent_trust,
+    (SELECT COALESCE(TRY_CAST(major_n AS INT), 0) + COALESCE(TRY_CAST(vio_n AS INT), 0)
+     FROM lake.education.school_safety
+     WHERE dbn = d.dbn
+     ORDER BY school_year DESC LIMIT 1) AS safety_incidents,
+    (SELECT ROUND(AVG(TRY_CAST(average_class_size AS DOUBLE)), 1)
+     FROM lake.education.class_size
+     WHERE dbn = d.dbn) AS avg_class_size,
+    d.asian_1 AS asian_pct,
+    d.black_1 AS black_pct,
+    d.hispanic_1 AS hispanic_pct,
+    d.white_1 AS white_pct,
+    s.postcode AS zipcode
+FROM lake.education.demographics_2020 d
+LEFT JOIN lake.education.school_safety s ON d.dbn = s.dbn
+WHERE d.dbn IN ({placeholders})
+ORDER BY d.dbn
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"education"})
+def school_compare(
+    dbns: Annotated[list[str], Field(description="2-7 school DBNs to compare. Example: ['02M475', '02M545', '13K330']")],
+    ctx: Context,
+) -> ToolResult:
+    """Compare 2-7 NYC public schools side-by-side across test scores, attendance, safety, class size, demographics, and parent trust. Use school_search(query) first to find DBNs. Example: school_compare(['02M475', '02M545']). For a single school deep-dive, use school_report(dbn). For district-level comparison, use district_report(district)."""
+    if len(dbns) < 2:
+        raise ToolError("Provide at least 2 DBNs to compare. Use school_search(query) to find DBNs.")
+    if len(dbns) > 7:
+        raise ToolError("Maximum 7 schools per comparison.")
+
+    dbns = [d.strip().upper() for d in dbns]
+    for d in dbns:
+        if not re.match(r'^[A-Z0-9]{5,6}$', d):
+            raise ToolError(f"Invalid DBN format: '{d}'. Expected 5-6 alphanumeric chars like 02M001.")
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    placeholders = ",".join(["?"] * len(dbns))
+    sql = SCHOOL_COMPARE_SCORES_SQL.replace("{placeholders}", placeholders)
+    _, rows = _safe_query(db, sql, dbns)
+
+    if not rows:
+        raise ToolError(f"No data found for DBNs: {', '.join(dbns)}. Verify with school_search().")
+
+    lines = [f"SCHOOL COMPARISON — {len(rows)} schools", "=" * 60]
+
+    names = [r[1][:25] for r in rows]
+    lines.append(f"\n{'Metric':<25} | " + " | ".join(f"{n:<25}" for n in names))
+    lines.append("-" * (27 + 28 * len(rows)))
+
+    metrics = [
+        ("Enrollment", 2, "{:,}"),
+        ("ELA Proficient %", 3, "{}%"),
+        ("ELA Mean Score", 4, "{}"),
+        ("Math Proficient %", 5, "{}%"),
+        ("Math Mean Score", 6, "{}"),
+        ("Attendance %", 7, "{}%"),
+        ("Chronic Absent %", 8, "{}%"),
+        ("Parent Trust", 9, "{}"),
+        ("Safety Incidents", 10, "{}"),
+        ("Avg Class Size", 11, "{}"),
+        ("Asian %", 12, "{}%"),
+        ("Black %", 13, "{}%"),
+        ("Hispanic %", 14, "{}%"),
+        ("White %", 15, "{}%"),
+    ]
+
+    for label, idx, fmt in metrics:
+        vals = []
+        for r in rows:
+            v = r[idx] if idx < len(r) and r[idx] is not None else "—"
+            try:
+                vals.append(fmt.format(v))
+            except (ValueError, TypeError):
+                vals.append(str(v) if v != "—" else "—")
+        lines.append(f"{label:<25} | " + " | ".join(f"{v:<25}" for v in vals))
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={"dbns": dbns, "schools": [{"dbn": r[0], "name": r[1], "enrollment": r[2]} for r in rows]},
+        meta={"dbn_count": len(dbns), "query_time_ms": elapsed},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Commercial Vitality
 # ---------------------------------------------------------------------------
 
