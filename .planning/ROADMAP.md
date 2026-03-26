@@ -57,7 +57,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: Infrastructure fixes — S3 credential resolution + duckpgq extension loading (launch blockers)
+- [x] 02-01: Infrastructure fixes — S3 creds (reconnect path), duckpgq (FORCE INSTALL), MinIO HTTP ✓
 - [ ] 02-02: Data fixes — property_history sort, graph_corps dedup, orphaned violations + full MCP re-test
 
 ### Phase 3: Ownership Graph Rebuild
@@ -146,7 +146,7 @@ Plans:
 | Phase | Plans | Status | Completed |
 |-------|-------|--------|-----------|
 | 1. Data Audit | 2/2 | Complete | 2026-03-26 |
-| 2. Bug Fixes | 0/2 | Not started | — |
+| 2. Bug Fixes | 1/2 | In progress | — |
 | 3. Ownership Rebuild | 0/2 | Not started | — |
 | 4. Corporate Web Rebuild | 0/2 | Not started | — |
 | 5. Transaction Expansion | 0/1 | Not started | — |
