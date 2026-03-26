@@ -10,7 +10,7 @@ _DEFAULT_MODEL_DIR = Path(__file__).parent / "model"
 _OR_URL = "https://openrouter.ai/api/v1/embeddings"
 _OR_MODEL = "google/gemini-embedding-001"  # 768 dims (reduced via Matryoshka)
 _OR_BATCH_SIZE = 250  # Gemini max per request
-_OR_CONCURRENCY = 15  # parallel threads
+_OR_CONCURRENCY = 8  # parallel threads (too many triggers OpenRouter 404s)
 
 
 def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = None):
@@ -35,7 +35,7 @@ def _create_api_embedder(api_key: str):
         """Single API call for ≤250 texts. Retries up to 3 times."""
         for attempt in range(3):
             try:
-                payload = json.dumps({"model": _OR_MODEL, "input": texts, "dimensions": dims}).encode()
+                payload = json.dumps({"model": _OR_MODEL, "input": texts}).encode()
                 req = urllib.request.Request(
                     _OR_URL, data=payload,
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -45,7 +45,8 @@ def _create_api_embedder(api_key: str):
                 if "data" not in data:
                     raise ValueError(f"API error: {data.get('error', data)}")
                 embeddings = sorted(data["data"], key=lambda x: x["index"])
-                return [e["embedding"] for e in embeddings]
+                # Truncate to dims (Matryoshka) — Gemini returns 3072 natively
+                return [e["embedding"][:dims] for e in embeddings]
             except Exception:
                 if attempt == 2:
                     raise
