@@ -5175,9 +5175,9 @@ LIMIT 5
 
 SCHOOL_MATH_SQL = """
 SELECT year, grade, number_tested, mean_scale_score,
-       pct_level_3_and_4, level_3_4, level_3_4_1
+       pct_level_3_and_4, num_level_3_and_4, num_level_3_and_4
 FROM lake.education.math_results
-WHERE geographic_subdivision = ? AND report_category = 'School'
+WHERE geographic_division = ? AND report_category = 'School'
   AND grade = 'All Grades'
 ORDER BY year DESC
 LIMIT 5
@@ -5198,10 +5198,118 @@ WHERE dbn = ?
 LIMIT 1
 """
 
+SCHOOL_DEMOGRAPHICS_SQL = """
+SELECT year, total_enrollment, female, female_1, male, male_1,
+       asian, asian_1, black, black_1, hispanic, hispanic_1,
+       multi_racial, multi_racial_1, white, white_1
+FROM lake.education.demographics_2020
+WHERE dbn = ?
+ORDER BY year DESC
+LIMIT 1
+"""
 
-@mcp.tool(annotations=READONLY, tags={"services"})
+SCHOOL_ATTENDANCE_SQL = """
+SELECT year, school_name, grade, attendance, chronically_absent_1
+FROM lake.education.chronic_absenteeism
+WHERE dbn = ?
+  AND grade = 'All Grades'
+ORDER BY year DESC
+LIMIT 3
+"""
+
+SCHOOL_CLASS_SIZE_SQL = """
+SELECT grade_level, program_type,
+       ROUND(AVG(TRY_CAST(average_class_size AS DOUBLE)), 1) AS avg_size,
+       MIN(TRY_CAST(minimum_class_size AS INT)) AS min_size,
+       MAX(TRY_CAST(maximum_class_size AS INT)) AS max_size,
+       SUM(TRY_CAST(number_of_students AS INT)) AS students,
+       SUM(TRY_CAST(number_of_classes AS INT)) AS classes
+FROM lake.education.class_size
+WHERE dbn = ?
+GROUP BY grade_level, program_type
+ORDER BY grade_level
+"""
+
+SCHOOL_SURVEY_SQL = """
+SELECT
+    p.school_name,
+    p.collaborative_teachers_score AS p_teachers,
+    p.effective_school_leadership AS p_leadership,
+    p.rigorous_instruction_score AS p_rigor,
+    p.supportive_environment_score AS p_environment,
+    p.trust_score AS p_trust,
+    p.total_parent_response_rate AS parent_rate,
+    t.collaborative_teachers_score AS t_teachers,
+    t.effective_school_leadership AS t_leadership,
+    t.rigorous_instruction_score AS t_rigor,
+    t.supportive_environment_score AS t_environment,
+    t.trust_score AS t_trust,
+    t.total_teacher_response_rate AS teacher_rate,
+    s.collaborative_teachers_score AS s_teachers,
+    s.effective_school_leadership AS s_leadership,
+    s.rigorous_instruction_score AS s_rigor,
+    s.supportive_environment_score AS s_environment,
+    s.trust_score AS s_trust,
+    s.total_student_response_rate AS student_rate
+FROM lake.education.survey_parents p
+LEFT JOIN lake.education.survey_teachers t ON p.dbn = t.dbn
+LEFT JOIN lake.education.survey_students s ON p.dbn = s.dbn
+WHERE p.dbn = ?
+LIMIT 1
+"""
+
+SCHOOL_SAFETY_DETAIL_SQL = """
+SELECT school_year, location_name, address, borough_name, postcode,
+       register, major_n, oth_n, nocrim_n, prop_n, vio_n,
+       engroupa, bbl, latitude, longitude
+FROM lake.education.school_safety
+WHERE dbn = ?
+ORDER BY school_year DESC
+LIMIT 3
+"""
+
+SCHOOL_REGENTS_SQL = """
+SELECT regents_exam, year, total_tested, mean_score,
+       percent_scoring_65_or_above, percent_scoring_80_or_above
+FROM lake.education.regents_results
+WHERE school_dbn = ?
+  AND category = 'All Students'
+ORDER BY year DESC, regents_exam
+LIMIT 20
+"""
+
+SCHOOL_CAFETERIA_SQL = """
+SELECT inspectiondate, level, code, violationdescription
+FROM lake.health.school_cafeteria_inspections
+WHERE entityid = ?
+ORDER BY TRY_CAST(inspectiondate AS DATE) DESC NULLS LAST
+LIMIT 10
+"""
+
+SCHOOL_SPECIALIZED_HS_SQL = """
+SELECT year, count_of_testers, number_of_offers, number_of_discovery_participants
+FROM lake.education.specialized_hs_tests
+WHERE feeder_school_dbn = ?
+ORDER BY year DESC
+LIMIT 5
+"""
+
+SCHOOL_DISCHARGE_SQL = """
+SELECT year, discharge_category, discharge_description,
+       SUM(TRY_CAST(count_of_students AS INT)) AS students
+FROM lake.education.discharge_reporting
+WHERE report_category = 'School'
+  AND geographic_unit = ?
+  AND student_category = 'All Students'
+GROUP BY year, discharge_category, discharge_description
+ORDER BY year DESC, students DESC
+LIMIT 15
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"education", "services"})
 def school_report(dbn: Annotated[str, Field(description="School DBN: district(2) + borough letter(1) + number(3). Example: 02M001. Borough: M=Manhattan, X=Bronx, K=Brooklyn, Q=Queens, R=Staten Island")], ctx: Context) -> ToolResult:
-    """Comprehensive school performance report for a NYC public school by DBN — test scores (ELA and Math), enrollment, performance ratings, and education quality. Use this when someone asks about a specific school. DBN format: district(2) + borough letter + number(3). Borough letters: M=Manhattan, X=Bronx, K=Brooklyn, Q=Queens, R=Staten Island. Examples: 02M001 (PS 1, Manhattan), 13K330 (Brooklyn). For neighborhood-level education stats, use neighborhood_portrait(zipcode)."""
+    """Comprehensive school report for a NYC public school by DBN — test scores, demographics, attendance, safety, class size, surveys, cafeteria inspections, and Regents results. Use school_search(query) first to find DBNs if you don't know them. For comparing schools, use school_compare([dbns]). For district-level stats, use district_report(district). DBN format: district(2) + borough letter + number(3). Examples: 02M001 (PS 1, Manhattan), 13K330 (Brooklyn)."""
     dbn = dbn.strip().upper()
     if len(dbn) < 5 or len(dbn) > 6:
         raise ToolError("DBN must be 5-6 characters. Format: district(2) + borough(1) + number(3). Example: 02M001")
@@ -5209,47 +5317,72 @@ def school_report(dbn: Annotated[str, Field(description="School DBN: district(2)
     db = ctx.lifespan_context["db"]
     t0 = time.time()
 
-    # Directory info
+    # --- Existing queries ---
     _, dir_rows = _safe_query(db, SCHOOL_DIRECTORY_SQL, [dbn])
-
-    # Performance scores
     _, perf_rows = _safe_query(db, SCHOOL_PERFORMANCE_SQL, [dbn])
-
-    # ELA test results
     _, ela_rows = _safe_query(db, SCHOOL_ELA_SQL, [dbn])
-
-    # Math test results
     _, math_rows = _safe_query(db, SCHOOL_MATH_SQL, [dbn])
-
-    # Quality report
     _, qual_rows = _safe_query(db, SCHOOL_QUALITY_SQL, [dbn])
 
-    if not dir_rows and not perf_rows and not ela_rows:
-        raise ToolError(f"No school found for DBN {dbn}. Check the format: 02M001, 13K330, etc.")
+    # --- New queries ---
+    _, demo_rows = _safe_query(db, SCHOOL_DEMOGRAPHICS_SQL, [dbn])
+    _, attend_rows = _safe_query(db, SCHOOL_ATTENDANCE_SQL, [dbn])
+    _, class_rows = _safe_query(db, SCHOOL_CLASS_SIZE_SQL, [dbn])
+    _, survey_rows = _safe_query(db, SCHOOL_SURVEY_SQL, [dbn])
+    _, safety_rows = _safe_query(db, SCHOOL_SAFETY_DETAIL_SQL, [dbn])
+    _, regents_rows = _safe_query(db, SCHOOL_REGENTS_SQL, [dbn])
+    _, cafe_rows = _safe_query(db, SCHOOL_CAFETERIA_SQL, [dbn])
+    _, shsat_rows = _safe_query(db, SCHOOL_SPECIALIZED_HS_SQL, [dbn])
+    _, discharge_rows = _safe_query(db, SCHOOL_DISCHARGE_SQL, [dbn])
 
-    lines = [f"SCHOOL REPORT — {dbn}", "=" * 45]
+    if not dir_rows and not perf_rows and not ela_rows and not demo_rows and not safety_rows:
+        raise ToolError(f"No school found for DBN {dbn}. Use school_search(name) to find the correct DBN.")
 
-    # Directory
+    lines = [f"SCHOOL REPORT — {dbn}", "=" * 55]
+
+    # --- Directory (existing, from schools_directory if it exists) ---
     if dir_rows:
         d = dir_rows[0]
-        lines.append(f"\n{d[1]}")  # school name
+        lines.append(f"\n{d[1]}")
         lines.append(f"  District {d[2]} | Principal: {d[3] or 'N/A'}")
         lines.append(f"  Admission: {d[4] or 'N/A'}")
         flags = []
-        if d[5] == '1':
-            flags.append("Community School")
-        if d[6] == '1':
-            flags.append("Gifted & Talented")
-        if d[7] == '1':
-            flags.append("CTE")
-        if d[8] and d[8] != '0':
-            flags.append(f"Dual Language/Transitional")
-        if d[9]:
-            flags.append(f"Federal: {d[9]}")
+        if d[5] == '1': flags.append("Community School")
+        if d[6] == '1': flags.append("Gifted & Talented")
+        if d[7] == '1': flags.append("CTE")
+        if d[8] and d[8] != '0': flags.append("Dual Language/Transitional")
+        if d[9]: flags.append(f"Federal: {d[9]}")
         if flags:
             lines.append(f"  Programs: {', '.join(flags)}")
 
-    # Performance scores (DOE framework)
+    # --- Safety/Location (fallback directory if schools_directory missing) ---
+    if safety_rows:
+        s = safety_rows[0]
+        if not dir_rows:
+            lines.append(f"\n{s[1]}")
+            lines.append(f"  {s[2]}, {s[3]} {s[4]}")
+        else:
+            lines.append(f"\n  Address: {s[2]}, {s[3]} {s[4]}")
+        if s[5]:
+            lines.append(f"  Register: {s[5]} students")
+
+    # --- Demographics ---
+    if demo_rows:
+        d = demo_rows[0]
+        enrollment = d[1] or '?'
+        lines.append(f"\nDEMOGRAPHICS ({d[0]})")
+        lines.append(f"  Enrollment: {enrollment}")
+        if d[2] and d[3]:
+            lines.append(f"  Gender: {d[3]}% female, {d[5]}% male")
+        race_parts = []
+        for label, pct_idx in [("Asian", 7), ("Black", 9), ("Hispanic", 11), ("Multi-racial", 13), ("White", 15)]:
+            pct = d[pct_idx] if len(d) > pct_idx and d[pct_idx] else None
+            if pct:
+                race_parts.append(f"{label} {pct}%")
+        if race_parts:
+            lines.append(f"  Race: {', '.join(race_parts)}")
+
+    # --- Performance (existing) ---
     if perf_rows:
         lines.append("\nPERFORMANCE (DOE Framework):")
         for r in perf_rows:
@@ -5257,46 +5390,107 @@ def school_report(dbn: Annotated[str, Field(description="School DBN: district(2)
             impact = float(r[2]) if r[2] else 0
             lines.append(f"  {r[0]}: Performance {perf:.2f} | Impact {impact:.2f} ({r[3]})")
 
-    # ELA
+    # --- ELA (existing) ---
     if ela_rows:
-        lines.append("\nELA TEST RESULTS (All Grades):")
+        lines.append("\nELA TEST RESULTS:")
         for r in ela_rows:
             tested = r[2] or '?'
             score = r[3] or 'N/A'
             proficient = r[4] or r[5] or r[6] or 'N/A'
-            lines.append(f"  {r[0]}: {tested} tested, mean score {score}, proficient {proficient}")
-    else:
-        lines.append("\nELA TEST RESULTS: No data available")
+            lines.append(f"  {r[0]}: {tested} tested, mean {score}, proficient {proficient}")
 
-    # Math
+    # --- Math (existing) ---
     if math_rows:
-        lines.append("\nMATH TEST RESULTS (All Grades):")
+        lines.append("\nMATH TEST RESULTS:")
         for r in math_rows:
             tested = r[2] or '?'
             score = r[3] or 'N/A'
             proficient = r[4] or r[5] or r[6] or 'N/A'
-            lines.append(f"  {r[0]}: {tested} tested, mean score {score}, proficient {proficient}")
-    else:
-        lines.append("\nMATH TEST RESULTS: No data available")
+            lines.append(f"  {r[0]}: {tested} tested, mean {score}, proficient {proficient}")
 
-    # Composite quality estimate
+    # --- Regents (high schools) ---
+    if regents_rows:
+        lines.append("\nREGENTS EXAMS:")
+        current_year = None
+        for r in regents_rows:
+            exam, year, tested, mean, pct65, pct80 = r
+            if year != current_year:
+                current_year = year
+                lines.append(f"  {year}:")
+            lines.append(f"    {exam}: {tested} tested, mean {mean}, ≥65: {pct65 or '?'}%, ≥80: {pct80 or '?'}%")
+
+    # --- Attendance ---
+    if attend_rows:
+        lines.append("\nATTENDANCE:")
+        for r in attend_rows:
+            year, name, grade, attend_rate, chronic_pct = r
+            lines.append(f"  {year}: {attend_rate}% attendance, {chronic_pct}% chronically absent")
+
+    # --- Class Size ---
+    if class_rows:
+        lines.append("\nCLASS SIZE:")
+        for r in class_rows:
+            grade, prog, avg, mn, mx, students, classes = r
+            avg_str = f"{avg}" if avg else "?"
+            lines.append(f"  {grade} ({prog}): avg {avg_str} students, {classes or '?'} classes")
+
+    # --- Surveys ---
+    if survey_rows:
+        s = survey_rows[0]
+        lines.append("\nSURVEY SCORES:")
+        lines.append(f"  Parents (response rate: {s[6] or '?'}%):")
+        lines.append(f"    Teachers: {s[1] or '?'} | Leadership: {s[2] or '?'} | Rigor: {s[3] or '?'} | Environment: {s[4] or '?'} | Trust: {s[5] or '?'}")
+        if s[7]:
+            lines.append(f"  Teachers (response rate: {s[12] or '?'}%):")
+            lines.append(f"    Teachers: {s[7] or '?'} | Leadership: {s[8] or '?'} | Rigor: {s[9] or '?'} | Environment: {s[10] or '?'} | Trust: {s[11] or '?'}")
+        if s[13]:
+            lines.append(f"  Students (response rate: {s[18] or '?'}%):")
+            lines.append(f"    Teachers: {s[13] or '?'} | Leadership: {s[14] or '?'} | Rigor: {s[15] or '?'} | Environment: {s[16] or '?'} | Trust: {s[17] or '?'}")
+
+    # --- Safety incidents ---
+    if safety_rows:
+        s = safety_rows[0]
+        major = s[6] or 0
+        other = s[7] or 0
+        nocrim = s[8] or 0
+        prop = s[9] or 0
+        violent = s[10] or 0
+        total = int(major or 0) + int(other or 0) + int(nocrim or 0) + int(prop or 0) + int(violent or 0)
+        if total > 0:
+            lines.append(f"\nSAFETY ({s[0]}):")
+            lines.append(f"  Total incidents: {total}")
+            if int(major or 0) > 0: lines.append(f"    Major criminal: {major}")
+            if int(violent or 0) > 0: lines.append(f"    Violent: {violent}")
+            if int(prop or 0) > 0: lines.append(f"    Property: {prop}")
+            if int(other or 0) > 0: lines.append(f"    Other: {other}")
+            if int(nocrim or 0) > 0: lines.append(f"    Non-criminal: {nocrim}")
+
+    # --- Cafeteria inspections ---
+    if cafe_rows:
+        lines.append("\nCAFETERIA INSPECTIONS:")
+        for r in cafe_rows[:5]:
+            date, level, code, desc = r
+            lines.append(f"  {date or '?'}: [{level or '?'}] {desc or code or 'N/A'}")
+
+    # --- SHSAT feeder data ---
+    if shsat_rows:
+        lines.append("\nSPECIALIZED HS TEST (SHSAT) RESULTS:")
+        for r in shsat_rows:
+            year, testers, offers, discovery = r
+            lines.append(f"  {year}: {testers} testers, {offers} offers" + (f", {discovery} discovery" if discovery and discovery != '0' else ""))
+
+    # --- Composite quality (existing) ---
     quality_score = None
     if perf_rows:
         latest = perf_rows[0]
         perf_val = float(latest[1]) if latest[1] else 0
         impact_val = float(latest[2]) if latest[2] else 0
-        # Performance and impact are 0-1 scales
         quality_score = round((perf_val * 60 + impact_val * 40) * 100)
-        if quality_score >= 70:
-            rating = "STRONG"
-        elif quality_score >= 50:
-            rating = "GOOD"
-        elif quality_score >= 30:
-            rating = "FAIR"
-        else:
-            rating = "NEEDS IMPROVEMENT"
+        if quality_score >= 70: rating = "STRONG"
+        elif quality_score >= 50: rating = "GOOD"
+        elif quality_score >= 30: rating = "FAIR"
+        else: rating = "NEEDS IMPROVEMENT"
         lines.append(f"\nCOMPOSITE QUALITY: {quality_score}/100 — {rating}")
-        lines.append(f"  (60% performance + 40% impact)")
 
     elapsed = round((time.time() - t0) * 1000)
     lines.append(f"\n({elapsed}ms)")
@@ -5306,6 +5500,8 @@ def school_report(dbn: Annotated[str, Field(description="School DBN: district(2)
         "directory": dir_rows[0] if dir_rows else None,
         "performance": [list(r) for r in perf_rows] if perf_rows else [],
         "quality_score": quality_score,
+        "demographics": demo_rows[0] if demo_rows else None,
+        "safety_incidents": safety_rows[0] if safety_rows else None,
     }
 
     return ToolResult(
