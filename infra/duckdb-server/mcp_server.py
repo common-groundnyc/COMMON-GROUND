@@ -5331,7 +5331,7 @@ SELECT DISTINCT
     s.geographical_district_code AS district
 FROM lake.education.demographics_2020 d
 LEFT JOIN lake.education.school_safety s ON d.dbn = s.dbn
-WHERE d.school_name ILIKE '%' || ? || '%'
+WHERE d.school_name ILIKE '%' || ? || '%' ESCAPE '\\'
 ORDER BY TRY_CAST(d.total_enrollment AS INT) DESC NULLS LAST
 LIMIT 20
 """
@@ -5392,7 +5392,8 @@ def school_search(
         _, rows = _safe_query(db, SCHOOL_SEARCH_BY_DISTRICT_SQL, [query])
         search_type = f"District {int(query)}"
     else:
-        _, rows = _safe_query(db, SCHOOL_SEARCH_BY_NAME_SQL, [query])
+        name_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        _, rows = _safe_query(db, SCHOOL_SEARCH_BY_NAME_SQL, [name_query])
         search_type = f"name matching '{query}'"
 
     if not rows:
