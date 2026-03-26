@@ -33,7 +33,7 @@ def _create_api_embedder(api_key: str):
 
     def _call_api_sync(texts: list[str]) -> list[list[float]]:
         """Single synchronous API call for ≤250 texts."""
-        payload = json.dumps({"model": _OR_MODEL, "input": texts}).encode()
+        payload = json.dumps({"model": _OR_MODEL, "input": texts, "dimensions": dims}).encode()
         req = urllib.request.Request(
             _OR_URL, data=payload,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -47,7 +47,7 @@ def _create_api_embedder(api_key: str):
         """Single async API call with concurrency control."""
         import aiohttp
         async with semaphore:
-            payload = json.dumps({"model": _OR_MODEL, "input": texts})
+            payload = json.dumps({"model": _OR_MODEL, "input": texts, "dimensions": dims})
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             for attempt in range(3):
                 try:

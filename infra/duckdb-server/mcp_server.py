@@ -2659,7 +2659,7 @@ async def app_lifespan(server):
 
     # --- Vector embeddings for semantic search (persistent + incremental) ---
     embed_fn = None
-    embed_dims = 768  # default for OpenRouter Gemini, 384 for ONNX
+    embed_dims = 768  # default for OpenRouter Gemini (reduced via Matryoshka), 384 for ONNX
     try:
         from embedder import create_embedder
         embed_fn, embed_batch_fn, embed_dims = create_embedder("/app/model")
