@@ -1,5 +1,6 @@
-"""Text embeddings via OpenRouter API (primary) or ONNX Runtime (fallback)."""
+"""Text embeddings via OpenRouter API (fast, parallel) or ONNX Runtime (fallback)."""
 import os
+import asyncio
 import numpy as np
 from pathlib import Path
 
@@ -8,14 +9,12 @@ _DEFAULT_MODEL_DIR = Path(__file__).parent / "model"
 # OpenRouter config
 _OR_URL = "https://openrouter.ai/api/v1/embeddings"
 _OR_MODEL = "google/gemini-embedding-001"  # 768 dims, $0.15/1M tokens
-_OR_BATCH_SIZE = 2048  # OpenAI-compatible API max
+_OR_BATCH_SIZE = 250  # Gemini max per request
+_OR_CONCURRENCY = 15  # parallel requests → ~3,750 texts in flight
 
 
 def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = None):
-    """Return (embed, embed_batch, dims) using OpenRouter API or ONNX fallback.
-
-    Priority: OpenRouter API (fast, ~$0.50 for 300K names) → local ONNX (slow, free).
-    """
+    """Return (embed, embed_batch, dims) using OpenRouter API or ONNX fallback."""
     api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
 
     if api_key:
@@ -26,50 +25,96 @@ def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = 
 
 
 def _create_api_embedder(api_key: str):
-    """OpenRouter embeddings API — ~2000 texts/sec, 768 dims."""
+    """OpenRouter embeddings via parallel async requests — ~5,000-10,000 texts/sec."""
     import urllib.request
     import json
 
     dims = 768
 
-    def _call_api(texts: list[str]) -> np.ndarray:
-        payload = json.dumps({
-            "model": _OR_MODEL,
-            "input": texts,
-        }).encode()
+    def _call_api_sync(texts: list[str]) -> list[list[float]]:
+        """Single synchronous API call for ≤250 texts."""
+        payload = json.dumps({"model": _OR_MODEL, "input": texts}).encode()
         req = urllib.request.Request(
-            _OR_URL,
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            _OR_URL, data=payload,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
-        # Sort by index (API may return out of order)
         embeddings = sorted(data["data"], key=lambda x: x["index"])
-        return np.array([e["embedding"] for e in embeddings], dtype=np.float32)
+        return [e["embedding"] for e in embeddings]
+
+    async def _call_api_async(session, texts: list[str], semaphore) -> list[list[float]]:
+        """Single async API call with concurrency control."""
+        import aiohttp
+        async with semaphore:
+            payload = json.dumps({"model": _OR_MODEL, "input": texts})
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            for attempt in range(3):
+                try:
+                    async with session.post(_OR_URL, data=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                        data = await resp.json()
+                        if "data" not in data:
+                            raise ValueError(f"API error: {data.get('error', data)}")
+                        embeddings = sorted(data["data"], key=lambda x: x["index"])
+                        return [e["embedding"] for e in embeddings]
+                except Exception as e:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(2 ** attempt)
+
+    async def _embed_batch_async(texts: list[str]) -> np.ndarray:
+        """Embed all texts with parallel async requests."""
+        import aiohttp
+        semaphore = asyncio.Semaphore(_OR_CONCURRENCY)
+        chunks = [texts[i:i + _OR_BATCH_SIZE] for i in range(0, len(texts), _OR_BATCH_SIZE)]
+
+        all_embeddings = []
+        async with aiohttp.ClientSession() as session:
+            # Process in waves to show progress
+            wave_size = _OR_CONCURRENCY * 4  # ~60 chunks per wave = ~15,000 texts
+            for wave_start in range(0, len(chunks), wave_size):
+                wave = chunks[wave_start:wave_start + wave_size]
+                results = await asyncio.gather(*[
+                    _call_api_async(session, chunk, semaphore) for chunk in wave
+                ])
+                for result in results:
+                    all_embeddings.extend(result)
+                done = min(wave_start + wave_size, len(chunks)) * _OR_BATCH_SIZE
+                if done < len(texts):
+                    print(f"    Embedded {done:,}/{len(texts):,}...", flush=True)
+
+        return np.array(all_embeddings, dtype=np.float32)
 
     def embed(text: str) -> np.ndarray:
-        return _call_api([text])[0]
+        vecs = _call_api_sync([text])
+        return np.array(vecs[0], dtype=np.float32)
 
-    def embed_batch(texts: list[str], batch_size: int = _OR_BATCH_SIZE) -> np.ndarray:
+    def embed_batch(texts: list[str]) -> np.ndarray:
         if not texts:
             return np.empty((0, dims), dtype=np.float32)
-        results = []
-        for i in range(0, len(texts), batch_size):
-            chunk = texts[i:i + batch_size]
-            results.append(_call_api(chunk))
-            if i > 0 and i % 10000 == 0:
-                print(f"    Embedded {i:,}/{len(texts):,}...", flush=True)
-        return np.vstack(results).astype(np.float32)
+        if len(texts) <= _OR_BATCH_SIZE:
+            # Small batch — just do it synchronously
+            vecs = _call_api_sync(texts)
+            return np.array(vecs, dtype=np.float32)
+        # Large batch — async parallel
+        print(f"    Embedding {len(texts):,} texts ({len(texts) // _OR_BATCH_SIZE + 1} API calls, {_OR_CONCURRENCY} parallel)...", flush=True)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're inside an async context (FastMCP) — run in thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                    return pool.submit(lambda: asyncio.run(_embed_batch_async(texts))).result()
+            else:
+                return loop.run_until_complete(_embed_batch_async(texts))
+        except RuntimeError:
+            return asyncio.run(_embed_batch_async(texts))
 
     return embed, embed_batch, dims
 
 
 def _create_onnx_embedder(model_dir: Path):
-    """Local ONNX Runtime — ~17 rows/sec, 384 dims. Free but slow."""
+    """Local ONNX Runtime fallback — ~17 rows/sec, 384 dims."""
     import onnxruntime as ort
     from tokenizers import Tokenizer
 
@@ -89,25 +134,23 @@ def _create_onnx_embedder(model_dir: Path):
 
     dims = 384
 
-    def _mean_pool(token_embeddings: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:
+    def _mean_pool(token_embeddings, attention_mask):
         mask = attention_mask[..., np.newaxis].astype(np.float32)
         summed = (token_embeddings * mask).sum(axis=1)
         counts = mask.sum(axis=1).clip(min=1e-9)
         return summed / counts
 
-    def _normalize(vecs: np.ndarray) -> np.ndarray:
+    def _normalize(vecs):
         norms = np.linalg.norm(vecs, axis=1, keepdims=True).clip(min=1e-9)
         return vecs / norms
 
-    def _run_batch(texts: list) -> np.ndarray:
+    def _run_batch(texts):
         encoded = tokenizer.encode_batch(texts)
         input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
         attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
         token_type_ids = np.zeros_like(input_ids)
         outputs = session.run(None, {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids,
+            "input_ids": input_ids, "attention_mask": attention_mask, "token_type_ids": token_type_ids,
         })
         return _normalize(_mean_pool(outputs[0], attention_mask)).astype(np.float32)
 
@@ -119,8 +162,7 @@ def _create_onnx_embedder(model_dir: Path):
             return np.empty((0, dims), dtype=np.float32)
         results = []
         for i in range(0, len(texts), batch_size):
-            chunk = texts[i:i + batch_size]
-            results.append(_run_batch(chunk))
+            results.append(_run_batch(texts[i:i + batch_size]))
         return np.vstack(results).astype(np.float32)
 
     return embed, embed_batch, dims

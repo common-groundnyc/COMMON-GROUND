@@ -1009,56 +1009,43 @@ async def app_lifespan(server):
             conn.execute(f"COPY main.{t} TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
         (cache / "_built_at.txt").write_text(str(time.time()))
 
-    # --- Embedding cache (same pattern as graph cache) ---
-    EMBEDDING_CACHE_DIR = "/data/common-ground/embedding-cache"
-    EMBEDDING_TABLES = [
-        "catalog_embeddings",
-        "description_embeddings",
-        "entity_name_embeddings",
-        "building_vectors",
-    ]
+    # --- Persistent embeddings in DuckLake (incremental — only embed new rows) ---
+    # Embeddings live in lake.federal.* so they survive deploys.
+    # On startup: copy to main.* for fast queries, diff against source, embed new rows only.
+    LAKE_EMB_SCHEMA = "federal"  # reuse federal schema for embeddings
 
-    def _embedding_cache_fresh():
-        import pathlib
-        cache = pathlib.Path(EMBEDDING_CACHE_DIR)
-        marker = cache / "_built_at.txt"
-        if not marker.exists():
-            return False
-        try:
-            built_ts = float(marker.read_text().strip())
-            age_hours = (time.time() - built_ts) / 3600
-            return age_hours < 24 and all(
-                (cache / f"{t}.parquet").exists() for t in EMBEDDING_TABLES
-            )
-        except (ValueError, OSError):
-            return False
-
-    def _load_embeddings_from_cache(conn):
-        for t in EMBEDDING_TABLES:
-            path = f"{EMBEDDING_CACHE_DIR}/{t}.parquet"
+    def _ensure_lake_embedding_tables(conn, dims):
+        """Create embedding tables in DuckLake if they don't exist yet."""
+        tables = {
+            "catalog_embeddings": f"schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}]",
+            "description_embeddings": f"source VARCHAR, description VARCHAR, embedding FLOAT[{dims}]",
+            "entity_name_embeddings": f"source VARCHAR, name VARCHAR, embedding FLOAT[{dims}]",
+            "building_vectors": "bbl VARCHAR, borough VARCHAR, features FLOAT[6]",
+        }
+        for name, cols in tables.items():
             try:
-                conn.execute(f"CREATE OR REPLACE TABLE main.{t} AS SELECT * FROM read_parquet('{path}')")
+                conn.execute(f"SELECT 1 FROM lake.{LAKE_EMB_SCHEMA}.{name} LIMIT 1")
             except Exception:
-                pass  # parquet may not exist if builder failed on previous run
+                try:
+                    conn.execute(f"CREATE TABLE lake.{LAKE_EMB_SCHEMA}.{name} ({cols})")
+                    print(f"  Created lake.{LAKE_EMB_SCHEMA}.{name}", flush=True)
+                except Exception as e:
+                    print(f"  Warning: could not create lake.{LAKE_EMB_SCHEMA}.{name}: {e}", flush=True)
 
-    def _save_embeddings_to_cache(conn):
-        import pathlib
-        cache = pathlib.Path(EMBEDDING_CACHE_DIR)
-        cache.mkdir(parents=True, exist_ok=True)
-        saved = 0
-        for t in EMBEDDING_TABLES:
+    def _load_lake_embeddings_to_main(conn):
+        """Copy persisted embeddings from DuckLake into main.* for fast queries."""
+        tables = ["catalog_embeddings", "description_embeddings", "entity_name_embeddings", "building_vectors"]
+        for t in tables:
             try:
-                conn.execute(
-                    f"COPY main.{t} TO '{EMBEDDING_CACHE_DIR}/{t}.parquet' "
-                    f"(FORMAT PARQUET, COMPRESSION ZSTD)"
-                )
-                saved += 1
+                count = conn.execute(f"SELECT COUNT(*) FROM lake.{LAKE_EMB_SCHEMA}.{t}").fetchone()[0]
+                if count > 0:
+                    conn.execute(f"CREATE OR REPLACE TABLE main.{t} AS SELECT * FROM lake.{LAKE_EMB_SCHEMA}.{t}")
+                    print(f"  Loaded {count:,} rows from lake → main.{t}", flush=True)
             except Exception:
-                pass  # table may not exist if its data source was unavailable
-        if saved > 0:
-            (cache / "_built_at.txt").write_text(str(time.time()))
+                pass  # table may not exist or be empty
 
-    def _create_hnsw_indexes(conn, dims=384):
+    def _create_hnsw_indexes(conn):
+        """Create HNSW indexes on main.* tables (if extension available)."""
         indexes = [
             ("catalog_emb_idx", "catalog_embeddings", "embedding", "cosine"),
             ("desc_emb_idx", "description_embeddings", "embedding", "cosine"),
@@ -1073,140 +1060,135 @@ async def app_lifespan(server):
                     WITH (metric = '{metric}')
                 """)
             except Exception as e:
-                print(f"Warning: {idx_name} HNSW index failed: {e}", flush=True)
+                print(f"  Warning: {idx_name} HNSW index failed: {e}", flush=True)
 
-    def _build_catalog_embeddings(conn, embed_batch, dims=384):
+    def _incremental_catalog_embeddings(conn, embed_batch, dims):
+        """Embed schema descriptions — always rebuilt (tiny, ~12 rows)."""
         rows = []
         for schema_name, description in SCHEMA_DESCRIPTIONS.items():
             rows.append((schema_name, "__schema__", description))
-        try:
-            table_comments = conn.execute("""
-                SELECT schema_name, table_name, comment
-                FROM ducklake_table_info()
-                WHERE comment IS NOT NULL AND comment != ''
-            """).fetchall()
-            for schema_name, table_name, comment in table_comments:
-                rows.append((schema_name, table_name, comment))
-        except Exception as e:
-            print(f"Warning: ducklake_table_info() unavailable: {e}", flush=True)
         if not rows:
-            conn.execute(f"""
-                CREATE OR REPLACE TABLE main.catalog_embeddings (
-                    schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}]
-                )
-            """)
             return
         texts = [r[2] for r in rows]
-        print(f"Building catalog embeddings ({len(texts)} entries)...", flush=True)
         vecs = embed_batch(texts)
-        conn.execute(f"""
-            CREATE OR REPLACE TABLE main.catalog_embeddings (
-                schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}]
-            )
-        """)
-        for (schema_name, table_name, description), vec in zip(rows, vecs):
+        # Replace catalog embeddings entirely (cheap, always fresh)
+        conn.execute(f"DELETE FROM lake.{LAKE_EMB_SCHEMA}.catalog_embeddings WHERE 1=1")
+        for (s, t, d), vec in zip(rows, vecs):
             conn.execute(
-                f"INSERT INTO main.catalog_embeddings VALUES (?, ?, ?, ?::FLOAT[{dims}])",
-                [schema_name, table_name, description, vec.tolist()]
+                f"INSERT INTO lake.{LAKE_EMB_SCHEMA}.catalog_embeddings VALUES (?, ?, ?, ?::FLOAT[{dims}])",
+                [s, t, d, vec.tolist()]
             )
-        print(f"Catalog embeddings done ({len(rows)} rows)", flush=True)
+        conn.execute(f"CREATE OR REPLACE TABLE main.catalog_embeddings AS SELECT * FROM lake.{LAKE_EMB_SCHEMA}.catalog_embeddings")
+        print(f"  Catalog embeddings: {len(rows)} rows (rebuilt)", flush=True)
 
-    def _build_description_embeddings(conn, embed_batch, dims=384):
+    def _incremental_description_embeddings(conn, embed_batch, dims):
+        """Embed complaint/violation descriptions — only new ones."""
         sources = [
             ("311", """
                 SELECT DISTINCT (complaint_type || ': ' || COALESCE(descriptor, '')) AS description
                 FROM lake.social_services.n311_service_requests
-                WHERE complaint_type IS NOT NULL
-                LIMIT 3000
+                WHERE complaint_type IS NOT NULL LIMIT 3000
             """),
             ("restaurant", """
                 SELECT DISTINCT violation_description AS description
                 FROM lake.health.restaurant_inspections
-                WHERE violation_description IS NOT NULL
-                LIMIT 500
+                WHERE violation_description IS NOT NULL LIMIT 500
             """),
             ("hpd", """
                 SELECT DISTINCT novdescription AS description
                 FROM lake.housing.hpd_violations
-                WHERE novdescription IS NOT NULL
-                LIMIT 1000
+                WHERE novdescription IS NOT NULL LIMIT 1000
             """),
             ("oath", """
                 SELECT DISTINCT charge_1_code_description AS description
                 FROM lake.city_government.oath_hearings
-                WHERE charge_1_code_description IS NOT NULL
-                LIMIT 500
+                WHERE charge_1_code_description IS NOT NULL LIMIT 500
             """),
         ]
-        conn.execute(f"""
-            CREATE OR REPLACE TABLE main.description_embeddings (
-                source VARCHAR, description VARCHAR, embedding FLOAT[{dims}]
-            )
-        """)
+        total_new = 0
         for source_name, sql in sources:
             try:
-                descs = [r[0] for r in conn.execute(sql).fetchall() if r[0]]
-                if not descs:
+                all_descs = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
+                # Find already-embedded descriptions
+                try:
+                    existing = {r[0] for r in conn.execute(
+                        f"SELECT description FROM lake.{LAKE_EMB_SCHEMA}.description_embeddings WHERE source = ?",
+                        [source_name]
+                    ).fetchall()}
+                except Exception:
+                    existing = set()
+                new_descs = sorted(all_descs - existing)
+                if not new_descs:
+                    print(f"  Descriptions [{source_name}]: {len(existing)} existing, 0 new", flush=True)
                     continue
-                print(f"Building description embeddings for {source_name} ({len(descs)} entries)...", flush=True)
-                vecs = embed_batch(descs)
-                for description, vec in zip(descs, vecs):
+                print(f"  Descriptions [{source_name}]: {len(existing)} existing, {len(new_descs)} new — embedding...", flush=True)
+                vecs = embed_batch(new_descs)
+                for desc, vec in zip(new_descs, vecs):
                     conn.execute(
-                        f"INSERT INTO main.description_embeddings VALUES (?, ?, ?::FLOAT[{dims}])",
-                        [source_name, description, vec.tolist()]
+                        f"INSERT INTO lake.{LAKE_EMB_SCHEMA}.description_embeddings VALUES (?, ?, ?::FLOAT[{dims}])",
+                        [source_name, desc, vec.tolist()]
                     )
-                print(f"Description embeddings done for {source_name}", flush=True)
+                total_new += len(new_descs)
             except Exception as e:
-                print(f"Warning: description embeddings for {source_name} failed: {e}", flush=True)
+                print(f"  Warning: descriptions [{source_name}] failed: {e}", flush=True)
+        if total_new > 0:
+            conn.execute(f"CREATE OR REPLACE TABLE main.description_embeddings AS SELECT * FROM lake.{LAKE_EMB_SCHEMA}.description_embeddings")
+            print(f"  Description embeddings: {total_new} new rows embedded", flush=True)
 
-    def _build_entity_name_embeddings(conn, embed_batch, dims=384):
-        sources = [
-            ("owner", "SELECT DISTINCT owner_name AS name FROM main.graph_owners WHERE owner_name IS NOT NULL"),
-            ("corp_officer", "SELECT DISTINCT person_name AS name FROM main.graph_corp_people WHERE person_name IS NOT NULL"),
-            ("donor", "SELECT DISTINCT donor_name AS name FROM main.graph_campaign_donors WHERE donor_name IS NOT NULL"),
-            ("tx_party", "SELECT DISTINCT entity_name AS name FROM main.graph_tx_entities WHERE entity_name IS NOT NULL"),
+    def _incremental_entity_name_embeddings(conn, embed_batch, dims):
+        """Embed entity names from graph tables — only new ones."""
+        name_sources = [
+            ("owner", "SELECT DISTINCT owner_name AS name FROM main.graph_owners WHERE owner_name IS NOT NULL AND LENGTH(owner_name) > 2"),
+            ("corp_officer", "SELECT DISTINCT person_name AS name FROM main.graph_corp_people WHERE person_name IS NOT NULL AND LENGTH(person_name) > 2"),
+            ("donor", "SELECT DISTINCT donor_name AS name FROM main.graph_campaign_donors WHERE donor_name IS NOT NULL AND LENGTH(donor_name) > 2"),
+            ("tx_party", "SELECT DISTINCT entity_name AS name FROM main.graph_tx_entities WHERE entity_name IS NOT NULL AND LENGTH(entity_name) > 2"),
         ]
-        metas = []
-        for source_name, sql in sources:
+        total_new = 0
+        for source_name, sql in name_sources:
             try:
-                names = [r[0] for r in conn.execute(sql).fetchall() if r[0]]
-                for name in names:
-                    metas.append((source_name, name))
-                print(f"Fetched {len(names)} names from {source_name}", flush=True)
+                all_names = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
+                try:
+                    existing = {r[0] for r in conn.execute(
+                        f"SELECT name FROM lake.{LAKE_EMB_SCHEMA}.entity_name_embeddings WHERE source = ?",
+                        [source_name]
+                    ).fetchall()}
+                except Exception:
+                    existing = set()
+                new_names = sorted(all_names - existing)
+                if not new_names:
+                    print(f"  Names [{source_name}]: {len(existing):,} existing, 0 new", flush=True)
+                    continue
+                print(f"  Names [{source_name}]: {len(existing):,} existing, {len(new_names):,} new — embedding...", flush=True)
+                vecs = embed_batch(new_names)
+                # Bulk insert via Parquet for large batches
+                if len(new_names) > 1000:
+                    import pyarrow as pa, pyarrow.parquet as pq, os
+                    tbl = pa.table({"source": [source_name] * len(new_names), "name": new_names, "embedding": [v.tolist() for v in vecs]})
+                    tmp = "/tmp/_new_name_embeddings.parquet"
+                    pq.write_table(tbl, tmp)
+                    conn.execute(f"INSERT INTO lake.{LAKE_EMB_SCHEMA}.entity_name_embeddings SELECT source, name, embedding::FLOAT[{dims}] AS embedding FROM read_parquet('{tmp}')")
+                    os.unlink(tmp)
+                else:
+                    for name, vec in zip(new_names, vecs):
+                        conn.execute(
+                            f"INSERT INTO lake.{LAKE_EMB_SCHEMA}.entity_name_embeddings VALUES (?, ?, ?::FLOAT[{dims}])",
+                            [source_name, name, vec.tolist()]
+                        )
+                total_new += len(new_names)
             except Exception as e:
-                print(f"Warning: entity names from {source_name} failed: {e}", flush=True)
-        if not metas:
-            conn.execute(f"""
-                CREATE OR REPLACE TABLE main.entity_name_embeddings (
-                    source VARCHAR, name VARCHAR, embedding FLOAT[{dims}]
-                )
-            """)
-            return
-        texts = [m[1] for m in metas]
-        print(f"Building entity name embeddings ({len(texts):,} entries)...", flush=True)
-        vecs = embed_batch(texts)
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-        import os
-        table = pa.table({
-            "source": [m[0] for m in metas],
-            "name": [m[1] for m in metas],
-            "embedding": [v.tolist() for v in vecs],
-        })
-        tmp_path = "/tmp/_entity_embeddings.parquet"
-        pq.write_table(table, tmp_path)
-        conn.execute(f"CREATE OR REPLACE TABLE main.entity_name_embeddings AS SELECT source, name, embedding::FLOAT[{dims}] AS embedding FROM read_parquet('{tmp_path}')")
-        os.unlink(tmp_path)
-        print(f"Entity name embeddings done ({len(metas):,} rows)", flush=True)
+                print(f"  Warning: names [{source_name}] failed: {e}", flush=True)
+        if total_new > 0:
+            conn.execute(f"CREATE OR REPLACE TABLE main.entity_name_embeddings AS SELECT * FROM lake.{LAKE_EMB_SCHEMA}.entity_name_embeddings")
+            print(f"  Entity name embeddings: {total_new:,} new rows embedded", flush=True)
 
     def _build_building_vectors(conn):
+        """Build numeric feature vectors for building similarity (no embeddings needed)."""
         try:
             conn.execute("""
                 CREATE OR REPLACE TABLE main.building_vectors AS
                 WITH base AS (
                     SELECT
-                        b.bbl,
-                        b.borough,
+                        b.bbl, b.borough,
                         COALESCE(TRY_CAST(b.stories AS DOUBLE), 0) AS stories,
                         COALESCE(TRY_CAST(b.units AS DOUBLE), 0) AS units,
                         COALESCE(TRY_CAST(b.year_built AS DOUBLE), 0) AS year_built,
@@ -1217,9 +1199,7 @@ async def app_lifespan(server):
                     GROUP BY b.bbl, b.borough, b.stories, b.units, b.year_built
                 ),
                 normed AS (
-                    SELECT
-                        bbl,
-                        borough,
+                    SELECT bbl, borough,
                         stories / NULLIF(MAX(stories) OVER (), 0) AS n1,
                         units / NULLIF(MAX(units) OVER (), 0) AS n2,
                         year_built / NULLIF(MAX(year_built) OVER (), 0) AS n3,
@@ -1229,21 +1209,16 @@ async def app_lifespan(server):
                             NULLIF(MAX(CASE WHEN units > 0 THEN viol_count::DOUBLE / units ELSE 0 END) OVER (), 0) AS n6
                     FROM base
                 )
-                SELECT
-                    bbl,
-                    borough,
-                    [COALESCE(n1, 0), COALESCE(n2, 0), COALESCE(n3, 0),
-                     COALESCE(n4, 0), COALESCE(n5, 0), COALESCE(n6, 0)]::FLOAT[6] AS features
+                SELECT bbl, borough,
+                    [COALESCE(n1,0), COALESCE(n2,0), COALESCE(n3,0),
+                     COALESCE(n4,0), COALESCE(n5,0), COALESCE(n6,0)]::FLOAT[6] AS features
                 FROM normed
             """)
-            print("Building vectors done", flush=True)
+            count = conn.execute("SELECT COUNT(*) FROM main.building_vectors").fetchone()[0]
+            print(f"  Building vectors: {count:,} rows (rebuilt from graph tables)", flush=True)
         except Exception as e:
-            print(f"Warning: building vectors failed: {e}", flush=True)
-            conn.execute("""
-                CREATE OR REPLACE TABLE main.building_vectors (
-                    bbl VARCHAR, borough VARCHAR, features FLOAT[6]
-                )
-            """)
+            print(f"  Warning: building vectors failed: {e}", flush=True)
+            conn.execute("CREATE OR REPLACE TABLE main.building_vectors (bbl VARCHAR, borough VARCHAR, features FLOAT[6])")
 
     try:
         if _graph_cache_fresh():
@@ -2673,9 +2648,9 @@ async def app_lifespan(server):
     except Exception as e:
         print(f"Warning: Lake percentile tables failed: {e}", flush=True)
 
-    # --- Vector embeddings for semantic search ---
+    # --- Vector embeddings for semantic search (persistent + incremental) ---
     embed_fn = None
-    embed_dims = 384  # default, overridden by actual model
+    embed_dims = 768  # default for OpenRouter Gemini, 384 for ONNX
     try:
         from embedder import create_embedder
         embed_fn, embed_batch_fn, embed_dims = create_embedder("/app/model")
@@ -2685,24 +2660,25 @@ async def app_lifespan(server):
 
     if embed_fn is not None:
         try:
-            if _embedding_cache_fresh():
-                print("Loading embeddings from Parquet cache...", flush=True)
-                _load_embeddings_from_cache(conn)
-            else:
-                print("Building embeddings (no cache or stale)...", flush=True)
-                _build_catalog_embeddings(conn, embed_batch_fn, embed_dims)
-                _build_description_embeddings(conn, embed_batch_fn, embed_dims)
-                if graph_ready:
-                    _build_entity_name_embeddings(conn, embed_batch_fn, embed_dims)
-                    _build_building_vectors(conn)
-                _save_embeddings_to_cache(conn)
-                print("Embeddings cached to Parquet", flush=True)
+            # Ensure DuckLake tables exist for persistent storage
+            _ensure_lake_embedding_tables(conn, embed_dims)
 
-            _create_hnsw_indexes(conn, embed_dims)
-            print("HNSW indexes created", flush=True)
+            # Load existing embeddings from DuckLake → main.* (fast, no API calls)
+            _load_lake_embeddings_to_main(conn)
+
+            # Incrementally embed only NEW rows (cheap after first run)
+            print("Checking for new data to embed...", flush=True)
+            _incremental_catalog_embeddings(conn, embed_batch_fn, embed_dims)
+            _incremental_description_embeddings(conn, embed_batch_fn, embed_dims)
+            if graph_ready:
+                _incremental_entity_name_embeddings(conn, embed_batch_fn, embed_dims)
+                _build_building_vectors(conn)
+
+            _create_hnsw_indexes(conn)
+            print("Embedding pipeline complete", flush=True)
         except Exception as e:
-            print(f"Warning: embedding tables partially built: {e}", flush=True)
-            # embed_fn stays set — semantic search works on whatever tables DID get built
+            print(f"Warning: embedding pipeline partially complete: {e}", flush=True)
+            # embed_fn stays set — semantic search works on whatever tables DID load
 
     try:
         yield {

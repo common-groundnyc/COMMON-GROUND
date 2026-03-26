@@ -17,7 +17,8 @@ RUN pip install --no-cache-dir \
     tokenizers \
     numpy \
     pyarrow \
-    huggingface_hub
+    huggingface_hub \
+    aiohttp
 
 WORKDIR /app
 COPY *.py .
