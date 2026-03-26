@@ -576,6 +576,28 @@ async def app_lifespan(server):
         conn = duckdb.connect(config={"allow_unsigned_extensions": "true"})
         for ext in CORE_EXTS:
             conn.execute(f"LOAD {ext}")
+        for ext in COMMUNITY_EXTS:
+            try:
+                conn.execute(f"INSTALL {ext} FROM community")
+                conn.execute(f"LOAD {ext}")
+            except duckdb.Error as e:
+                print(f"Warning: community extension {ext} unavailable on reconnect: {e}", flush=True)
+        # Reconfigure S3 and performance tuning on new connection
+        conn.execute("SET s3_region = 'us-east-1'")
+        conn.execute("SET s3_endpoint = 'minio:9000'")
+        conn.execute(f"SET s3_access_key_id = '{minio_user}'")
+        conn.execute(f"SET s3_secret_access_key = '{minio_pass}'")
+        conn.execute("SET s3_use_ssl = false")
+        conn.execute("SET s3_url_style = 'path'")
+        conn.execute("SET memory_limit = '8GB'")
+        conn.execute("SET threads = 8")
+        conn.execute("SET temp_directory = '/tmp/duckdb_temp'")
+        conn.execute("SET max_temp_directory_size = '50GB'")
+        conn.execute("SET enable_http_metadata_cache = true")
+        conn.execute("SET http_retries = 5")
+        conn.execute("SET http_retry_wait_ms = 200")
+        conn.execute("SET TimeZone = 'America/New_York'")
+        conn.execute("SET default_collation = 'NOCASE'")
         conn.execute(f"""
             ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
             AS lake (METADATA_SCHEMA 'lake')
