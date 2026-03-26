@@ -48,7 +48,7 @@ Splink probabilistic entity resolution across 44 tables, 55.5M records, producin
 
 Plans:
 - [x] 01-01: Schema introspection — 246 tables classified, 588 entity columns, 13 types ✓
-- [ ] 01-02: Entity coverage report — produce the definitive map of what entities exist where, cross-reference with current graph coverage
+- [x] 01-02: Entity coverage report — 5 graph gaps mapped, 2 new graphs proposed, memory budget confirmed ✓
 
 ### Phase 2: Bug Fixes
 **Goal**: Fix the 3 broken tools identified in MCP Inspector testing: property_history date sort crash, shell_detector WCC crash from duplicate vertex PKs, graph_has_violation orphaned edges
@@ -144,7 +144,7 @@ Plans:
 
 | Phase | Plans | Status | Completed |
 |-------|-------|--------|-----------|
-| 1. Data Audit | 1/2 | In progress | — |
+| 1. Data Audit | 2/2 | Complete | 2026-03-26 |
 | 2. Bug Fixes | 0/1 | Not started | — |
 | 3. Ownership Rebuild | 0/2 | Not started | — |
 | 4. Corporate Web Rebuild | 0/2 | Not started | — |
