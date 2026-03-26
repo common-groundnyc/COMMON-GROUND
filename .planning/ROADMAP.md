@@ -96,7 +96,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 06-01: Expand graph_pol_entities with lobbying + contracts + COIB + off-year, rebuild edges
+- [x] 06-01: Expand graph_pol_entities with expenditures + offyear + doing business + payroll — 630K entities (+103%), 1.5M expenditure edges, 169 payroll agencies ✓
 
 ### Phase 7: Cross-Domain Unified Graph
 **Goal**: Create a single property graph that connects all domain graphs through shared entities. A landlord (housing graph) who is also a corp officer (corporate web) who donates to politicians (influence graph) who has OATH violations (enforcement) — all traversable in one query. Uses resolved_entities cluster_ids as the unifying key.
@@ -150,7 +150,7 @@ Plans:
 | 3. Ownership Rebuild | 2/2 | Complete | 2026-03-26 |
 | 4. Corporate Web Rebuild | 2/2 | Complete | 2026-03-26 |
 | 5. Transaction Expansion | 1/1 | Complete | 2026-03-26 |
-| 6. Influence Expansion | 0/1 | Not started | — |
+| 6. Influence Expansion | 1/1 | Complete | 2026-03-26 |
 | 7. Cross-Domain Graph | 0/2 | Not started | — |
 | 8. PageRank Integration | 0/1 | Not started | — |
 | 9. Path-Finding Tools | 0/2 | Not started | — |

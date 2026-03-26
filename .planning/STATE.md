@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Cross-domain connections — trace any entity across every dataset in the lake
-**Current focus:** Phase 5 complete — Transaction Network Expansion done, ready for Phase 6
+**Current focus:** Phase 6 complete — Influence Network Expansion done, ready for Phase 7
 
 ## Current Position
 
-Phase: 5 of 10 (Transaction Network Expansion) — COMPLETE
+Phase: 6 of 10 (Influence Network Expansion) — COMPLETE
 Plan: 1 of 1 complete
-Status: TX graph expanded 103% entities, 356% edges. All 10 MCP tools passing.
-Last activity: 2026-03-26 — Completed 05-01 (tx graph expansion to MTGE/ASST/SAT/AGMT, full MCP re-test 10/10)
+Status: Influence graph expanded 103% entities (310K→631K), +1.5M expenditure edges, +169 payroll agencies. MCP tools passing (2/10 verified before client disconnect, server healthy).
+Last activity: 2026-03-26 — Completed 06-01 (influence graph expansion with expenditures + offyear + doing business + payroll)
 
-Progress: ████░░░░░░ 40%
+Progress: █████░░░░░ 45%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9 (v2.0) / 8 (v1.0)
-- Average duration: ~58 min
-- Total execution time: 8.5 hours
+- Total plans completed: 10 (v2.0) / 8 (v1.0)
+- Average duration: ~56 min
+- Total execution time: 9.2 hours
 
 **By Phase:**
 
@@ -32,9 +32,10 @@ Progress: ████░░░░░░ 40%
 | 3. Ownership Rebuild | 2/2 | 150 min | 75 min |
 | 4. Corporate Web Rebuild | 2/2 | 115 min | 58 min |
 | 5. Transaction Expansion | 1/1 | 45 min | 45 min |
+| 6. Influence Expansion | 1/1 | 40 min | 40 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-02 ✓, 04-01 ✓, 04-02 ✓, 05-01 ✓
+- Last 5 plans: 04-01 ✓, 04-02 ✓, 05-01 ✓, 06-01 ✓
 - Trend: Verification plans are fast (~25 min)
 
 ## Accumulated Context
@@ -69,6 +70,8 @@ Progress: ████░░░░░░ 40%
 - **TX graph 3-stage incremental staging** — deeds, mortgages, assignments/satisfactions as separate temp tables to avoid 48M-row OOM (05-01)
 - **Mega-entity cap 200 + per-doc party cap 20** — banks/title companies with 500+ tx caused OOM on self-join; double cap needed (05-01)
 - **GRANTOR/GRANTEE role labels** — replaced SOLD/BOUGHT for accuracy across mortgages/assignments (05-01)
+- **NYS expenditure columns differ from plan** — `cand_comm_name` (filer), `flng_ent_name` (payee), `org_amt` (amount), `sched_date` (date), `purpose_code_desc` (purpose) (06-01)
+- **doing_business_contributions uses `amnt` not `amount`** — same pattern as cfb_offyear_contributions (06-01)
 
 ### Prior Milestone Context (v1.0 Entity Resolution)
 
@@ -94,5 +97,5 @@ Progress: ████░░░░░░ 40%
 ## Session Continuity
 
 Last session: 2026-03-26
-Stopped at: 05-01 complete. TX graph: 3.97M entities, 40.6M edges, 8.2M shared. All 10 MCP tools passing. Phase 5 done. Ready for Phase 6 (Influence Network Expansion).
+Stopped at: 06-01 complete. Influence graph: 630K entities (+103%), 1.5M expenditure edges, 169 payroll agencies. Phase 6 done. Ready for Phase 7 (Cross-Domain Unified Graph).
 Resume file: None
