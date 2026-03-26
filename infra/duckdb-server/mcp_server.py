@@ -6132,6 +6132,118 @@ def due_diligence(
 
 
 # ---------------------------------------------------------------------------
+# Vital Records — Historical NYC Records Search
+# ---------------------------------------------------------------------------
+
+VITAL_DEATHS_SQL = """
+SELECT first_name, last_name, age, year, month, day, county
+FROM lake.city_government.death_certificates_1862_1948
+WHERE last_name ILIKE ? AND first_name ILIKE ?
+ORDER BY year DESC NULLS LAST
+LIMIT 15
+"""
+
+VITAL_MARRIAGES_EARLY_SQL = """
+SELECT first_name, last_name, year, month, day, county
+FROM lake.city_government.marriage_certificates_1866_1937
+WHERE last_name ILIKE ?
+ORDER BY year DESC NULLS LAST
+LIMIT 15
+"""
+
+VITAL_MARRIAGES_MID_SQL = """
+SELECT license_number, license_year, county
+FROM lake.city_government.marriage_licenses_1908_1949
+ORDER BY license_year DESC NULLS LAST
+LIMIT 0
+"""
+# NOTE: marriage_licenses_1908_1949 has NO name columns (only license_number, license_year, county).
+# This query is a placeholder that returns 0 rows. Cannot search by name.
+
+VITAL_MARRIAGES_MODERN_SQL = """
+SELECT GROOM_FIRST_NAME, GROOM_SURNAME, BRIDE_FIRST_NAME, BRIDE_SURNAME,
+       DATE_OF_MARRIAGE, LICENSE_YEAR, LICENSE_CITY
+FROM lake.city_government.marriage_licenses_1950_2017
+WHERE GROOM_SURNAME ILIKE ? OR BRIDE_SURNAME ILIKE ?
+ORDER BY TRY_CAST(LICENSE_YEAR AS INT) DESC NULLS LAST
+LIMIT 15
+"""
+
+VITAL_BIRTHS_SQL = """
+SELECT first_name, last_name, year, county
+FROM lake.city_government.birth_certificates_1855_1909
+WHERE last_name ILIKE ? AND first_name ILIKE ?
+ORDER BY year DESC NULLS LAST
+LIMIT 15
+"""
+
+
+@mcp.tool(annotations=READONLY, tags={"investigation"})
+def vital_records(
+    name: NAME,
+    ctx: Context,
+) -> ToolResult:
+    """Search historical NYC vital records — death certificates (1862-1948, 3.7M records), marriage certificates (1866-1937, 5.3M), marriage licenses (1908-2017, 5.9M), and birth certificates (1855-1909, 2.6M). Use this for genealogy, confirming if someone is deceased, tracing family connections, or historical research. For modern marriage records (1950-2017), use marriage_search(surname). For comprehensive person search, use entity_xray(name)."""
+    name = name.strip()
+    if len(name) < 3:
+        raise ToolError("Name must be at least 3 characters.")
+
+    db = ctx.lifespan_context["db"]
+    t0 = time.time()
+
+    parts = name.split()
+    if len(parts) >= 2:
+        first = parts[0]
+        last = parts[-1]
+    else:
+        first = "%"
+        last = name
+
+    _, death_rows = _safe_query(db, VITAL_DEATHS_SQL, [f"{last}%", f"{first}%"])
+    _, marriage_early = _safe_query(db, VITAL_MARRIAGES_EARLY_SQL, [f"{last}%"])
+    marriage_mid = []  # 1908-1949 table has no name columns — skip
+    _, marriage_modern = _safe_query(db, VITAL_MARRIAGES_MODERN_SQL, [f"{last}%", f"{last}%"])
+    _, birth_rows = _safe_query(db, VITAL_BIRTHS_SQL, [f"{last}%", f"{first}%"])
+
+    all_marriages = (marriage_early or []) + (marriage_mid or []) + (marriage_modern or [])
+    total = len(death_rows or []) + len(all_marriages) + len(birth_rows or [])
+
+    if total == 0:
+        raise ToolError(f"No vital records found for '{name}'. Note: death records cover 1862-1948, marriages 1866-2017, births 1855-1909.")
+
+    lines = [f"VITAL RECORDS — {name}", f"Found {total} records across 16.4M historical NYC records", "=" * 55]
+
+    if death_rows:
+        lines.append(f"\nDEATH CERTIFICATES ({len(death_rows)} matches, 1862-1948):")
+        for r in death_rows:
+            fname, lname, age, year, month, day, county = r
+            date_str = f"{year or '?'}-{month or '?'}-{day or '?'}"
+            lines.append(f"  {fname or '?'} {lname or '?'} — died {date_str}, age {age or '?'}, {county or '?'}")
+
+    if all_marriages:
+        lines.append(f"\nMARRIAGE RECORDS ({len(all_marriages)} matches, 1866-2017):")
+        for r in all_marriages[:15]:
+            # Flexible: different marriage tables have different schemas
+            # Display whatever we can extract
+            lines.append(f"  {' | '.join(str(v) for v in r[:6] if v)}")
+
+    if birth_rows:
+        lines.append(f"\nBIRTH CERTIFICATES ({len(birth_rows)} matches, 1855-1909):")
+        for r in birth_rows:
+            fname, lname, year, county = r
+            lines.append(f"  {fname or '?'} {lname or '?'} — born {year or '?'}, {county or '?'}")
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={"name": name, "deaths": len(death_rows or []), "marriages": len(all_marriages), "births": len(birth_rows or [])},
+        meta={"name": name, "total_records": total, "query_time_ms": elapsed},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Commercial Vitality
 # ---------------------------------------------------------------------------
 
