@@ -31,4 +31,12 @@ EXPOSE 4213 9999
 
 ENV FASTMCP_STATELESS_HTTP=true
 
+# Pre-install community extensions at build time (avoids download on every startup)
+RUN python -c "\
+import duckdb; conn = duckdb.connect(); \
+[conn.execute(f'INSTALL {ext} FROM community') for ext in \
+['h3','splink_udfs','rapidfuzz','anofox_tabular','datasketches','hashfuncs', \
+'lindel','dqtest','duckpgq','anofox_forecast','lsh','finetype','curl_httpfs']]; \
+print('Extensions pre-installed'); conn.close()"
+
 CMD ["./start.sh"]
