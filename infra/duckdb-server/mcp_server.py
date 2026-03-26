@@ -635,25 +635,8 @@ async def app_lifespan(server):
     except duckdb.Error:
         pass  # Not supported in DuckDB 1.5+
 
-    CORE_EXTS = ["ducklake", "postgres", "spatial", "fts", "httpfs", "json"]
-    COMMUNITY_EXTS = ["duckpgq", "rapidfuzz", "anofox_forecast", "hnsw_acorn"]
-
-    for ext in CORE_EXTS:
-        try:
-            conn.execute(f"INSTALL {ext}")
-            conn.execute(f"LOAD {ext}")
-        except duckdb.Error:
-            try:
-                conn.execute(f"LOAD {ext}")
-            except duckdb.Error as e:
-                print(f"Warning: extension {ext} unavailable: {e}", flush=True)
-
-    for ext in COMMUNITY_EXTS:
-        try:
-            conn.execute(f"INSTALL {ext} FROM community")
-            conn.execute(f"LOAD {ext}")
-        except duckdb.Error as e:
-            print(f"Warning: community extension {ext} unavailable: {e}", flush=True)
+    from extensions import load_extensions
+    ext_status = load_extensions(conn)
 
     # Configure S3 for MinIO (DuckLake stores parquet in s3://ducklake/data/)
     minio_user = os.environ.get("MINIO_ROOT_USER", "minioadmin")
@@ -698,14 +681,8 @@ async def app_lifespan(server):
         print(f"DuckLake warm-up failed (expected on corrupted snapshots): {e}", flush=True)
         conn.close()
         conn = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-        for ext in CORE_EXTS:
-            conn.execute(f"LOAD {ext}")
-        for ext in COMMUNITY_EXTS:
-            try:
-                conn.execute(f"INSTALL {ext} FROM community")
-                conn.execute(f"LOAD {ext}")
-            except duckdb.Error as e:
-                print(f"Warning: community extension {ext} unavailable on reconnect: {e}", flush=True)
+        from extensions import load_extensions
+        ext_status = load_extensions(conn)
         # Reconfigure S3 and performance tuning on new connection
         conn.execute("SET s3_region = 'us-east-1'")
         conn.execute("SET s3_endpoint = 'minio:9000'")
