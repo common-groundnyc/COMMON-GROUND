@@ -5,6 +5,7 @@ first-class Dagster asset with dependency on name_index. Processes ~55M records
 in ~115 batches of ~500K, writing resolved entities to DuckLake.
 """
 import gc
+import os
 import time
 
 from dagster import AssetKey, MaterializeResult, MetadataValue, asset
@@ -14,9 +15,11 @@ from dagster_pipeline.defs.name_index_asset import _connect_ducklake
 # Import core logic from the batch script (avoid duplication)
 # These are added to sys.path via PYTHONPATH=src or Docker /app/src
 BATCH_SIZE = 500_000
-MODEL_PATH = "models/splink_model.json"
-PREDICT_THRESHOLD = 0.8
-CLUSTER_THRESHOLD = 0.85
+_MODEL_V2 = "models/splink_model_v2.json"
+_MODEL_V1 = "models/splink_model.json"
+MODEL_PATH = _MODEL_V2 if os.path.exists(_MODEL_V2) else _MODEL_V1
+PREDICT_THRESHOLD = 0.9
+CLUSTER_THRESHOLD = 0.92
 
 # Splink temp tables to clean up after each batch
 _SPLINK_CLEANUP_TABLES = [
@@ -26,17 +29,32 @@ _SPLINK_CLEANUP_TABLES = [
 ]
 
 
-def _get_last_name_counts(conn):
-    """Get last_name frequency distribution from name_index."""
-    rows = conn.execute("""
-        SELECT last_name, COUNT(*) as cnt
-        FROM lake.federal.name_index
-        WHERE last_name IS NOT NULL AND first_name IS NOT NULL
-          AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 2
-        GROUP BY last_name
-        ORDER BY cnt DESC
-    """).fetchall()
-    return [(r[0], r[1]) for r in rows]
+def _get_phonetic_counts(conn):
+    """Get dm_last (phonetic) frequency distribution from name_index.
+
+    Groups by phonetic encoding so SMITH and SMYTH are in the same batch.
+    Falls back to exact last_name if dm_last column doesn't exist.
+    """
+    try:
+        rows = conn.execute("""
+            SELECT dm_last, COUNT(*) as cnt
+            FROM lake.federal.name_index
+            WHERE dm_last IS NOT NULL AND first_name IS NOT NULL
+              AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 2
+            GROUP BY dm_last
+            ORDER BY cnt DESC
+        """).fetchall()
+        return [(r[0], r[1]) for r in rows], "dm_last"
+    except Exception:
+        rows = conn.execute("""
+            SELECT last_name, COUNT(*) as cnt
+            FROM lake.federal.name_index
+            WHERE last_name IS NOT NULL AND first_name IS NOT NULL
+              AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 2
+            GROUP BY last_name
+            ORDER BY cnt DESC
+        """).fetchall()
+        return [(r[0], r[1]) for r in rows], "last_name"
 
 
 def _pack_batches(name_counts):
@@ -59,7 +77,7 @@ def _pack_batches(name_counts):
     return batches
 
 
-def _process_batch(conn, last_names, batch_num, total_batches, first_batch, log):
+def _process_batch(conn, group_values, group_col, batch_num, total_batches, first_batch, log):
     """Process a single batch: read records, predict, cluster, append to all_results.
 
     Returns (batch_count, cluster_count).
@@ -76,40 +94,23 @@ def _process_batch(conn, last_names, batch_num, total_batches, first_batch, log)
 
     # Build a values table for the IN clause
     conn.execute("DROP TABLE IF EXISTS __batch_names")
-    conn.execute("CREATE TABLE __batch_names (last_name VARCHAR)")
-    for i in range(0, len(last_names), 1000):
-        chunk = last_names[i:i + 1000]
+    conn.execute(f"CREATE TABLE __batch_names ({group_col} VARCHAR)")
+    for i in range(0, len(group_values), 1000):
+        chunk = group_values[i:i + 1000]
         values = ", ".join(f"('{n.replace(chr(39), chr(39)+chr(39))}')" for n in chunk)
         conn.execute(f"INSERT INTO __batch_names VALUES {values}")
 
     # Read batch data
-    conn.execute("""
+    conn.execute(f"""
         CREATE OR REPLACE TABLE batch_data AS
         SELECT * FROM lake.federal.name_index
-        WHERE last_name IN (SELECT last_name FROM __batch_names)
+        WHERE {group_col} IN (SELECT {group_col} FROM __batch_names)
           AND last_name IS NOT NULL AND first_name IS NOT NULL
           AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 2
     """)
 
     batch_count = conn.execute("SELECT COUNT(*) FROM batch_data").fetchone()[0]
     t_read = time.time() - t0
-
-    # Add phonetic columns for enhanced comparison
-    try:
-        conn.execute("""
-            ALTER TABLE batch_data ADD COLUMN dm_last VARCHAR
-        """)
-        conn.execute("""
-            UPDATE batch_data SET dm_last = double_metaphone(UPPER(last_name))
-        """)
-        conn.execute("""
-            ALTER TABLE batch_data ADD COLUMN dm_first VARCHAR
-        """)
-        conn.execute("""
-            UPDATE batch_data SET dm_first = double_metaphone(UPPER(first_name))
-        """)
-    except Exception:
-        pass  # Non-critical enhancement
 
     if batch_count == 0:
         log.warning("Batch %d/%d: 0 records, skipping", batch_num, total_batches)
@@ -192,7 +193,8 @@ def resolved_entities(context) -> MaterializeResult:
     try:
         # Get last_name frequency distribution
         context.log.info("Getting last_name frequency distribution...")
-        name_counts = _get_last_name_counts(conn)
+        name_counts, group_col = _get_phonetic_counts(conn)
+        context.log.info("Grouping by %s", group_col)
         total_names = len(name_counts)
         total_records = sum(cnt for _, cnt in name_counts)
         context.log.info(
@@ -214,7 +216,7 @@ def resolved_entities(context) -> MaterializeResult:
         for i, (last_names, expected_count) in enumerate(batches, 1):
             try:
                 batch_records, batch_clusters = _process_batch(
-                    conn, last_names, i, total_batches, first_batch, context.log,
+                    conn, last_names, group_col, i, total_batches, first_batch, context.log,
                 )
                 if batch_records > 0:
                     first_batch = False

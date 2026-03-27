@@ -126,8 +126,8 @@ def phonetic_index(context) -> MaterializeResult:
                 last_name,
                 first_name,
                 source_table,
-                double_metaphone(UPPER(last_name)) AS dm_last,
-                double_metaphone(UPPER(first_name)) AS dm_first,
+                COALESCE(dm_last, double_metaphone(UPPER(last_name))) AS dm_last,
+                COALESCE(dm_first, double_metaphone(UPPER(first_name))) AS dm_first,
                 soundex(UPPER(last_name)) AS sx_last,
                 soundex(UPPER(first_name)) AS sx_first
             FROM lake.federal.name_index
