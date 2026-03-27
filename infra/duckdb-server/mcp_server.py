@@ -2696,6 +2696,16 @@ async def app_lifespan(server):
         embed_thread.start()
         print("Embedding pipeline started in background — server starting now", flush=True)
 
+    # Pre-compute resource category embeddings for semantic matching in resource_finder
+    resource_category_vecs = {}
+    if embed_fn:
+        try:
+            for cat, desc in RESOURCE_CATEGORIES.items():
+                resource_category_vecs[cat] = embed_fn(desc)
+            print(f"Resource category embeddings: {len(resource_category_vecs)} categories", flush=True)
+        except Exception as e:
+            print(f"Warning: resource category embeddings failed: {e}", flush=True)
+
     try:
         yield {
             "db": conn, "catalog": catalog,
@@ -2706,6 +2716,7 @@ async def app_lifespan(server):
             "embed_fn": embed_fn,
             "percentiles_ready": percentiles_ready,
             "lock": _db_lock,
+            "resource_category_vecs": resource_category_vecs,
         }
     finally:
         if ph_key:
@@ -5481,6 +5492,22 @@ def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
+# Semantic category descriptions — resource_finder
+# ---------------------------------------------------------------------------
+
+RESOURCE_CATEGORIES = {
+    "food": "food assistance, groceries, meals, SNAP benefits, food pantry, soup kitchen, hunger",
+    "health": "health clinic, doctor, hospital, mental health, therapy, counseling, medical care",
+    "childcare": "childcare, daycare, babysitting, preschool, early childhood, after school care",
+    "youth": "youth programs, teen activities, summer camp, mentoring, after school, tutoring",
+    "benefits": "government benefits, welfare, public assistance, SSI, disability, unemployment",
+    "legal": "legal aid, lawyer, tenant rights, immigration help, court, eviction defense",
+    "shelter": "shelter, housing assistance, emergency housing, homeless services, transitional housing",
+    "wifi": "free wifi, internet access, computer lab, digital access, library, technology center",
+    "senior": "senior services, elder care, meals on wheels, senior center, aging, retirement",
+}
+
+# ---------------------------------------------------------------------------
 # SQL constants — resource_finder
 # ---------------------------------------------------------------------------
 
@@ -5570,7 +5597,30 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
     t0 = time.time()
     db = ctx.lifespan_context["db"]
     need_lower = need.lower().strip()
-    show_all = need_lower == "all"
+
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    cat_vecs = ctx.lifespan_context.get("resource_category_vecs", {})
+    matched_categories = set()
+    if need_lower == "all":
+        matched_categories = set(RESOURCE_CATEGORIES.keys())
+    elif need_lower in RESOURCE_CATEGORIES:
+        matched_categories.add(need_lower)
+    elif embed_fn and cat_vecs:
+        try:
+            import numpy as np
+            query_vec = embed_fn(need_lower)
+            q_norm = query_vec / (np.linalg.norm(query_vec) + 1e-9)
+            for cat, cat_vec in cat_vecs.items():
+                c_norm = cat_vec / (np.linalg.norm(cat_vec) + 1e-9)
+                sim = float(np.dot(q_norm, c_norm))
+                if sim > 0.5:
+                    matched_categories.add(cat)
+        except Exception:
+            pass
+    # Fallback: if nothing matched semantically, try old keyword approach
+    if not matched_categories and need_lower != "all":
+        matched_categories = {need_lower}  # pass through to existing keyword logic
+    show_all = not matched_categories or "all" in matched_categories
 
     lines = [
         f"RESOURCE FINDER — ZIP {zipcode}",
@@ -5580,8 +5630,8 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
 
     results_found = 0
 
-    # Food
-    if show_all or any(k in need_lower for k in ("food", "hungry", "eat", "snap", "pantry", "market")):
+    # Food  # keywords: food, hungry, eat, snap, pantry, market
+    if show_all or "food" in matched_categories:
         _, food_rows = _safe_query(db, RESOURCE_FOOD_SQL, [zipcode])
         if food_rows:
             lines.append(f"\nFOOD ASSISTANCE ({len(food_rows)} locations):")
@@ -5600,8 +5650,8 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
                 lines.append(f"    {r[0]}, {r[2]} — {r[5]}")
             results_found += len(snap_rows)
 
-    # Health
-    if show_all or any(k in need_lower for k in ("health", "clinic", "doctor", "mental", "hospital")):
+    # Health  # keywords: health, clinic, doctor, mental, hospital
+    if show_all or "health" in matched_categories:
         _, mh_rows = _safe_query(db, RESOURCE_MENTAL_HEALTH_SQL, [zipcode])
         if mh_rows:
             lines.append(f"\nHEALTH & MENTAL HEALTH ({len(mh_rows)} locations):")
@@ -5613,8 +5663,8 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
                     lines.append(f"    Phone: {r[2]}")
             results_found += len(mh_rows)
 
-    # Childcare
-    if show_all or any(k in need_lower for k in ("child", "daycare", "childcare", "baby", "toddler")):
+    # Childcare  # keywords: child, daycare, childcare, baby, toddler
+    if show_all or "childcare" in matched_categories:
         _, cc_rows = _safe_query(db, RESOURCE_CHILDCARE_SQL, [zipcode])
         if cc_rows:
             lines.append(f"\nCHILDCARE ({len(cc_rows)} providers):")
@@ -5626,8 +5676,8 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
                     lines.append(f"    Phone: {r[2]}")
             results_found += len(cc_rows)
 
-    # Youth / DYCD
-    if show_all or any(k in need_lower for k in ("youth", "teen", "job", "dycd", "program", "after")):
+    # Youth / DYCD  # keywords: youth, teen, job, dycd, program, after
+    if show_all or "youth" in matched_categories:
         _, dycd_rows = _safe_query(db, RESOURCE_DYCD_SQL, [zipcode])
         if dycd_rows:
             lines.append(f"\nYOUTH & COMMUNITY PROGRAMS ({len(dycd_rows)} sites):")
@@ -5639,8 +5689,8 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
                     lines.append(f"    Phone: {r[5]}")
             results_found += len(dycd_rows)
 
-    # Benefits
-    if show_all or any(k in need_lower for k in ("benefit", "medicaid", "cash", "assistance", "snap")):
+    # Benefits  # keywords: benefit, medicaid, cash, assistance, snap
+    if show_all or "benefits" in matched_categories:
         _, ben_rows = _safe_query(db, RESOURCE_BENEFITS_SQL, [])
         if ben_rows:
             lines.append(f"\nBENEFITS ACCESS CENTERS:")
@@ -5650,8 +5700,8 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
                     lines.append(f"    Phone: {r[3]}")
             results_found += len(ben_rows)
 
-    # DV / Family Justice
-    if show_all or any(k in need_lower for k in ("domestic", "violence", "dv", "abuse", "family justice", "legal")):
+    # DV / Family Justice  # keywords: domestic, violence, dv, abuse, family justice, legal
+    if show_all or "legal" in matched_categories:
         _, fj_rows = _safe_query(db, RESOURCE_FAMILY_JUSTICE_SQL, [])
         if fj_rows:
             lines.append(f"\nFAMILY JUSTICE CENTERS (domestic violence):")
@@ -5659,8 +5709,8 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
                 lines.append(f"  {r[0]}: {r[1]} — {r[2]}")
             results_found += len(fj_rows)
 
-    # Shelter
-    if show_all or any(k in need_lower for k in ("shelter", "homeless", "housing")):
+    # Shelter  # keywords: shelter, homeless, housing
+    if show_all or "shelter" in matched_categories:
         lines.append("\nSHELTER & HOUSING:")
         lines.append("  DHS Intake: 400 E 30th St, Manhattan — 212-361-8000")
         lines.append("  Families: PATH Center, 151 E 151st St, Bronx — 718-503-6400")
@@ -5668,8 +5718,8 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
         lines.append("  HomeBase (eviction prevention): 311, ask for HomeBase")
         results_found += 1
 
-    # WiFi
-    if show_all or any(k in need_lower for k in ("wifi", "internet", "broadband", "connect")):
+    # WiFi  # keywords: wifi, internet, broadband, connect
+    if show_all or "wifi" in matched_categories:
         lines.append("\nFREE WI-FI & INTERNET:")
         lines.append("  LinkNYC kiosks: free gigabit Wi-Fi at 1,800+ locations")
         lines.append("  NYC Mesh: nycmesh.net (community internet)")
@@ -5680,16 +5730,16 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
             lines.append(f"  Broadband data for ZIP {zipcode} available")
         results_found += 1
 
-    # Senior
-    if show_all or any(k in need_lower for k in ("senior", "elder", "aging", "dfta", "meal")):
+    # Senior  # keywords: senior, elder, aging, dfta, meal
+    if show_all or "senior" in matched_categories:
         lines.append("\nSENIOR SERVICES:")
         lines.append("  DFTA Aging Connect: 212-244-6469")
         lines.append("  Meals on Wheels: mowaa.org or 311")
         lines.append("  Senior centers: 311 for nearest location")
         results_found += 1
 
-    # Immigration
-    if show_all or any(k in need_lower for k in ("immigra", "legal", "asylum", "idnyc", "undocumented")):
+    # Immigration  # keywords: immigra, legal, asylum, idnyc, undocumented
+    if show_all or "legal" in matched_categories:
         lines.append("\nIMMIGRATION SERVICES:")
         lines.append("  ActionNYC (free legal): 800-354-0365")
         lines.append("  IDNYC: 311 for locations (municipal ID for all residents)")
