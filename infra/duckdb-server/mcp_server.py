@@ -2926,6 +2926,22 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
 
     row = dict(zip(cols, rows[0]))
 
+    # City-wide violation percentile context
+    try:
+        _, pct_rows = _execute(db, """
+            WITH bbl_counts AS (
+                SELECT bbl, COUNT(*) AS cnt FROM lake.housing.hpd_violations GROUP BY bbl
+            )
+            SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE cnt <= (
+                SELECT cnt FROM bbl_counts WHERE bbl = ?
+            )) / COUNT(*), 1) AS percentile
+            FROM bbl_counts
+        """, [bbl])
+        if pct_rows and pct_rows[0][0] is not None:
+            row["violation_percentile"] = pct_rows[0][0]
+    except Exception:
+        pass
+
     # Additional enrichments — landmark, tax exemptions, valuation, SRO, facades
     borough = bbl[0]
     block = bbl[1:6].lstrip("0") or "0"
@@ -3025,6 +3041,9 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
         r = facade_rows[0]
         summary += f"\n  Facade (FISP): {r[0] or '?'} | Cycle {r[2] or '?'} | Wall: {r[3] or '?'}"
         row["facade"] = {"status": r[0], "filing": r[1], "cycle": r[2], "wall_type": r[3]}
+
+    if "violation_percentile" in row:
+        summary += f"\n  Violation percentile: {row['violation_percentile']}% (city-wide, by building)"
 
     return ToolResult(
         content=summary,
@@ -4688,6 +4707,29 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
     lines.append("  Request officer name, badge number, and command")
     lines.append("  Legal aid (misconduct): 212-577-3300 (Legal Aid Society)")
     lines.append("  Cop Accountability Project: communityresource.io")
+
+    # H3 crime hotspot analysis
+    try:
+        from spatial import h3_heatmap_sql
+        _, pct_center = _execute(db, f"""
+            SELECT AVG(TRY_CAST(latitude AS DOUBLE)), AVG(TRY_CAST(longitude AS DOUBLE))
+            FROM lake.city_government.pluto
+            WHERE policeprct = '{precinct}'
+              AND TRY_CAST(latitude AS DOUBLE) BETWEEN 40.4 AND 41.0
+        """)
+        if pct_center and pct_center[0][0]:
+            lat, lng = pct_center[0][0], pct_center[0][1]
+            hm_cols, hm_rows = _execute(db, h3_heatmap_sql(
+                source_table="lake.foundation.h3_index",
+                filter_table="public_safety.nypd_complaints_ytd",
+                lat=lat, lng=lng, radius_rings=10))
+            if hm_rows:
+                hotspots = [dict(zip(hm_cols, r)) for r in hm_rows[:5]]
+                lines.append(f"\nCRIME HOTSPOT CELLS (top 5 H3 hexes):")
+                for h in hotspots:
+                    lines.append(f"  ({h['cell_lat']:.4f}, {h['cell_lng']:.4f}): {h['count']:,} incidents")
+    except Exception:
+        pass
 
     elapsed = round((time.time() - t0) * 1000)
     lines.append(f"\n({elapsed}ms)")
@@ -8205,6 +8247,24 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
             r = dict(zip(cols_biz, row))
             lines.append(f"  {r.get('industry')}: {int(r.get('cnt') or 0):,}")
 
+    # H3-based safety snapshot
+    try:
+        from spatial import h3_zip_centroid_sql, h3_neighborhood_stats_sql
+        _, centroid = _execute(db, h3_zip_centroid_sql(zipcode))
+        if centroid and centroid[0][0] is not None:
+            c_lat, c_lng = centroid[0][1], centroid[0][2]
+            _, stats = _execute(db, h3_neighborhood_stats_sql(c_lat, c_lng, radius_rings=6))
+            if stats:
+                s = dict(zip(["total_crimes", "total_arrests", "restaurants_h3", "n311_calls", "shootings", "street_trees"], stats[0]))
+                lines.append(f"\nSAFETY SNAPSHOT (H3 hex radius)")
+                lines.append(f"  Crimes nearby: {s.get('total_crimes', 0):,}")
+                lines.append(f"  Arrests nearby: {s.get('total_arrests', 0):,}")
+                lines.append(f"  Shootings nearby: {s.get('shootings', 0):,}")
+                lines.append(f"  311 calls nearby: {s.get('n311_calls', 0):,}")
+                lines.append(f"  Street trees: {s.get('street_trees', 0):,}")
+    except Exception:
+        pass
+
     elapsed = round((time.time() - t0) * 1000)
     lines.append(f"\n({elapsed}ms)")
 
@@ -9365,6 +9425,18 @@ def worst_landlords(ctx: Context, borough: Annotated[str, Field(description="Bor
     if not rows:
         return ToolResult(content="No results found.")
 
+    # IQR anomaly flagging
+    outlier_owners = set()
+    if rows:
+        violations_list = [r[4] for r in rows if r[4]]  # violations column
+        if len(violations_list) >= 5:
+            sorted_v = sorted(violations_list)
+            q1 = sorted_v[len(sorted_v) // 4]
+            q3 = sorted_v[3 * len(sorted_v) // 4]
+            iqr = q3 - q1
+            upper = q3 + 1.5 * iqr
+            outlier_owners = {r[0] for r in rows if (r[4] or 0) > upper}
+
     borough_label = f" (borough {borough.strip()})" if borough.strip() else ""
     lines = [f"WORST LANDLORDS — Top {len(rows)} by composite score{borough_label}"]
     lines.append("Ranked by violation severity among all NYC landlords\n")
@@ -9375,9 +9447,10 @@ def worst_landlords(ctx: Context, borough: Annotated[str, Field(description="Bor
 
     for i, r in enumerate(rows, 1):
         name = (r[1] or f"Reg#{r[0]}")[:28]
+        outlier_tag = " [STATISTICAL OUTLIER]" if r[0] in outlier_owners else ""
         lines.append(f"{i:<5} {name:<30} {r[2]:<6} {r[3] or 0:<6} "
                      f"{r[4]:<7} {r[5]:<6} {r[6]:<6} {r[7]:<6} {r[8]:<6} "
-                     f"{r[9]:<6} {r[10]:<7} {r[11]:<5} {r[12]}")
+                     f"{r[9]:<6} {r[10]:<7} {r[11]:<5} {r[12]}{outlier_tag}")
 
     lines.append(f"\n({elapsed}ms)")
 
