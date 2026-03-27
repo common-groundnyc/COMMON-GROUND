@@ -12785,6 +12785,10 @@ async def catalog_json(request: Request) -> JSONResponse:
               AND t.schema_name NOT LIKE 'test%'
               AND t.schema_name NOT LIKE 'ducklake%'
               AND t.schema_name NOT LIKE 'information%'
+              AND t.schema_name != 'lake'
+              AND t.schema_name != 'foundation'
+              AND t.table_name NOT LIKE '%__null'
+              AND t.table_name NOT LIKE '%__footnotes'
             ORDER BY t.schema_name, t.estimated_size DESC
         """)
 
