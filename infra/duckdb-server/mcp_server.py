@@ -6578,6 +6578,29 @@ def due_diligence(
     db = ctx.lifespan_context["db"]
     t0 = time.time()
 
+    # Vector pre-pass: find similar names to expand search
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(name.strip().upper())
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:
+                    extra_names.add(matched_name.upper())
+            extra_names.discard(name.strip().upper())
+        except Exception:
+            pass
+
     # Parse first/last for attorney search
     parts = name.split()
     if len(parts) >= 2:
@@ -6713,6 +6736,11 @@ def due_diligence(
             lines.append(f"  {m.get('first_name', '')} {m.get('last_name', '')} in {m.get('source_table', '')} (score: {m.get('combined_score', 0):.2f})")
 
     lines.append(f"\n{sections_found} of 7 databases returned results.")
+
+    if extra_names:
+        lines.append(f"\nSIMILAR NAMES (vector match):")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
 
     elapsed = round((time.time() - t0) * 1000)
     lines.append(f"\n({elapsed}ms)")
@@ -11567,6 +11595,29 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     t0 = time.time()
     search = entity_name.strip().upper()
 
+    # Vector pre-pass: find similar names to expand search
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(search)
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:
+                    extra_names.add(matched_name.upper())
+            extra_names.discard(search)
+        except Exception:
+            pass
+
     # Find matching political entities
     ent_cols, ent_rows = _execute(db, """
         SELECT entity_name, roles, total_amount, total_transactions
@@ -11735,6 +11786,11 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
             amt_str = f"${r[2]:,.0f}" if r[2] else "?"
             lines.append(f"  {r[0][:40]} | {r[1]} | {amt_str}")
 
+    if extra_names:
+        lines.append(f"\nSIMILAR NAMES (vector match):")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
+
     lines.append(f"\n({elapsed}ms)")
 
     return ToolResult(
@@ -11763,6 +11819,29 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
     db = ctx.lifespan_context["db"]
     t0 = time.time()
     search = name_or_license.strip().upper()
+
+    # Vector pre-pass: find similar names to expand search (skip for license numbers)
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn and not search.replace('-', '').isdigit():
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(search)
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:
+                    extra_names.add(matched_name.upper())
+            extra_names.discard(search)
+        except Exception:
+            pass
 
     # Find contractor by license or name
     if search.isdigit():
@@ -11887,6 +11966,11 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
         lines.append(f"\nOTHER MATCHES:")
         for r in c_rows[1:]:
             lines.append(f"  {r[1]} (#{r[0]}) — {r[2]:,} permits, {r[3]:,} buildings")
+
+    if extra_names:
+        lines.append(f"\nSIMILAR NAMES (vector match):")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
 
     lines.append(f"\n({elapsed}ms)")
 
