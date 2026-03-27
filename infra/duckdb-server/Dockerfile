@@ -18,7 +18,8 @@ RUN pip install --no-cache-dir \
     numpy \
     pyarrow \
     huggingface_hub \
-    aiohttp
+    aiohttp \
+    google-genai
 
 WORKDIR /app
 COPY *.py .
