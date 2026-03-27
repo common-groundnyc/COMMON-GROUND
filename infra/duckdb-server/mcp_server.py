@@ -2736,9 +2736,30 @@ async def app_lifespan(server):
             for table, info in tables.items()
         ]}
 
+        # Load pipeline state for FreshnessMiddleware (stale data warnings)
+        pipeline_state = {}
+        try:
+            ps_cur = conn.cursor()
+            try:
+                ps_result = ps_cur.execute(
+                    "SELECT dataset_name, last_updated_at, row_count, last_run_at FROM lake._pipeline_state"
+                )
+                for psr in ps_result.fetchall():
+                    pipeline_state[psr[0]] = {
+                        "cursor": str(psr[1]) if psr[1] else None,
+                        "rows_written": psr[2],
+                        "last_run_at": str(psr[3]) if psr[3] else None,
+                    }
+            finally:
+                ps_cur.close()
+            print(f"Pipeline state loaded: {len(pipeline_state)} datasets", flush=True)
+        except Exception:
+            pass  # _pipeline_state may not exist yet
+
         yield {
             "db": conn, "pool": pool, "catalog": catalog,
             "catalog_json": catalog_json,
+            "pipeline_state": pipeline_state,
             "graph_ready": graph_ready,
             "marriage_parquet": MARRIAGE_PARQUET if marriage_available else None,
             "posthog_enabled": bool(ph_key),
@@ -12593,6 +12614,8 @@ mcp.add_middleware(ResponseLimitingMiddleware(max_size=50_000))
 mcp.add_middleware(OutputFormatterMiddleware())
 from citation_middleware import CitationMiddleware
 mcp.add_middleware(CitationMiddleware())
+from freshness_middleware import FreshnessMiddleware
+mcp.add_middleware(FreshnessMiddleware())
 mcp.add_middleware(PercentileMiddleware())
 mcp.add_middleware(PostHogMiddleware())
 
