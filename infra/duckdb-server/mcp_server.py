@@ -2729,8 +2729,16 @@ async def app_lifespan(server):
 
     pool = CursorPool(conn, size=16)
     try:
+        # Build catalog_json for CitationMiddleware (flat list of {schema, table, rows})
+        catalog_json = {"tables": [
+            {"schema": schema, "table": table, "rows": info.get("row_count", 0)}
+            for schema, tables in catalog.items()
+            for table, info in tables.items()
+        ]}
+
         yield {
             "db": conn, "pool": pool, "catalog": catalog,
+            "catalog_json": catalog_json,
             "graph_ready": graph_ready,
             "marriage_parquet": MARRIAGE_PARQUET if marriage_available else None,
             "posthog_enabled": bool(ph_key),
@@ -12583,6 +12591,8 @@ class PostHogMiddleware(Middleware):
 
 mcp.add_middleware(ResponseLimitingMiddleware(max_size=50_000))
 mcp.add_middleware(OutputFormatterMiddleware())
+from citation_middleware import CitationMiddleware
+mcp.add_middleware(CitationMiddleware())
 mcp.add_middleware(PercentileMiddleware())
 mcp.add_middleware(PostHogMiddleware())
 
