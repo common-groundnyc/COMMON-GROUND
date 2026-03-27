@@ -1027,7 +1027,7 @@ async def app_lifespan(server):
         except Exception:
             return 0
 
-    def _build_catalog_embeddings(conn, embed_batch, dims):
+    def _build_catalog_embeddings(bg_conn, embed_batch, dims):
         """Embed schema descriptions — always rebuilt (tiny, ~12 rows)."""
         rows = []
         for schema_name, description in SCHEMA_DESCRIPTIONS.items():
@@ -1036,14 +1036,14 @@ async def app_lifespan(server):
             return
         texts = [r[2] for r in rows]
         vecs = embed_batch(texts)
-        conn.execute(f"CREATE OR REPLACE TEMP TABLE _tmp_catalog (schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}])")
+        bg_conn.execute(f"CREATE OR REPLACE TEMP TABLE _tmp_catalog (schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}])")
         for (s, t, d), vec in zip(rows, vecs):
-            conn.execute(f"INSERT INTO _tmp_catalog VALUES (?, ?, ?, ?::FLOAT[{dims}])", [s, t, d, vec.tolist()])
-        conn.execute(f"COPY _tmp_catalog TO '{_lance_path('catalog_embeddings')}' (FORMAT lance, mode 'overwrite')")
-        conn.execute("DROP TABLE _tmp_catalog")
+            bg_conn.execute(f"INSERT INTO _tmp_catalog VALUES (?, ?, ?, ?::FLOAT[{dims}])", [s, t, d, vec.tolist()])
+        bg_conn.execute(f"COPY _tmp_catalog TO '{_lance_path('catalog_embeddings')}' (FORMAT lance, mode 'overwrite')")
+        bg_conn.execute("DROP TABLE _tmp_catalog")
         print(f"  Catalog embeddings: {len(rows)} rows (rebuilt → Lance)", flush=True)
 
-    def _build_description_embeddings(conn, embed_batch, dims):
+    def _build_description_embeddings(conn, bg_conn, embed_batch, dims):
         """Embed complaint/violation descriptions — incremental append."""
         sources = [
             ("311", """
@@ -1070,11 +1070,12 @@ async def app_lifespan(server):
         total_new = 0
         for source_name, sql in sources:
             try:
-                all_descs = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
+                with _db_lock:
+                    all_descs = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
                 existing = set()
                 if _lance_exists("description_embeddings"):
                     try:
-                        existing = {r[0] for r in conn.execute(
+                        existing = {r[0] for r in bg_conn.execute(
                             f"SELECT description FROM '{_lance_path('description_embeddings')}' WHERE source = '{source_name}'"
                         ).fetchall()}
                     except Exception:
@@ -1091,16 +1092,16 @@ async def app_lifespan(server):
                     "description": new_descs,
                     "embedding": [v.tolist() for v in vecs],
                 })
-                conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_desc AS SELECT * FROM tbl")
+                bg_conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_desc AS SELECT * FROM tbl")
                 mode = "append" if _lance_exists("description_embeddings") else "overwrite"
-                conn.execute(f"COPY _tmp_desc TO '{_lance_path('description_embeddings')}' (FORMAT lance, mode '{mode}')")
-                conn.execute("DROP TABLE _tmp_desc")
+                bg_conn.execute(f"COPY _tmp_desc TO '{_lance_path('description_embeddings')}' (FORMAT lance, mode '{mode}')")
+                bg_conn.execute("DROP TABLE _tmp_desc")
                 total_new += len(new_descs)
             except Exception as e:
                 print(f"  Warning: descriptions [{source_name}] failed: {e}", flush=True)
         print(f"  Description embeddings: {total_new} new rows → Lance", flush=True)
 
-    def _build_entity_name_embeddings(conn, embed_batch, dims):
+    def _build_entity_name_embeddings(conn, bg_conn, embed_batch, dims):
         """Embed entity names from graph tables — incremental append."""
         name_sources = [
             ("owner", "SELECT DISTINCT owner_name AS name FROM main.graph_owners WHERE owner_name IS NOT NULL AND LENGTH(owner_name) > 2"),
@@ -1111,11 +1112,12 @@ async def app_lifespan(server):
         total_new = 0
         for source_name, sql in name_sources:
             try:
-                all_names = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
+                with _db_lock:
+                    all_names = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
                 existing = set()
                 if _lance_exists("entity_name_embeddings"):
                     try:
-                        existing = {r[0] for r in conn.execute(
+                        existing = {r[0] for r in bg_conn.execute(
                             f"SELECT name FROM '{_lance_path('entity_name_embeddings')}' WHERE source = '{source_name}'"
                         ).fetchall()}
                     except Exception:
@@ -1128,21 +1130,21 @@ async def app_lifespan(server):
                 vecs = embed_batch(new_names)
                 import pyarrow as pa
                 tbl = pa.table({"source": [source_name] * len(new_names), "name": new_names, "embedding": [v.tolist() for v in vecs]})
-                conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_names AS SELECT * FROM tbl")
+                bg_conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_names AS SELECT * FROM tbl")
                 mode = "append" if _lance_exists("entity_name_embeddings") else "overwrite"
-                conn.execute(f"COPY _tmp_names TO '{_lance_path('entity_name_embeddings')}' (FORMAT lance, mode '{mode}')")
-                conn.execute("DROP TABLE _tmp_names")
+                bg_conn.execute(f"COPY _tmp_names TO '{_lance_path('entity_name_embeddings')}' (FORMAT lance, mode '{mode}')")
+                bg_conn.execute("DROP TABLE _tmp_names")
                 total_new += len(new_names)
                 print(f"  Names [{source_name}]: {len(new_names):,} embedded → Lance", flush=True)
             except Exception as e:
                 print(f"  Warning: names [{source_name}] failed: {e}", flush=True)
         print(f"  Entity name embeddings: {total_new:,} new rows total → Lance", flush=True)
 
-    def _build_building_vectors(conn):
+    def _build_building_vectors(conn, bg_conn):
         """Build numeric feature vectors for building similarity (no embeddings needed)."""
         try:
-            conn.execute(f"""
-                COPY (
+            with _db_lock:
+                result = conn.execute("""
                     WITH base AS (
                         SELECT
                             b.bbl, b.borough,
@@ -1170,17 +1172,26 @@ async def app_lifespan(server):
                         [COALESCE(n1,0), COALESCE(n2,0), COALESCE(n3,0),
                          COALESCE(n4,0), COALESCE(n5,0), COALESCE(n6,0)]::FLOAT[] AS features
                     FROM normed
-                ) TO '{_lance_path('building_vectors')}' (FORMAT lance, mode 'overwrite')
-            """)
-            count = _lance_count(conn, "building_vectors")
-            print(f"  Building vectors: {count:,} rows (rebuilt → Lance)", flush=True)
+                """).fetchall()
+            if not result:
+                return
+            import pyarrow as pa
+            tbl = pa.table({
+                "bbl": [r[0] for r in result],
+                "borough": [r[1] for r in result],
+                "features": [list(r[2]) for r in result],
+            })
+            bg_conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_bv AS SELECT * FROM tbl")
+            bg_conn.execute(f"COPY (SELECT bbl, borough, features::FLOAT[] AS features FROM _tmp_bv) TO '{_lance_path('building_vectors')}' (FORMAT lance, mode 'overwrite')")
+            bg_conn.execute("DROP TABLE _tmp_bv")
+            print(f"  Building vectors: {len(result):,} rows (rebuilt → Lance)", flush=True)
         except Exception as e:
             print(f"  Warning: building vectors failed: {e}", flush=True)
 
-    def _create_lance_indexes(conn):
+    def _create_lance_indexes(bg_conn):
         try:
-            if _lance_count(conn, "entity_name_embeddings") > 10000:
-                conn.execute(f"""
+            if _lance_count(bg_conn, "entity_name_embeddings") > 10000:
+                bg_conn.execute(f"""
                     CREATE INDEX IF NOT EXISTS name_emb_idx
                     ON '{_lance_path("entity_name_embeddings")}' (embedding)
                     USING IVF_FLAT WITH (num_partitions=32, metric_type='cosine')
@@ -2630,15 +2641,24 @@ async def app_lifespan(server):
     if embed_fn is not None:
         def _background_embed():
             try:
-                import pathlib
+                import pathlib, duckdb as _duckdb
                 pathlib.Path(LANCE_DIR).mkdir(parents=True, exist_ok=True)
+
+                # Separate connection for Lance writes — avoids racing the main conn
+                bg_conn = _duckdb.connect(config={"allow_unsigned_extensions": "true"})
+                try:
+                    bg_conn.execute("LOAD lance")
+                except Exception:
+                    pass
+
                 print("Background: building Lance embeddings...", flush=True)
-                _build_catalog_embeddings(conn, embed_batch_fn, embed_dims)
-                _build_description_embeddings(conn, embed_batch_fn, embed_dims)
+                _build_catalog_embeddings(bg_conn, embed_batch_fn, embed_dims)
+                _build_description_embeddings(conn, bg_conn, embed_batch_fn, embed_dims)
                 if graph_ready:
-                    _build_entity_name_embeddings(conn, embed_batch_fn, embed_dims)
-                    _build_building_vectors(conn)
-                _create_lance_indexes(conn)
+                    _build_entity_name_embeddings(conn, bg_conn, embed_batch_fn, embed_dims)
+                    _build_building_vectors(conn, bg_conn)
+                _create_lance_indexes(bg_conn)
+                bg_conn.close()
                 print("Background: Lance embedding pipeline complete", flush=True)
             except Exception as e:
                 print(f"Background: embedding error: {e}", flush=True)
@@ -12802,18 +12822,39 @@ async def catalog_json(request: Request) -> JSONResponse:
             pass  # DuckLake metadata unavailable — continue without it
 
         # Get pipeline cursor state — last_run_at and row_count per dataset
+        # Try with source columns first (added by freshness sensor), fall back to base columns
         pipeline_state = {}
         try:
-            _, ps_rows = _execute(db, """
-                SELECT dataset_name, last_updated_at, row_count, last_run_at
-                FROM lake._pipeline_state
-            """)
-            for psr in ps_rows:
-                pipeline_state[psr[0]] = {
-                    "cursor": str(psr[1]) if psr[1] else None,
-                    "rows_written": psr[2],
-                    "last_run_at": str(psr[3]) if psr[3] else None,
-                }
+            try:
+                _, ps_rows = _execute(db, """
+                    SELECT dataset_name, last_updated_at, row_count, last_run_at,
+                           source_rows, sync_status, source_checked_at
+                    FROM lake._pipeline_state
+                """)
+                for psr in ps_rows:
+                    pipeline_state[psr[0]] = {
+                        "cursor": str(psr[1]) if psr[1] else None,
+                        "rows_written": psr[2],
+                        "last_run_at": str(psr[3]) if psr[3] else None,
+                        "source_rows": psr[4],
+                        "sync_status": psr[5],
+                        "source_checked_at": str(psr[6]) if psr[6] else None,
+                    }
+            except Exception:
+                # Fallback: source columns don't exist yet (sensor hasn't run)
+                _, ps_rows = _execute(db, """
+                    SELECT dataset_name, last_updated_at, row_count, last_run_at
+                    FROM lake._pipeline_state
+                """)
+                for psr in ps_rows:
+                    pipeline_state[psr[0]] = {
+                        "cursor": str(psr[1]) if psr[1] else None,
+                        "rows_written": psr[2],
+                        "last_run_at": str(psr[3]) if psr[3] else None,
+                        "source_rows": None,
+                        "sync_status": None,
+                        "source_checked_at": None,
+                    }
         except Exception:
             pass  # _pipeline_state may not exist yet
 
@@ -12857,6 +12898,9 @@ async def catalog_json(request: Request) -> JSONResponse:
                 "last_run_at": ps.get("last_run_at"),
                 "cursor": ps.get("cursor"),
                 "rows_written": ps.get("rows_written"),
+                "source_rows": ps.get("source_rows"),
+                "sync_status": ps.get("sync_status"),
+                "source_checked_at": ps.get("source_checked_at"),
             })
             total_rows += (est_size or 0)
             if schema not in schema_stats:
