@@ -68,7 +68,7 @@ WITH building AS (
            legalstories, legalclassa, legalclassb, managementprogram, zip,
            (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) AS bbl
     FROM lake.housing.hpd_jurisdiction
-    WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+    WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
     LIMIT 1
 ),
 violation_counts AS (
@@ -77,7 +77,7 @@ violation_counts AS (
         COUNT(*) FILTER (WHERE violationstatus = 'Open') AS open_violations,
         MAX(TRY_CAST(novissueddate AS DATE)) AS latest_violation_date
     FROM lake.housing.hpd_violations
-    WHERE bbl = ?
+    WHERE bbl = ?::VARCHAR
 ),
 complaint_counts AS (
     SELECT
@@ -85,14 +85,14 @@ complaint_counts AS (
         COUNT(DISTINCT complaint_id) FILTER (WHERE complaint_status = 'OPEN') AS open_complaints,
         MAX(TRY_CAST(received_date AS DATE)) AS latest_complaint_date
     FROM lake.housing.hpd_complaints
-    WHERE bbl = ?
+    WHERE bbl = ?::VARCHAR
 ),
 dob_counts AS (
     SELECT
         COUNT(*) AS total_dob_violations,
         MAX(TRY_CAST(issue_date AS DATE)) AS latest_dob_date
     FROM lake.housing.dob_ecb_violations
-    WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+    WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
 )
 SELECT
     b.bbl, b.housenumber || ' ' || b.streetname AS address, b.zip,
@@ -152,7 +152,7 @@ dob AS (
            ecb_violation_status AS status, issue_date,
            certification_status AS current_status, hearing_date AS status_date
     FROM lake.housing.dob_ecb_violations
-    WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+    WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
     ORDER BY TRY_CAST(issue_date AS DATE) DESC NULLS LAST
     LIMIT 200
 ),
@@ -1128,11 +1128,17 @@ async def app_lifespan(server):
                     continue
                 print(f"  Descriptions [{source_name}]: {len(existing)} existing, {len(new_descs)} new — embedding...", flush=True)
                 vecs = embed_batch(new_descs)
-                for desc, vec in zip(new_descs, vecs):
-                    conn.execute(
-                        f"INSERT INTO main.description_embeddings VALUES (?, ?, ?::FLOAT[{dims}])",
-                        [source_name, desc, vec.tolist()]
-                    )
+                # Bulk insert via Parquet (row-by-row INSERT is too slow for 768-dim vectors)
+                import pyarrow as pa, pyarrow.parquet as pq
+                tbl = pa.table({
+                    "source": [source_name] * len(new_descs),
+                    "description": new_descs,
+                    "embedding": [v.tolist() for v in vecs],
+                })
+                tmp = "/tmp/_desc_embeddings.parquet"
+                pq.write_table(tbl, tmp)
+                conn.execute(f"INSERT INTO main.description_embeddings SELECT source, description, embedding::FLOAT[{dims}] AS embedding FROM read_parquet('{tmp}')")
+                import os; os.unlink(tmp)
                 total_new += len(new_descs)
             except Exception as e:
                 print(f"  Warning: descriptions [{source_name}] failed: {e}", flush=True)
@@ -2939,7 +2945,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
         _, tax_rows = _execute(db, """
             SELECT exmp_code, exname, year, curexmptot, benftstart
             FROM lake.housing.tax_exemptions
-            WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+            WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
             ORDER BY year DESC
             LIMIT 5
         """, [bbl])
@@ -2951,7 +2957,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
             SELECT year, curmkttot, curacttot, curtxbtot, zoning, owner,
                    bldg_class, yrbuilt, units, gross_sqft
             FROM lake.housing.property_valuation
-            WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+            WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
             ORDER BY year DESC
             LIMIT 1
         """, [bbl])
@@ -2962,7 +2968,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
         _, sro_rows = _execute(db, """
             SELECT dobbuildingclass, legalclassa, legalclassb, managementprogram
             FROM lake.housing.sro_buildings
-            WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+            WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
             LIMIT 1
         """, [bbl])
     except Exception:
@@ -4654,7 +4660,7 @@ SELECT boroid, block, lot, buildingid, registrationid, bin,
        legalstories, legalclassa, legalclassb, managementprogram,
        (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) AS bbl
 FROM lake.housing.hpd_jurisdiction
-WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
 LIMIT 1
 """
 
@@ -10646,7 +10652,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
             FROM lake.housing.dob_complaints
             WHERE bin = (
                 SELECT bin FROM lake.housing.hpd_jurisdiction
-                WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+                WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
                 LIMIT 1
             )
         """, [bbl])
@@ -10678,7 +10684,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
             FROM lake.housing.dob_safety_boiler
             WHERE bin_number = (
                 SELECT bin FROM lake.housing.hpd_jurisdiction
-                WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+                WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
                 LIMIT 1
             )
             GROUP BY owner
@@ -10692,7 +10698,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
             SELECT buildingid, managementprogram, legalclassa, legalclassb,
                    dobbuildingclass, legalstories
             FROM lake.housing.sro_buildings
-            WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+            WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
             LIMIT 1
         """, [bbl])
         is_sro = len(sro_rows) > 0
