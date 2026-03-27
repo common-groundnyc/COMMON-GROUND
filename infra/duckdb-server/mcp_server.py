@@ -12555,7 +12555,8 @@ class PostHogMiddleware(Middleware):
                     "client_ip": client_ip,
                 }
                 for k, v in arguments.items():
-                    props[f"arg_{k}"] = str(v)[:200]
+                    sv = str(v)
+                    props[f"arg_{k}"] = f"<{type(v).__name__}:{len(sv)}chars>"
                 if error:
                     props["error"] = error
                 posthog.capture(
