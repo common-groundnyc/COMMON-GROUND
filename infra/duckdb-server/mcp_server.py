@@ -57,6 +57,14 @@ _SAFE_DDL = re.compile(
     re.IGNORECASE,
 )
 
+# Block filesystem-access functions anywhere in a query (not just at start)
+_UNSAFE_FUNCTIONS = re.compile(
+    r"\b(read_parquet|read_csv|read_csv_auto|read_json|read_json_auto"
+    r"|read_text|glob|read_blob|write_parquet|write_csv"
+    r"|httpfs_|http_get|http_post)\s*\(",
+    re.IGNORECASE,
+)
+
 _db_lock = threading.Lock()
 LANCE_DIR = "/data/common-ground/lance"
 
@@ -585,6 +593,11 @@ def _validate_sql(sql):
     if _UNSAFE_SQL.match(stripped):
         raise ToolError(
             "Only SELECT, WITH, EXPLAIN, DESCRIBE, SHOW, and PRAGMA queries are allowed."
+        )
+
+    if _UNSAFE_FUNCTIONS.search(stripped):
+        raise ToolError(
+            "Direct file access functions (read_parquet, read_csv, glob, etc.) are not allowed. Query lake.schema.table_name instead."
         )
 
 
@@ -2855,7 +2868,7 @@ def sql_admin(sql: Annotated[str, Field(description="DDL statement. Only CREATE 
     db = ctx.lifespan_context["db"]
     with _db_lock:
         try:
-            db.execute(sql.strip().rstrip(";"))
+            db.execute(stripped)
             # Refresh catalog after DDL
             ctx.lifespan_context["catalog"] = _build_catalog(db)
             return "OK — view created successfully."
@@ -12798,7 +12811,8 @@ async def catalog_json(request: Request) -> JSONResponse:
             },
         )
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        print(f"[catalog] Error: {e}", flush=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
     finally:
         if db:
             db.close()
