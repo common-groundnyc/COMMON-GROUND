@@ -705,7 +705,7 @@ async def app_lifespan(server):
     ext_status = load_extensions(conn)
 
     # Configure S3 for MinIO (DuckLake stores parquet in s3://ducklake/data/)
-    minio_user = os.environ.get("MINIO_ROOT_USER", "minioadmin").replace("'", "''")
+    minio_user = os.environ.get("MINIO_ROOT_USER", "").replace("'", "''")
     minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
     conn.execute("SET s3_region = 'us-east-1'")
     conn.execute("SET s3_endpoint = 'minio:9000'")
@@ -12624,7 +12624,7 @@ def _catalog_connect():
     from extensions import load_extensions
     load_extensions(conn)
 
-    minio_user = os.environ.get("MINIO_ROOT_USER", "minioadmin").replace("'", "''")
+    minio_user = os.environ.get("MINIO_ROOT_USER", "").replace("'", "''")
     minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
     conn.execute("SET s3_region = 'us-east-1'")
     conn.execute("SET s3_endpoint = 'minio:9000'")
