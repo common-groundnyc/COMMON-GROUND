@@ -618,14 +618,9 @@ def _execute(pool, sql, params=None):
                     print(f"Auto-reconnect: DuckLake S3 error, re-attaching catalog...", flush=True)
                     with pool.cursor() as rc:
                         rc.execute("DETACH lake")
+                        # S3 credentials are already set from startup (config is locked)
+                        # Just re-attach DuckLake to refresh the catalog metadata
                         pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
-                        minio_user = os.environ.get("MINIO_ROOT_USER", "").replace("'", "''")
-                        minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
-                        rc.execute(f"SET s3_endpoint = 'minio:9000'")
-                        rc.execute(f"SET s3_access_key_id = '{minio_user}'")
-                        rc.execute(f"SET s3_secret_access_key = '{minio_pass}'")
-                        rc.execute("SET s3_use_ssl = false")
-                        rc.execute("SET s3_url_style = 'path'")
                         rc.execute(f"""
                             ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
                             AS lake (METADATA_SCHEMA 'lake')
