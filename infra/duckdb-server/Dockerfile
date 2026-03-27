@@ -11,16 +11,16 @@ RUN echo "deb http://deb.debian.org/debian bullseye main" > /etc/apt/sources.lis
 RUN pip install --no-cache-dir \
     duckdb==1.5.0 \
     "fastmcp[http]==3.1.1" \
-    posthog \
-    openpyxl \
-    onnxruntime \
-    onnx \
-    tokenizers \
-    numpy \
-    pyarrow \
-    huggingface_hub \
-    aiohttp \
-    google-genai
+    posthog==7.9.12 \
+    openpyxl==3.1.5 \
+    onnxruntime==1.24.4 \
+    onnx==1.20.1 \
+    tokenizers==0.22.2 \
+    numpy==2.4.3 \
+    pyarrow==23.0.1 \
+    huggingface_hub==1.8.0 \
+    aiohttp==3.13.3 \
+    google-genai==1.68.0
 
 WORKDIR /app
 COPY *.py .
