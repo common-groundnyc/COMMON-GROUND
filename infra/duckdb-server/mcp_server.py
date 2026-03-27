@@ -9471,6 +9471,29 @@ def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
     t0 = time.time()
     search_term = entity_name.strip().upper()
 
+    # Vector pre-pass: find similar names to expand search
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(search_term)
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:
+                    extra_names.add(matched_name.upper())
+            extra_names.discard(search_term)
+        except Exception:
+            pass
+
     # 1. NYS corporations — registered agents, chairmen, process contacts
     corp_cols, corp_rows = _execute(db, """
         SELECT current_entity_name, entity_type, initial_dos_filing_date,
@@ -9544,6 +9567,11 @@ def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
             addr = f"{r[5] or ''} {r[6] or ''} {r[7] or ''}".strip()
             lines.append(f"  Reg#{r[0]} | {r[1]} | {name} | {addr}")
         lines.append("")
+
+    if extra_names:
+        lines.append(f"\nSIMILAR NAMES (vector match):")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
 
     lines.append(f"({elapsed}ms)")
 
@@ -11227,6 +11255,29 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
     t0 = time.time()
     search = name.strip().upper()
 
+    # Vector pre-pass: find similar names to expand search
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(search)
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:
+                    extra_names.add(matched_name.upper())
+            extra_names.discard(search)
+        except Exception:
+            pass
+
     # Find matching entities
     ent_cols, ent_rows = _execute(db, """
         SELECT entity_name, tx_count, property_count, as_seller, as_buyer, total_amount
@@ -11315,6 +11366,11 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
         for r in ent_rows[1:]:
             lines.append(f"  {r[0]} ({r[1]} txns, {r[2]} props)")
 
+    if extra_names:
+        lines.append(f"\nSIMILAR NAMES (vector match):")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
+
     lines.append(f"\n({elapsed}ms)")
 
     return ToolResult(
@@ -11340,6 +11396,29 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
     db = ctx.lifespan_context["db"]
     t0 = time.time()
     search = entity_name.strip().upper()
+
+    # Vector pre-pass: find similar names to expand search
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(search)
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:
+                    extra_names.add(matched_name.upper())
+            extra_names.discard(search)
+        except Exception:
+            pass
 
     # Search corps by name
     corp_cols, corp_rows = _execute(db, """
@@ -11453,6 +11532,11 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
         lines.append(f"\nHPD LANDLORD MATCHES ({len(hpd_matches)}):")
         for r in hpd_matches:
             lines.append(f"  {r[0]} (registration #{r[1]})")
+
+    if extra_names:
+        lines.append(f"\nSIMILAR NAMES (vector match):")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
 
     lines.append(f"\n({elapsed}ms)")
 
