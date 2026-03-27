@@ -1133,6 +1133,10 @@ async def app_lifespan(server):
                     print(f"  Descriptions [{source_name}]: {len(existing)} existing, 0 new", flush=True)
                     continue
                 print(f"  Descriptions [{source_name}]: {len(existing)} existing, {len(new_descs)} new — embedding...", flush=True)
+                # Cap at 500 per source to avoid OOM on background thread
+                if len(new_descs) > 500:
+                    new_descs = new_descs[:500]
+                    print(f"    Capped to 500 descriptions to stay within memory budget", flush=True)
                 vecs = embed_batch(new_descs)
                 import pyarrow as pa
                 tbl = pa.table({
@@ -2692,6 +2696,7 @@ async def app_lifespan(server):
 
                 # Separate connection for Lance writes — avoids racing the main conn
                 bg_conn = _duckdb.connect(config={"allow_unsigned_extensions": "true"})
+                bg_conn.execute("SET memory_limit='4GB'")  # cap background thread to avoid OOM during embedding
                 try:
                     bg_conn.execute("LOAD lance")
                 except Exception:
