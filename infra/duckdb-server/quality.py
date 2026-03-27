@@ -4,9 +4,21 @@ Provides SQL builders for approximate analytics (HLL distinct counts,
 KLL quantiles, frequent items) and anomaly flagging (IQR).
 """
 
+import re
+
+_VALID_IDENTIFIERS = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_.]*$')
+
+
+def _validate_identifier(name: str) -> str:
+    if not _VALID_IDENTIFIERS.match(name):
+        raise ValueError(f"Invalid SQL identifier: {name}")
+    return name
+
 
 def approx_distinct_sql(table: str, column: str) -> str:
     """Approximate distinct count using HyperLogLog."""
+    _validate_identifier(table)
+    _validate_identifier(column)
     return f"""
         SELECT datasketch_hll_estimate(datasketch_hll({column})) AS approx_distinct
         FROM {table}
@@ -16,6 +28,8 @@ def approx_distinct_sql(table: str, column: str) -> str:
 
 def approx_quantiles_sql(table: str, column: str) -> str:
     """Approximate quantiles (p25, p50, p75, p95, p99) using KLL sketch."""
+    _validate_identifier(table)
+    _validate_identifier(column)
     return f"""
         WITH sketch AS (
             SELECT datasketch_kll(TRY_CAST({column} AS FLOAT)) AS s
@@ -34,6 +48,8 @@ def approx_quantiles_sql(table: str, column: str) -> str:
 
 def frequent_items_sql(table: str, column: str, top_n: int = 20) -> str:
     """Find most frequent items using GROUP BY aggregation."""
+    _validate_identifier(table)
+    _validate_identifier(column)
     return f"""
         SELECT {column}, COUNT(*) AS freq
         FROM {table}
@@ -46,6 +62,8 @@ def frequent_items_sql(table: str, column: str, top_n: int = 20) -> str:
 
 def iqr_outliers_sql(table: str, column: str, multiplier: float = 1.5) -> str:
     """Flag IQR outliers in a numeric column."""
+    _validate_identifier(table)
+    _validate_identifier(column)
     return f"""
         WITH stats AS (
             SELECT

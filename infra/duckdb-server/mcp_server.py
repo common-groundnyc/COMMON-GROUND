@@ -12349,13 +12349,18 @@ def lake_health(
 ) -> str:
     """Data lake health dashboard — row counts, null rates, freshness per table."""
     db = ctx.lifespan_context["db"]
-    where = f"WHERE schema_name = '{schema}'" if schema else ""
+    if schema:
+        where = "WHERE schema_name = ?"
+        params = [schema]
+    else:
+        where = ""
+        params = []
     cols, raw_rows = _execute(db, f"""
         SELECT schema_name, table_name, row_count, column_count, high_null_columns, profiled_at
         FROM lake.foundation.data_health
         {where}
         ORDER BY row_count DESC
-    """)
+    """, params)
     if not raw_rows:
         return "No health data. Run the foundation_rebuild job first."
 
