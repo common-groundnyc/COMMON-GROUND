@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+import uuid
 
 import duckdb
 import posthog
@@ -26,6 +27,7 @@ from pydantic import Field
 
 from entity import phonetic_search_sql, fuzzy_name_sql
 from spatial import h3_kring_sql, h3_aggregate_sql, h3_heatmap_sql
+from cursor_pool import CursorPool
 
 # ---------------------------------------------------------------------------
 # Reusable annotated types
@@ -65,7 +67,6 @@ _UNSAFE_FUNCTIONS = re.compile(
     re.IGNORECASE,
 )
 
-_db_lock = threading.Lock()
 LANCE_DIR = "/data/common-ground/lance"
 
 # Distance thresholds for embedding similarity
@@ -89,13 +90,9 @@ def _vector_expand_names(ctx, search_term: str, threshold: float = LANCE_NAME_DI
             FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k={k})
             ORDER BY _distance ASC
         """
-        db = ctx.lifespan_context["db"]
-        lock = ctx.lifespan_context.get("lock")
-        if lock:
-            with lock:
-                rows = db.execute(sql).fetchall()
-        else:
-            rows = db.execute(sql).fetchall()
+        pool = ctx.lifespan_context["pool"]
+        with pool.cursor() as cur:
+            rows = cur.execute(sql).fetchall()
         result = set()
         for name, dist in rows:
             if dist < threshold:
@@ -556,8 +553,7 @@ def _build_explorations(db):
 
     for title, sql, description, follow_up in queries:
         try:
-            with _db_lock:
-                result = db.execute(sql).fetchall()
+            result = db.execute(sql).fetchall()
             highlights.append({
                 "title": title,
                 "description": description,
@@ -601,12 +597,12 @@ def _validate_sql(sql):
         )
 
 
-def _execute(conn, sql, params=None):
-    with _db_lock:
+def _execute(pool, sql, params=None):
+    with pool.cursor() as cur:
         try:
-            cur = conn.execute(sql, params or [])
-            cols = [d[0] for d in cur.description] if cur.description else []
-            rows = cur.fetchmany(MAX_QUERY_ROWS)
+            result = cur.execute(sql, params or [])
+            cols = [d[0] for d in result.description] if result.description else []
+            rows = result.fetchmany(MAX_QUERY_ROWS)
             return cols, rows
         except duckdb.Error as e:
             err = str(e)
@@ -640,20 +636,21 @@ def _build_catalog(conn):
     return catalog
 
 
-def _fuzzy_match_schema(db, input_schema, catalog):
+def _fuzzy_match_schema(pool, input_schema, catalog):
     """Return the best-matching schema name, or raise ToolError with suggestion."""
     if input_schema in catalog:
         return input_schema
     # Try rapidfuzz to find closest match
     try:
-        cur = db.execute("""
-            SELECT schema_name, rapidfuzz_token_set_ratio(LOWER(?), LOWER(schema_name)) AS score
-            FROM (SELECT UNNEST(?::VARCHAR[]) AS schema_name)
-            WHERE score >= 60
-            ORDER BY score DESC
-            LIMIT 1
-        """, [input_schema, list(catalog.keys())])
-        row = cur.fetchone()
+        with pool.cursor() as cur:
+            result = cur.execute("""
+                SELECT schema_name, rapidfuzz_token_set_ratio(LOWER(?), LOWER(schema_name)) AS score
+                FROM (SELECT UNNEST(?::VARCHAR[]) AS schema_name)
+                WHERE score >= 60
+                ORDER BY score DESC
+                LIMIT 1
+            """, [input_schema, list(catalog.keys())])
+            row = result.fetchone()
         if row:
             return row[0]
     except Exception:
@@ -663,21 +660,22 @@ def _fuzzy_match_schema(db, input_schema, catalog):
     )
 
 
-def _fuzzy_match_table(db, input_table, schema, catalog):
+def _fuzzy_match_table(pool, input_table, schema, catalog):
     """Return the best-matching table name in a schema, or raise ToolError."""
     tables = catalog.get(schema, {})
     if input_table in tables:
         return input_table
     # Try rapidfuzz — token_set_ratio rewards matching all tokens, penalizes extra noise
     try:
-        cur = db.execute("""
-            SELECT table_name, rapidfuzz_token_set_ratio(LOWER(?), LOWER(table_name)) AS score
-            FROM (SELECT UNNEST(?::VARCHAR[]) AS table_name)
-            WHERE score >= 50
-            ORDER BY score DESC
-            LIMIT 1
-        """, [input_table, list(tables.keys())])
-        row = cur.fetchone()
+        with pool.cursor() as cur:
+            result = cur.execute("""
+                SELECT table_name, rapidfuzz_token_set_ratio(LOWER(?), LOWER(table_name)) AS score
+                FROM (SELECT UNNEST(?::VARCHAR[]) AS table_name)
+                WHERE score >= 50
+                ORDER BY score DESC
+                LIMIT 1
+            """, [input_table, list(tables.keys())])
+            row = result.fetchone()
         if row:
             return row[0]
     except Exception:
@@ -1121,8 +1119,7 @@ async def app_lifespan(server):
         total_new = 0
         for source_name, sql in sources:
             try:
-                with _db_lock:
-                    all_descs = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
+                all_descs = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
                 existing = set()
                 if _lance_exists("description_embeddings"):
                     try:
@@ -1163,8 +1160,7 @@ async def app_lifespan(server):
         total_new = 0
         for source_name, sql in name_sources:
             try:
-                with _db_lock:
-                    all_names = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
+                all_names = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
                 existing = set()
                 if _lance_exists("entity_name_embeddings"):
                     try:
@@ -1194,8 +1190,7 @@ async def app_lifespan(server):
     def _build_building_vectors(conn, bg_conn):
         """Build numeric feature vectors for building similarity (no embeddings needed)."""
         try:
-            with _db_lock:
-                result = conn.execute("""
+            result = conn.execute("""
                     WITH base AS (
                         SELECT
                             b.bbl, b.borough,
@@ -2702,12 +2697,15 @@ async def app_lifespan(server):
                 except Exception:
                     pass
 
+                # Dedicated read cursor for background thread — avoids racing the main conn
+                read_cursor = conn.cursor()
+
                 print("Background: building Lance embeddings...", flush=True)
                 _build_catalog_embeddings(bg_conn, embed_batch_fn, embed_dims)
-                _build_description_embeddings(conn, bg_conn, embed_batch_fn, embed_dims)
+                _build_description_embeddings(read_cursor, bg_conn, embed_batch_fn, embed_dims)
                 if graph_ready:
-                    _build_entity_name_embeddings(conn, bg_conn, embed_batch_fn, embed_dims)
-                    _build_building_vectors(conn, bg_conn)
+                    _build_entity_name_embeddings(read_cursor, bg_conn, embed_batch_fn, embed_dims)
+                    _build_building_vectors(read_cursor, bg_conn)
                 _create_lance_indexes(bg_conn)
                 bg_conn.close()
                 print("Background: Lance embedding pipeline complete", flush=True)
@@ -2729,16 +2727,16 @@ async def app_lifespan(server):
         except Exception as e:
             print(f"Warning: resource category embeddings failed: {e}", flush=True)
 
+    pool = CursorPool(conn, size=8)
     try:
         yield {
-            "db": conn, "catalog": catalog,
+            "db": conn, "pool": pool, "catalog": catalog,
             "graph_ready": graph_ready,
             "marriage_parquet": MARRIAGE_PARQUET if marriage_available else None,
             "posthog_enabled": bool(ph_key),
             "explorations": explorations,
             "embed_fn": embed_fn,
             "percentiles_ready": percentiles_ready,
-            "lock": _db_lock,
             "resource_category_vecs": resource_category_vecs,
         }
     finally:
@@ -2838,9 +2836,9 @@ mcp = FastMCP(
 def sql_query(sql: Annotated[str, Field(description="Read-only SQL. Tables in 'lake' database. Example: SELECT * FROM lake.housing.hpd_violations LIMIT 10")], ctx: Context) -> ToolResult:
     """Execute a read-only SQL query against the NYC data lake (294 tables, 60M+ rows). Use this for custom queries when no domain tool fits. All tables in 'lake' database. Only SELECT/WITH/EXPLAIN/DESCRIBE allowed. Example: SELECT * FROM lake.housing.hpd_violations LIMIT 10. Start with data_catalog(keyword) or list_schemas() to discover tables."""
     _validate_sql(sql)
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
-    cols, rows = _execute(db, sql.strip().rstrip(";"))
+    cols, rows = _execute(pool, sql.strip().rstrip(";"))
     elapsed = round((time.time() - t0) * 1000)
     return make_result(
         f"Query returned {len(rows)} rows ({elapsed}ms).",
@@ -2865,12 +2863,12 @@ def sql_admin(sql: Annotated[str, Field(description="DDL statement. Only CREATE 
             "Only CREATE OR REPLACE VIEW statements are allowed via sql_admin."
         )
 
-    db = ctx.lifespan_context["db"]
-    with _db_lock:
+    pool = ctx.lifespan_context["pool"]
+    with pool.cursor() as cur:
         try:
-            db.execute(stripped)
-            # Refresh catalog after DDL
-            ctx.lifespan_context["catalog"] = _build_catalog(db)
+            cur.execute(stripped)
+            # Refresh catalog after DDL — needs raw conn for _build_catalog
+            ctx.lifespan_context["catalog"] = _build_catalog(ctx.lifespan_context["db"])
             return "OK — view created successfully."
         except duckdb.Error as e:
             raise ToolError(f"DDL error: {e}. Only CREATE OR REPLACE VIEW is allowed.")
@@ -2894,8 +2892,8 @@ def list_schemas(ctx: Context) -> str:
 def list_tables(schema: Annotated[str, Field(description="Schema name. Use list_schemas() to see available schemas")], ctx: Context) -> ToolResult:
     """List all tables in a specific schema with row counts and column counts. Use after list_schemas() to drill into a domain. Fuzzy-matches schema names. For column-level detail, follow up with describe_table(schema, table). For keyword search across all schemas, use data_catalog(keyword) instead."""
     catalog = ctx.lifespan_context["catalog"]
-    db = ctx.lifespan_context["db"]
-    schema = _fuzzy_match_schema(db, schema, catalog)
+    pool = ctx.lifespan_context["pool"]
+    schema = _fuzzy_match_schema(pool, schema, catalog)
     tables = catalog[schema]
     cols = ["table_name", "row_count", "column_count"]
     rows = sorted(
@@ -2908,13 +2906,13 @@ def list_tables(schema: Annotated[str, Field(description="Schema name. Use list_
 @mcp.tool(annotations=READONLY, tags={"discovery"})
 def describe_table(schema: Annotated[str, Field(description="Schema name")], table: Annotated[str, Field(description="Table name. Use list_tables(schema) to see available tables")], ctx: Context) -> ToolResult:
     """Show column names, types, and nullability for a specific table in the NYC data lake. Use after data_catalog() or list_tables() to understand a table's structure before querying with sql_query(). Fuzzy-matches both schema and table names. Parameters: schema (e.g. 'housing'), table (e.g. 'hpd_violations')."""
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     catalog = ctx.lifespan_context["catalog"]
-    schema = _fuzzy_match_schema(db, schema, catalog)
-    table = _fuzzy_match_table(db, table, schema, catalog)
+    schema = _fuzzy_match_schema(pool, schema, catalog)
+    table = _fuzzy_match_table(pool, table, schema, catalog)
     qualified = f"lake.{schema}.{table}"
     cols, rows = _execute(
-        db,
+        pool,
         """
         SELECT column_name, data_type, is_nullable
         FROM information_schema.columns
@@ -2952,8 +2950,8 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
             "BBL must be exactly 10 digits. Format: borough(1) + block(5) + lot(4)"
         )
 
-    db = ctx.lifespan_context["db"]
-    cols, rows = _execute(db, BUILDING_PROFILE_SQL, [bbl, bbl, bbl, bbl])
+    pool = ctx.lifespan_context["pool"]
+    cols, rows = _execute(pool, BUILDING_PROFILE_SQL, [bbl, bbl, bbl, bbl])
 
     if not rows:
         raise ToolError(f"No building found for BBL {bbl}")
@@ -2962,7 +2960,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
 
     # City-wide violation percentile context
     try:
-        _, pct_rows = _execute(db, """
+        _, pct_rows = _execute(pool, """
             WITH bbl_counts AS (
                 SELECT bbl, COUNT(*) AS cnt FROM lake.housing.hpd_violations GROUP BY bbl
             )
@@ -2982,7 +2980,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
     lot = bbl[6:10].lstrip("0") or "0"
 
     try:
-        _, landmark_rows = _execute(db, """
+        _, landmark_rows = _execute(pool, """
             SELECT lm_name, lm_type, hist_distr, status, desdate
             FROM lake.housing.designated_buildings
             WHERE bbl = ?
@@ -2992,7 +2990,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
         landmark_rows = []
 
     try:
-        _, tax_rows = _execute(db, """
+        _, tax_rows = _execute(pool, """
             SELECT exmp_code, exname, year, curexmptot, benftstart
             FROM lake.housing.tax_exemptions
             WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
@@ -3003,7 +3001,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
         tax_rows = []
 
     try:
-        _, val_rows = _execute(db, """
+        _, val_rows = _execute(pool, """
             SELECT year, curmkttot, curacttot, curtxbtot, zoning, owner,
                    bldg_class, yrbuilt, units, gross_sqft
             FROM lake.housing.property_valuation
@@ -3015,7 +3013,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
         val_rows = []
 
     try:
-        _, sro_rows = _execute(db, """
+        _, sro_rows = _execute(pool, """
             SELECT dobbuildingclass, legalclassa, legalclassb, managementprogram
             FROM lake.housing.sro_buildings
             WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
@@ -3025,7 +3023,7 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
         sro_rows = []
 
     try:
-        _, facade_rows = _execute(db, """
+        _, facade_rows = _execute(pool, """
             SELECT current_status, filing_status, cycle, exterior_wall_type_sx
             FROM lake.housing.dob_safety_facades
             WHERE borough = ? AND block = ? AND lot = ?
@@ -3092,9 +3090,9 @@ def complaints_by_zip(zip_code: ZIP, ctx: Context, days: Annotated[int, Field(de
     if not re.match(r"^\d{5}$", zip_code):
         raise ToolError("ZIP code must be exactly 5 digits")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     cols, rows = _execute(
-        db, COMPLAINTS_BY_ZIP_SQL, [zip_code, days, zip_code, days]
+        pool, COMPLAINTS_BY_ZIP_SQL, [zip_code, days, zip_code, days]
     )
 
     total = sum(r[2] for r in rows) if rows else 0
@@ -3122,8 +3120,8 @@ def owner_violations(bbl: BBL, ctx: Context) -> ToolResult:
     if not re.match(r"^\d{10}$", bbl):
         raise ToolError("BBL must be exactly 10 digits")
 
-    db = ctx.lifespan_context["db"]
-    cols, rows = _execute(db, OWNER_VIOLATIONS_SQL, [bbl, bbl])
+    pool = ctx.lifespan_context["pool"]
+    cols, rows = _execute(pool, OWNER_VIOLATIONS_SQL, [bbl, bbl])
 
     total = len(rows)
     open_count = sum(
@@ -3161,9 +3159,9 @@ def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search
             )
         return ToolResult(content="\n".join(lines))
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     kw = keyword.strip()
-    cols, rows = _execute(db, DATA_CATALOG_SQL, [kw, kw, kw])
+    cols, rows = _execute(pool, DATA_CATALOG_SQL, [kw, kw, kw])
 
     if rows:
         schema_idx = cols.index("schema_name")
@@ -3183,8 +3181,8 @@ def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search
                 WHERE table_name != '__schema__'
                 ORDER BY _distance ASC
             """
-            with _db_lock:
-                sem_rows = db.execute(sem_sql).fetchall()
+            with pool.cursor() as cur:
+                sem_rows = cur.execute(sem_sql).fetchall()
             # Only include if similarity > 0.3 (distance < 0.7)
             good_matches = [(s, t, d) for s, t, d, dist in sem_rows if dist < LANCE_CATALOG_DISTANCE]
             if good_matches:
@@ -3239,14 +3237,14 @@ def export_data(
 ) -> str:
     """Export query results as a branded XLSX spreadsheet with Common Ground styling, clickable hyperlinks to source records, and percentile color scales. Use when the user wants to download data, save results, get a spreadsheet, or export. BBL columns link to WhoOwnsWhat. Source column links to original Socrata records. Maximum 100,000 rows."""
     _validate_sql(sql)
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
-    with _db_lock:
+    with pool.cursor() as cur:
         try:
-            cur = db.execute(sql.strip().rstrip(";"))
-            cols = [d[0] for d in cur.description] if cur.description else []
-            rows = cur.fetchmany(100_000)
+            result = cur.execute(sql.strip().rstrip(";"))
+            cols = [d[0] for d in result.description] if result.description else []
+            rows = result.fetchmany(100_000)
         except duckdb.Error as e:
             raise ToolError(f"Export query failed: {e}. Use data_catalog(keyword) to find table names.")
 
@@ -3301,7 +3299,7 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
     if limit < 1 or limit > 100:
         raise ToolError("Limit must be between 1 and 100")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     all_results = []
     pattern = f"%{query.strip()}%"
@@ -3310,7 +3308,7 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
     if corpus in ("all", "financial"):
         try:
             cols_c, rows_c = _execute(
-                db,
+                pool,
                 """
                 SELECT 'CFPB' AS source, complaint_id AS id, product AS category,
                        company AS entity, date_received AS date,
@@ -3332,7 +3330,7 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
     if corpus in ("all", "restaurants"):
         try:
             cols_r, rows_r = _execute(
-                db,
+                pool,
                 """
                 SELECT 'Restaurant' AS source,
                        camis AS id,
@@ -3372,8 +3370,8 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
                 {source_filter}
                 ORDER BY _distance ASC
             """
-            with _db_lock:
-                sem_rows = db.execute(sem_sql).fetchall()
+            with pool.cursor() as cur:
+                sem_rows = cur.execute(sem_sql).fetchall()
             semantic_suggestions = [
                 (src, desc, round(max(0, 1.0 / (1.0 + dist)) * 100))
                 for src, desc, dist in sem_rows
@@ -3455,12 +3453,12 @@ def semantic_search(
         ORDER BY _distance ASC
     """
 
-    with _db_lock:
+    pool = ctx.lifespan_context["pool"]
+    with pool.cursor() as cur:
         try:
-            db = ctx.lifespan_context["db"]
-            cur = db.execute(sql)
-            cols = [d[0] for d in cur.description]
-            rows = cur.fetchall()
+            result = cur.execute(sql)
+            cols = [d[0] for d in result.description]
+            rows = result.fetchall()
         except Exception as e:
             raise ToolError(f"Semantic search failed: {e}")
 
@@ -3499,7 +3497,7 @@ def restaurant_lookup(name: Annotated[str, Field(description="Restaurant name �
     if len(name.strip()) < 2:
         raise ToolError("Restaurant name must be at least 2 characters")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     # Build optional filters
@@ -3513,7 +3511,7 @@ def restaurant_lookup(name: Annotated[str, Field(description="Restaurant name �
         params.append(borough.strip())
 
     sql = RESTAURANT_FUZZY_MATCH_SQL.format(zip_filter=zip_filter)
-    cols, matches = _execute(db, sql, params)
+    cols, matches = _execute(pool, sql, params)
 
     if not matches:
         raise ToolError(
@@ -3528,7 +3526,7 @@ def restaurant_lookup(name: Annotated[str, Field(description="Restaurant name �
     camis = best["camis"]
 
     # Get inspection history
-    insp_cols, inspections = _execute(db, RESTAURANT_INSPECTIONS_SQL, [camis])
+    insp_cols, inspections = _execute(pool, RESTAURANT_INSPECTIONS_SQL, [camis])
 
     # Build summary
     current_grade = "Not yet graded"
@@ -3606,7 +3604,7 @@ def area_snapshot(lat: Annotated[float, Field(description="Latitude within NYC (
     if radius_m < 50 or radius_m > 2000:
         raise ToolError("Radius must be between 50 and 2000 meters")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     # ST_DWithin uses degrees; approximate conversion: 1 degree ≈ 111,139m at NYC latitude
@@ -3614,10 +3612,10 @@ def area_snapshot(lat: Annotated[float, Field(description="Latitude within NYC (
 
     # Main summary query
     params = [lng, lat] + [radius_deg] * 7  # 7 ST_DWithin calls (crimes historic + YTD + rest/subway/311/rats/trees)
-    cols, rows = _execute(db, AREA_SNAPSHOT_SQL, params)
+    cols, rows = _execute(pool, AREA_SNAPSHOT_SQL, params)
 
     # Subway stops (separate query for detail)
-    sub_cols, sub_rows = _execute(db, """
+    sub_cols, sub_rows = _execute(pool, """
         WITH pt AS (SELECT ST_Point(?, ?) AS geom)
         SELECT s.name, s.line,
                ROUND(ST_Distance(s.geom, pt.geom)::NUMERIC * 111139, 0) AS dist_m
@@ -3627,7 +3625,7 @@ def area_snapshot(lat: Annotated[float, Field(description="Latitude within NYC (
     """, [lng, lat, radius_deg])
 
     # 311 breakdown (separate query)
-    svc_cols, svc_rows = _execute(db, """
+    svc_cols, svc_rows = _execute(pool, """
         WITH pt AS (SELECT ST_Point(?, ?) AS geom)
         SELECT agency, COUNT(*) AS cnt
         FROM lake.spatial.n311_complaints c, pt
@@ -3637,7 +3635,7 @@ def area_snapshot(lat: Annotated[float, Field(description="Latitude within NYC (
     """, [lng, lat, radius_deg])
 
     # Closest restaurants (separate query for names)
-    rest_cols, rest_rows = _execute(db, """
+    rest_cols, rest_rows = _execute(pool, """
         WITH pt AS (SELECT ST_Point(?, ?) AS geom)
         SELECT DISTINCT ON (r.camis) r.dba, r.cuisine_description, r.grade,
                ROUND(ST_Distance(r.geom, pt.geom)::NUMERIC * 111139, 0) AS dist_m
@@ -3732,18 +3730,18 @@ def neighborhood_compare(zip_codes: Annotated[list[str], Field(description="2-7 
         if not re.match(r"^\d{5}$", z):
             raise ToolError(f"Invalid ZIP code: {z}. Must be exactly 5 digits.")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
 
     # Try H3-based comparison first
     try:
         from spatial import h3_zip_centroid_sql, h3_neighborhood_stats_sql
         results = []
         for z in zip_codes:
-            centroid_cols, centroid_rows = _execute(db, *h3_zip_centroid_sql(z))
+            centroid_cols, centroid_rows = _execute(pool, *h3_zip_centroid_sql(z))
             if not centroid_rows or centroid_rows[0][0] is None:
                 continue
             center = dict(zip(centroid_cols, centroid_rows[0]))
-            stats_cols, stats_rows = _execute(db,
+            stats_cols, stats_rows = _execute(pool,
                 *h3_neighborhood_stats_sql(center["center_lat"], center["center_lng"], radius_rings=8))
             if stats_rows:
                 s = dict(zip(stats_cols, stats_rows[0]))
@@ -3755,7 +3753,7 @@ def neighborhood_compare(zip_codes: Annotated[list[str], Field(description="2-7 
             for r in results:
                 z = r["zip"]
                 try:
-                    _, inc = _execute(db, """
+                    _, inc = _execute(pool, """
                         SELECT ROUND(1000.0 * SUM(TRY_CAST(agi_amount AS DOUBLE))
                                / NULLIF(SUM(TRY_CAST(num_returns AS DOUBLE)), 0), 0)
                         FROM lake.economics.irs_soi_zip_income
@@ -3767,7 +3765,7 @@ def neighborhood_compare(zip_codes: Annotated[list[str], Field(description="2-7 
                 except Exception:
                     pass
                 try:
-                    _, hpd = _execute(db, """
+                    _, hpd = _execute(pool, """
                         SELECT COUNT(DISTINCT complaint_id)
                         FROM lake.housing.hpd_complaints
                         WHERE post_code = ? AND TRY_CAST(received_date AS DATE) >= CURRENT_DATE - INTERVAL 365 DAY
@@ -3799,7 +3797,7 @@ def neighborhood_compare(zip_codes: Annotated[list[str], Field(description="2-7 
     except Exception:
         pass  # Fall back to original SQL
 
-    cols, rows = _execute(db, NEIGHBORHOOD_COMPARE_SQL, [zip_codes])
+    cols, rows = _execute(pool, NEIGHBORHOOD_COMPARE_SQL, [zip_codes])
 
     if not rows:
         raise ToolError("No data found for the provided ZIP codes")
@@ -4101,12 +4099,12 @@ def gentrification_tracker(zip_codes: Annotated[list[str], Field(description="1-
         if not re.match(r"^\d{5}$", z):
             raise ToolError(f"Invalid ZIP: {z}")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     # 1. Get quarterly signals
     params = [zip_codes] * 6  # 6 references to zip list in SQL
-    cols, rows = _execute(db, GENTRIFICATION_SIGNALS_SQL, params)
+    cols, rows = _execute(pool, GENTRIFICATION_SIGNALS_SQL, params)
     if not rows:
         raise ToolError("No data found for these ZIP codes")
 
@@ -4115,46 +4113,47 @@ def gentrification_tracker(zip_codes: Annotated[list[str], Field(description="1-
     forecasts = {}
 
     try:
-        # Build temp table for forecasting
-        with _db_lock:
-            tbl = "_gent_tmp"
-            db.execute(f"DROP TABLE IF EXISTS {tbl}")
-            db.execute(f"""CREATE TEMP TABLE {tbl} (
+        # Build temp table for forecasting — UUID suffix avoids collisions across concurrent calls
+        suffix = uuid.uuid4().hex[:8]
+        with pool.cursor() as cur:
+            tbl = f"_gent_tmp_{suffix}"
+            cur.execute(f"DROP TABLE IF EXISTS {tbl}")
+            cur.execute(f"""CREATE TEMP TABLE {tbl} (
                 zip VARCHAR, q TIMESTAMP,
                 new_restaurants INTEGER, hpd_complaints INTEGER,
                 noise_calls INTEGER, dob_violations INTEGER,
                 construction_complaints INTEGER
             )""")
             if rows:
-                db.executemany(f"INSERT INTO {tbl} VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+                cur.executemany(f"INSERT INTO {tbl} VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
 
             for signal in signals:
                 try:
                     # Pivot to id/ds/y format for each signal
-                    pivot_tbl = f"_gent_{signal}"
-                    db.execute(f"DROP TABLE IF EXISTS {pivot_tbl}")
-                    db.execute(f"""
+                    pivot_tbl = f"_gent_{signal}_{suffix}"
+                    cur.execute(f"DROP TABLE IF EXISTS {pivot_tbl}")
+                    cur.execute(f"""
                         CREATE TEMP TABLE {pivot_tbl} AS
                         SELECT zip AS id, q AS ds, {signal} AS y
                         FROM {tbl}
                         ORDER BY zip, q
                     """)
 
-                    fcst = db.execute(f"""
+                    fcst = cur.execute(f"""
                         SELECT * FROM ts_forecast_by('{pivot_tbl}', id, ds, y,
                             'AutoETS', 4, '1q', MAP{{}})
                     """).fetchall()
                     forecasts[signal] = fcst
-                    db.execute(f"DROP TABLE IF EXISTS {pivot_tbl}")
+                    cur.execute(f"DROP TABLE IF EXISTS {pivot_tbl}")
                 except Exception as e:
                     print(f"Forecast failed for {signal}: {e}", flush=True)
 
-            db.execute(f"DROP TABLE IF EXISTS {tbl}")
+            cur.execute(f"DROP TABLE IF EXISTS {tbl}")
     except Exception as e:
         print(f"Forecast setup failed: {e}", flush=True)
 
     # 3. Get IRS income trend
-    inc_cols, inc_rows = _execute(db, IRS_INCOME_TREND_SQL, [zip_codes])
+    inc_cols, inc_rows = _execute(pool, IRS_INCOME_TREND_SQL, [zip_codes])
 
     # 4. Build readable summary per ZIP
     # Organize historical data by zip
@@ -4239,7 +4238,7 @@ def gentrification_tracker(zip_codes: Annotated[list[str], Field(description="1-
             boro = None
         if boro and boro not in boroughs_seen:
             boroughs_seen.add(boro)
-            _, hmda_rows = _safe_query(db, GENT_HMDA_INVESTOR_SQL, [boro])
+            _, hmda_rows = _safe_query(pool, GENT_HMDA_INVESTOR_SQL, [boro])
             if hmda_rows:
                 lines.append(f"\nHMDA LENDING — {boro}:")
                 for r in hmda_rows:
@@ -4254,7 +4253,7 @@ def gentrification_tracker(zip_codes: Annotated[list[str], Field(description="1-
                         lines.append(f"  Black applicants denied at {ratio:.1f}x the white rate")
 
             # Evictions
-            _, evict_rows = _safe_query(db, GENT_EVICTION_SQL, [boro])
+            _, evict_rows = _safe_query(pool, GENT_EVICTION_SQL, [boro])
             if evict_rows:
                 lines.append(f"\nEVICTIONS — {boro}:")
                 for r in evict_rows:
@@ -4262,7 +4261,7 @@ def gentrification_tracker(zip_codes: Annotated[list[str], Field(description="1-
                         lines.append(f"  {int(r[0])}: {r[1]:,}")
 
     # Affordable housing in these ZIPs
-    _, afford_rows = _safe_query(db, GENT_AFFORDABLE_LOSS_SQL, [zip_codes])
+    _, afford_rows = _safe_query(pool, GENT_AFFORDABLE_LOSS_SQL, [zip_codes])
     if afford_rows and afford_rows[0][0]:
         total_bldg = int(afford_rows[0][0] or 0)
         total_units = int(afford_rows[0][1] or 0)
@@ -4271,7 +4270,7 @@ def gentrification_tracker(zip_codes: Annotated[list[str], Field(description="1-
             lines.append(f"\nAFFORDABLE HOUSING: {total_bldg} buildings, {total_units:,} units ({rental_units:,} rental)")
 
     # Recent rezonings (citywide, most recent)
-    _, rezone_rows = _safe_query(db, GENT_REZONING_SQL, [])
+    _, rezone_rows = _safe_query(pool, GENT_REZONING_SQL, [])
     if rezone_rows:
         lines.append(f"\nRECENT REZONINGS (adopted, citywide):")
         for r in rezone_rows[:8]:
@@ -4559,16 +4558,16 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
         raise ToolError("Precinct must be between 1 and 123")
 
     pct = str(precinct)
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     # Run all queries
-    crime_cols, crime_rows = _execute(db, SAFETY_CRIME_SQL, [pct, pct])
-    arrest_cols, arrest_rows = _execute(db, SAFETY_ARRESTS_SQL, [pct, pct])
-    shoot_cols, shoot_rows = _execute(db, SAFETY_SHOOTINGS_SQL, [pct])
-    summ_cols, summ_rows = _execute(db, SAFETY_SUMMONS_SQL, [pct])
-    hate_cols, hate_rows = _execute(db, SAFETY_HATE_SQL, [pct])
-    avg_cols, avg_rows = _execute(db, SAFETY_CITY_AVERAGES_SQL, [])
+    crime_cols, crime_rows = _execute(pool, SAFETY_CRIME_SQL, [pct, pct])
+    arrest_cols, arrest_rows = _execute(pool, SAFETY_ARRESTS_SQL, [pct, pct])
+    shoot_cols, shoot_rows = _execute(pool, SAFETY_SHOOTINGS_SQL, [pct])
+    summ_cols, summ_rows = _execute(pool, SAFETY_SUMMONS_SQL, [pct])
+    hate_cols, hate_rows = _execute(pool, SAFETY_HATE_SQL, [pct])
+    avg_cols, avg_rows = _execute(pool, SAFETY_CITY_AVERAGES_SQL, [])
 
     # Parse crime data
     crime_years = [(r[1], r[2], r[3], r[4], r[5]) for r in crime_rows if r[0] == "crime_by_year"]
@@ -4677,13 +4676,13 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
         lines.append("\nHATE CRIMES: None reported in this precinct recently")
 
     # CCRB misconduct complaints
-    _, ccrb_rows = _safe_query(db, SAFETY_CCRB_SQL, [pct])
+    _, ccrb_rows = _safe_query(pool, SAFETY_CCRB_SQL, [pct])
     ccrb_years = [(r[1], int(r[2])) for r in ccrb_rows if r[0] == "ccrb_by_year"]
     ccrb_dispositions = [(r[1], int(r[2])) for r in ccrb_rows if r[0] == "ccrb_disposition"]
     ccrb_reasons = [(r[1], int(r[2])) for r in ccrb_rows if r[0] == "ccrb_reason"]
 
-    _, fado_rows = _safe_query(db, SAFETY_CCRB_ALLEGATIONS_SQL, [pct])
-    _, victim_race_rows = _safe_query(db, SAFETY_CCRB_VICTIM_RACE_SQL, [pct])
+    _, fado_rows = _safe_query(pool, SAFETY_CCRB_ALLEGATIONS_SQL, [pct])
+    _, victim_race_rows = _safe_query(pool, SAFETY_CCRB_VICTIM_RACE_SQL, [pct])
 
     if ccrb_years:
         lines.append("\nCCRB MISCONDUCT COMPLAINTS:")
@@ -4709,9 +4708,9 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
                 lines.append(f"    {reason}: {cnt}")
 
     # Use of Force
-    _, uof_rows = _safe_query(db, SAFETY_UOF_SQL, [pct])
-    _, uof_subj_rows = _safe_query(db, SAFETY_UOF_SUBJECT_SQL, [pct])
-    _, uof_avg_rows = _safe_query(db, SAFETY_UOF_CITY_AVG_SQL, [])
+    _, uof_rows = _safe_query(pool, SAFETY_UOF_SQL, [pct])
+    _, uof_subj_rows = _safe_query(pool, SAFETY_UOF_SUBJECT_SQL, [pct])
+    _, uof_avg_rows = _safe_query(pool, SAFETY_UOF_CITY_AVG_SQL, [])
 
     if uof_rows:
         total_uof = sum(int(r[1]) for r in uof_rows)
@@ -4741,7 +4740,7 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
     # H3 crime hotspot analysis
     try:
         from spatial import h3_heatmap_sql
-        _, pct_center = _execute(db, """
+        _, pct_center = _execute(pool, """
             SELECT AVG(TRY_CAST(latitude AS DOUBLE)), AVG(TRY_CAST(longitude AS DOUBLE))
             FROM lake.city_government.pluto
             WHERE policeprct = ?
@@ -4749,7 +4748,7 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
         """, [str(precinct)])
         if pct_center and pct_center[0][0]:
             lat, lng = pct_center[0][0], pct_center[0][1]
-            hm_cols, hm_rows = _execute(db, *h3_heatmap_sql(
+            hm_cols, hm_rows = _execute(pool, *h3_heatmap_sql(
                 source_table="lake.foundation.h3_index",
                 filter_table="public_safety.nypd_complaints_ytd",
                 lat=lat, lng=lng, radius_rings=10))
@@ -4910,10 +4909,10 @@ FROM (
 """
 
 
-def _safe_query(db, sql, params=None):
+def _safe_query(pool, sql, params=None):
     """Execute SQL, return (cols, rows) or ([], []) if table doesn't exist."""
     try:
-        return _execute(db, sql, params)
+        return _execute(pool, sql, params)
     except ToolError:
         return [], []
 
@@ -4933,10 +4932,10 @@ def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
         )
 
     t0 = time.time()
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
 
     # Step 1: Look up the target building
-    _, rows = _execute(db, WATCHDOG_BUILDING_SQL, [bbl])
+    _, rows = _execute(pool, WATCHDOG_BUILDING_SQL, [bbl])
     if not rows:
         raise ToolError(f"No building found for BBL {bbl}")
 
@@ -4954,7 +4953,7 @@ def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
     portfolio_bbls = [bbl]
     portfolio_buildings = []
     if reg_id and reg_id != "0" and not reg_id.endswith("995"):
-        _, port_rows = _execute(db, WATCHDOG_PORTFOLIO_SQL, [reg_id])
+        _, port_rows = _execute(pool, WATCHDOG_PORTFOLIO_SQL, [reg_id])
         portfolio_buildings = port_rows
         portfolio_bbls = list(set(r[10] for r in port_rows))  # bbl column
         if bbl not in portfolio_bbls:
@@ -4968,7 +4967,7 @@ def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
 
     # Step 3: Aggregate violations across portfolio
     v_sql = _fill_placeholders(WATCHDOG_VIOLATIONS_SQL, portfolio_bbls)
-    _, v_rows = _execute(db, v_sql, portfolio_bbls)
+    _, v_rows = _execute(pool, v_sql, portfolio_bbls)
 
     total_violations = sum(int(r[1] or 0) for r in v_rows)
     total_open = sum(int(r[2] or 0) for r in v_rows)
@@ -4986,22 +4985,22 @@ def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
 
     # Step 4: Complaints
     c_sql = _fill_placeholders(WATCHDOG_COMPLAINTS_SQL, portfolio_bbls)
-    _, c_rows = _execute(db, c_sql, portfolio_bbls)
+    _, c_rows = _execute(pool, c_sql, portfolio_bbls)
     total_complaints = sum(int(r[1] or 0) for r in c_rows)
     total_open_complaints = sum(int(r[2] or 0) for r in c_rows)
 
     # Top complaint categories
     tc_sql = _fill_placeholders(WATCHDOG_TOP_COMPLAINTS_SQL, portfolio_bbls)
-    _, tc_rows = _execute(db, tc_sql, portfolio_bbls)
+    _, tc_rows = _execute(pool, tc_sql, portfolio_bbls)
 
     # Step 5: Evictions
     e_sql = _fill_placeholders(WATCHDOG_EVICTIONS_SQL, portfolio_bbls)
-    _, e_rows = _execute(db, e_sql, portfolio_bbls)
+    _, e_rows = _execute(pool, e_sql, portfolio_bbls)
     eviction_count = int(e_rows[0][0] or 0) if e_rows else 0
 
     # Step 6: DOB violations
     d_sql = _fill_placeholders(WATCHDOG_DOB_SQL, portfolio_bbls)
-    _, d_rows = _execute(db, d_sql, portfolio_bbls)
+    _, d_rows = _execute(pool, d_sql, portfolio_bbls)
     dob_violations = int(d_rows[0][0] or 0) if d_rows else 0
     dob_unpaid = int(d_rows[0][1] or 0) if d_rows else 0
 
@@ -5011,19 +5010,19 @@ def landlord_watchdog(bbl: BBL, ctx: Context) -> ToolResult:
     underlying_buildings = []
 
     aep_sql = _fill_placeholders(WATCHDOG_AEP_SQL, portfolio_bbls)
-    _, aep_rows = _safe_query(db, aep_sql, portfolio_bbls)
+    _, aep_rows = _safe_query(pool, aep_sql, portfolio_bbls)
     aep_buildings = [(r[0], r[1], r[2]) for r in aep_rows] if aep_rows else []
 
     conh_sql = _fill_placeholders(WATCHDOG_CONH_SQL, portfolio_bbls)
-    _, conh_rows = _safe_query(db, conh_sql, portfolio_bbls)
+    _, conh_rows = _safe_query(pool, conh_sql, portfolio_bbls)
     conh_buildings = [(r[0], r[1]) for r in conh_rows] if conh_rows else []
 
     und_sql = _fill_placeholders(WATCHDOG_UNDERLYING_SQL, portfolio_bbls)
-    _, und_rows = _safe_query(db, und_sql, portfolio_bbls)
+    _, und_rows = _safe_query(pool, und_sql, portfolio_bbls)
     underlying_buildings = [(r[0], r[1]) for r in und_rows] if und_rows else []
 
     # Step 8: City averages for comparison
-    _, avg_rows = _execute(db, WATCHDOG_CITY_AVERAGES_SQL, [])
+    _, avg_rows = _execute(pool, WATCHDOG_CITY_AVERAGES_SQL, [])
     city_avg_violations = float(avg_rows[0][0] or 0) if avg_rows else 0
     city_avg_open = float(avg_rows[0][1] or 0) if avg_rows else 0
 
@@ -5288,7 +5287,7 @@ def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
         raise ToolError("ZIP code must be exactly 5 digits")
 
     t0 = time.time()
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
 
     # Determine borough and CD from ZIP (approximate mapping)
     zip_prefix = zipcode[:3]
@@ -5317,8 +5316,8 @@ def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
     ]
 
     # Air quality (by CD name — we search using borough)
-    _, aq_rows = _safe_query(db, EJ_AIR_QUALITY_SQL, [borough])
-    _, aq_avg_rows = _safe_query(db, EJ_AIR_CITY_AVG_SQL, [])
+    _, aq_rows = _safe_query(pool, EJ_AIR_QUALITY_SQL, [borough])
+    _, aq_avg_rows = _safe_query(pool, EJ_AIR_CITY_AVG_SQL, [])
     city_avgs = {r[0]: float(r[1]) for r in aq_avg_rows} if aq_avg_rows else {}
 
     if aq_rows:
@@ -5336,7 +5335,7 @@ def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append(f"  {name}: {val} [{period}]{compare}")
 
     # EJ areas
-    _, ej_rows = _safe_query(db, EJ_AREAS_SQL, [borough, zipcode])
+    _, ej_rows = _safe_query(pool, EJ_AREAS_SQL, [borough, zipcode])
     ej_count = sum(1 for r in ej_rows if r[1] and "EJ Area" in str(r[1]))
     uncertain = sum(1 for r in ej_rows if r[1] and "Uncertain" in str(r[1]))
     if ej_rows:
@@ -5345,7 +5344,7 @@ def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append(f"  {r[0]}: {r[1]} (minority {r[2]}%, poverty {r[3]}%, pop {r[4]})")
 
     # Waste transfer stations
-    _, waste_rows = _safe_query(db, EJ_WASTE_SQL, [zipcode, borough])
+    _, waste_rows = _safe_query(pool, EJ_WASTE_SQL, [zipcode, borough])
     if waste_rows:
         lines.append(f"\nWASTE FACILITIES: {len(waste_rows)} in area")
         for r in waste_rows[:8]:
@@ -5354,20 +5353,20 @@ def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
         lines.append("\nWASTE FACILITIES: None in this ZIP")
 
     # EPA facilities
-    _, epa_rows = _safe_query(db, EJ_EPA_SQL, [zipcode])
+    _, epa_rows = _safe_query(pool, EJ_EPA_SQL, [zipcode])
     if epa_rows:
         lines.append(f"\nEPA-REGULATED FACILITIES: {len(epa_rows)}")
         for r in epa_rows[:8]:
             lines.append(f"  {r[0]} (ID: {r[1]})")
 
     # E-designations (hazardous lots)
-    _, edesig_rows = _safe_query(db, EJ_E_DESIGNATIONS_SQL, [boro_code])
+    _, edesig_rows = _safe_query(pool, EJ_E_DESIGNATIONS_SQL, [boro_code])
     if edesig_rows:
         lines.append(f"\nE-DESIGNATIONS (known hazardous lots): {len(edesig_rows)} in borough")
 
     # Health outcomes
-    _, health_rows = _safe_query(db, EJ_HEALTH_ASTHMA_SQL, [borough])
-    _, health_avg_rows = _safe_query(db, EJ_HEALTH_CITY_AVG_SQL, [])
+    _, health_rows = _safe_query(pool, EJ_HEALTH_ASTHMA_SQL, [borough])
+    _, health_avg_rows = _safe_query(pool, EJ_HEALTH_CITY_AVG_SQL, [])
     health_avgs = {r[0]: float(r[1]) for r in health_avg_rows} if health_avg_rows else {}
 
     if health_rows:
@@ -5389,19 +5388,19 @@ def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append(f"  {name}: {val}{compare}")
 
     # Rats
-    _, rat_rows = _safe_query(db, EJ_RATS_SQL, [zipcode])
+    _, rat_rows = _safe_query(pool, EJ_RATS_SQL, [zipcode])
     if rat_rows:
         total_inspections = sum(int(r[1]) for r in rat_rows)
         active = sum(int(r[1]) for r in rat_rows if r[0] and "active" in str(r[0]).lower())
         lines.append(f"\nRAT INSPECTIONS: {total_inspections:,} total, {active:,} active signs")
 
     # Trees
-    _, tree_rows = _safe_query(db, EJ_TREES_SQL, [zipcode])
+    _, tree_rows = _safe_query(pool, EJ_TREES_SQL, [zipcode])
     if tree_rows and tree_rows[0][0]:
         lines.append(f"\nSTREET TREES: {int(tree_rows[0][0]):,}")
 
     # 311 environmental complaints
-    _, env311_rows = _safe_query(db, EJ_311_ENV_SQL, [zipcode])
+    _, env311_rows = _safe_query(pool, EJ_311_ENV_SQL, [zipcode])
     if env311_rows:
         total_311 = sum(int(r[1]) for r in env311_rows)
         lines.append(f"\n311 ENVIRONMENTAL COMPLAINTS: {total_311:,}")
@@ -5409,14 +5408,14 @@ def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append(f"  {r[0]}: {r[1]:,}")
 
     # Flood vulnerability
-    _, flood_rows = _safe_query(db, EJ_FLOOD_SQL, [zipcode])
+    _, flood_rows = _safe_query(pool, EJ_FLOOD_SQL, [zipcode])
     if flood_rows and flood_rows[0][0]:
         lines.append(f"\nFLOOD VULNERABILITY: score {flood_rows[0][0]}")
         if flood_rows[0][2]:
             lines.append(f"  Non-white: {flood_rows[0][2]}%, Poverty: {flood_rows[0][3]}%")
 
     # Heat vulnerability
-    _, hvi_rows = _safe_query(db, EJ_HVI_SQL, [zipcode])
+    _, hvi_rows = _safe_query(pool, EJ_HVI_SQL, [zipcode])
     if hvi_rows and hvi_rows[0][0]:
         hvi = hvi_rows[0][0]
         lines.append(f"\nHEAT VULNERABILITY INDEX: {hvi}/5")
@@ -5424,7 +5423,7 @@ def environmental_justice(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append("  HIGH RISK — prioritize cooling center access")
 
     # DSNY waste tonnage
-    _, dsny_rows = _safe_query(db, EJ_DSNY_SQL, [f"%{boro_code}%"])
+    _, dsny_rows = _safe_query(pool, EJ_DSNY_SQL, [f"%{boro_code}%"])
     if dsny_rows:
         total_refuse = sum(float(r[1] or 0) for r in dsny_rows)
         lines.append(f"\nWASTE BURDEN: {total_refuse:,.0f} tons refuse collected")
@@ -5614,7 +5613,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
         raise ToolError("ZIP code must be exactly 5 digits")
 
     t0 = time.time()
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     need_lower = need.lower().strip()
 
     embed_fn = ctx.lifespan_context.get("embed_fn")
@@ -5651,7 +5650,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
 
     # Food  # keywords: food, hungry, eat, snap, pantry, market
     if show_all or "food" in matched_categories:
-        _, food_rows = _safe_query(db, RESOURCE_FOOD_SQL, [zipcode])
+        _, food_rows = _safe_query(pool, RESOURCE_FOOD_SQL, [zipcode])
         if food_rows:
             lines.append(f"\nFOOD ASSISTANCE ({len(food_rows)} locations):")
             for r in food_rows[:8]:
@@ -5662,7 +5661,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
                     lines.append(f"    Phone: {r[2]}")
             results_found += len(food_rows)
         # SNAP centers
-        _, snap_rows = _safe_query(db, RESOURCE_SNAP_SQL, [])
+        _, snap_rows = _safe_query(pool, RESOURCE_SNAP_SQL, [])
         if snap_rows:
             lines.append(f"\n  SNAP CENTERS (citywide):")
             for r in snap_rows[:5]:
@@ -5671,7 +5670,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
 
     # Health  # keywords: health, clinic, doctor, mental, hospital
     if show_all or "health" in matched_categories:
-        _, mh_rows = _safe_query(db, RESOURCE_MENTAL_HEALTH_SQL, [zipcode])
+        _, mh_rows = _safe_query(pool, RESOURCE_MENTAL_HEALTH_SQL, [zipcode])
         if mh_rows:
             lines.append(f"\nHEALTH & MENTAL HEALTH ({len(mh_rows)} locations):")
             for r in mh_rows[:8]:
@@ -5684,7 +5683,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
 
     # Childcare  # keywords: child, daycare, childcare, baby, toddler
     if show_all or "childcare" in matched_categories:
-        _, cc_rows = _safe_query(db, RESOURCE_CHILDCARE_SQL, [zipcode])
+        _, cc_rows = _safe_query(pool, RESOURCE_CHILDCARE_SQL, [zipcode])
         if cc_rows:
             lines.append(f"\nCHILDCARE ({len(cc_rows)} providers):")
             for r in cc_rows[:8]:
@@ -5697,7 +5696,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
 
     # Youth / DYCD  # keywords: youth, teen, job, dycd, program, after
     if show_all or "youth" in matched_categories:
-        _, dycd_rows = _safe_query(db, RESOURCE_DYCD_SQL, [zipcode])
+        _, dycd_rows = _safe_query(pool, RESOURCE_DYCD_SQL, [zipcode])
         if dycd_rows:
             lines.append(f"\nYOUTH & COMMUNITY PROGRAMS ({len(dycd_rows)} sites):")
             for r in dycd_rows[:10]:
@@ -5710,7 +5709,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
 
     # Benefits  # keywords: benefit, medicaid, cash, assistance, snap
     if show_all or "benefits" in matched_categories:
-        _, ben_rows = _safe_query(db, RESOURCE_BENEFITS_SQL, [])
+        _, ben_rows = _safe_query(pool, RESOURCE_BENEFITS_SQL, [])
         if ben_rows:
             lines.append(f"\nBENEFITS ACCESS CENTERS:")
             for r in ben_rows[:8]:
@@ -5721,7 +5720,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
 
     # DV / Family Justice  # keywords: domestic, violence, dv, abuse, family justice, legal
     if show_all or "legal" in matched_categories:
-        _, fj_rows = _safe_query(db, RESOURCE_FAMILY_JUSTICE_SQL, [])
+        _, fj_rows = _safe_query(pool, RESOURCE_FAMILY_JUSTICE_SQL, [])
         if fj_rows:
             lines.append(f"\nFAMILY JUSTICE CENTERS (domestic violence):")
             for r in fj_rows:
@@ -5744,7 +5743,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
         lines.append("  NYC Mesh: nycmesh.net (community internet)")
         lines.append("  Big Apple Connect: free internet in NYCHA")
         lines.append("  NYPL/BPL/QPL: free Wi-Fi at all public libraries")
-        _, bb_rows = _safe_query(db, RESOURCE_BROADBAND_SQL, [zipcode])
+        _, bb_rows = _safe_query(pool, RESOURCE_BROADBAND_SQL, [zipcode])
         if bb_rows:
             lines.append(f"  Broadband data for ZIP {zipcode} available")
         results_found += 1
@@ -5765,7 +5764,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
         lines.append("  New York Immigration Coalition: nyic.org")
         lines.append("  Catholic Charities: catholiccharitiesny.org")
         lines.append("  Know Your Rights: 311 or MOIA hotline")
-        _, kyr_rows = _safe_query(db, RESOURCE_KYR_SQL, [])
+        _, kyr_rows = _safe_query(pool, RESOURCE_KYR_SQL, [])
         if kyr_rows:
             lines.append(f"  Recent Know Your Rights events:")
             for r in kyr_rows[:3]:
@@ -5972,26 +5971,26 @@ def school_report(dbn: Annotated[str, Field(description="School DBN: district(2)
     if len(dbn) < 5 or len(dbn) > 6:
         raise ToolError("DBN must be 5-6 characters. Format: district(2) + borough(1) + number(3). Example: 02M001")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     # --- Existing queries ---
-    _, dir_rows = _safe_query(db, SCHOOL_DIRECTORY_SQL, [dbn])
-    _, perf_rows = _safe_query(db, SCHOOL_PERFORMANCE_SQL, [dbn])
-    _, ela_rows = _safe_query(db, SCHOOL_ELA_SQL, [dbn])
-    _, math_rows = _safe_query(db, SCHOOL_MATH_SQL, [dbn])
-    _, qual_rows = _safe_query(db, SCHOOL_QUALITY_SQL, [dbn])
+    _, dir_rows = _safe_query(pool, SCHOOL_DIRECTORY_SQL, [dbn])
+    _, perf_rows = _safe_query(pool, SCHOOL_PERFORMANCE_SQL, [dbn])
+    _, ela_rows = _safe_query(pool, SCHOOL_ELA_SQL, [dbn])
+    _, math_rows = _safe_query(pool, SCHOOL_MATH_SQL, [dbn])
+    _, qual_rows = _safe_query(pool, SCHOOL_QUALITY_SQL, [dbn])
 
     # --- New queries ---
-    _, demo_rows = _safe_query(db, SCHOOL_DEMOGRAPHICS_SQL, [dbn])
-    _, attend_rows = _safe_query(db, SCHOOL_ATTENDANCE_SQL, [dbn])
-    _, class_rows = _safe_query(db, SCHOOL_CLASS_SIZE_SQL, [dbn])
-    _, survey_rows = _safe_query(db, SCHOOL_SURVEY_SQL, [dbn])
-    _, safety_rows = _safe_query(db, SCHOOL_SAFETY_DETAIL_SQL, [dbn])
-    _, regents_rows = _safe_query(db, SCHOOL_REGENTS_SQL, [dbn])
-    _, cafe_rows = _safe_query(db, SCHOOL_CAFETERIA_SQL, [dbn])
-    _, shsat_rows = _safe_query(db, SCHOOL_SPECIALIZED_HS_SQL, [dbn])
-    _, discharge_rows = _safe_query(db, SCHOOL_DISCHARGE_SQL, [dbn])
+    _, demo_rows = _safe_query(pool, SCHOOL_DEMOGRAPHICS_SQL, [dbn])
+    _, attend_rows = _safe_query(pool, SCHOOL_ATTENDANCE_SQL, [dbn])
+    _, class_rows = _safe_query(pool, SCHOOL_CLASS_SIZE_SQL, [dbn])
+    _, survey_rows = _safe_query(pool, SCHOOL_SURVEY_SQL, [dbn])
+    _, safety_rows = _safe_query(pool, SCHOOL_SAFETY_DETAIL_SQL, [dbn])
+    _, regents_rows = _safe_query(pool, SCHOOL_REGENTS_SQL, [dbn])
+    _, cafe_rows = _safe_query(pool, SCHOOL_CAFETERIA_SQL, [dbn])
+    _, shsat_rows = _safe_query(pool, SCHOOL_SPECIALIZED_HS_SQL, [dbn])
+    _, discharge_rows = _safe_query(pool, SCHOOL_DISCHARGE_SQL, [dbn])
 
     if not dir_rows and not perf_rows and not ela_rows and not demo_rows and not safety_rows:
         raise ToolError(f"No school found for DBN {dbn}. Use school_search(name) to find the correct DBN.")
@@ -6235,19 +6234,19 @@ def school_search(
     if not query or len(query) < 2:
         raise ToolError("Search query must be at least 2 characters.")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     # Detect query type: ZIP (5 digits), district (1-2 digits), or name
     if re.match(r"^\d{5}$", query):
-        _, rows = _safe_query(db, SCHOOL_SEARCH_BY_ZIP_SQL, [query])
+        _, rows = _safe_query(pool, SCHOOL_SEARCH_BY_ZIP_SQL, [query])
         search_type = f"ZIP {query}"
     elif re.match(r"^\d{1,2}$", query):
-        _, rows = _safe_query(db, SCHOOL_SEARCH_BY_DISTRICT_SQL, [query])
+        _, rows = _safe_query(pool, SCHOOL_SEARCH_BY_DISTRICT_SQL, [query])
         search_type = f"District {int(query)}"
     else:
         name_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        _, rows = _safe_query(db, SCHOOL_SEARCH_BY_NAME_SQL, [name_query])
+        _, rows = _safe_query(pool, SCHOOL_SEARCH_BY_NAME_SQL, [name_query])
         search_type = f"name matching '{query}'"
 
     if not rows:
@@ -6354,11 +6353,11 @@ def school_compare(
     for d in dbns:
         if not re.match(r'^[A-Z0-9]{5,6}$', d):
             raise ToolError(f"Invalid DBN format: '{d}'. Expected 5-6 alphanumeric chars like 02M001.")
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     sql = _fill_placeholders(SCHOOL_COMPARE_SCORES_SQL, dbns)
-    _, rows = _safe_query(db, sql, dbns)
+    _, rows = _safe_query(pool, sql, dbns)
 
     if not rows:
         raise ToolError(f"No data found for DBNs: {', '.join(dbns)}. Verify with school_search().")
@@ -6499,14 +6498,14 @@ def district_report(
         raise ToolError("District must be 1-32, 75, or 79.")
 
     padded = district.zfill(2)
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
-    _, agg_rows = _safe_query(db, DISTRICT_AGGREGATE_SQL, [padded])
-    _, test_rows = _safe_query(db, DISTRICT_TEST_SCORES_SQL, [padded, padded])
-    _, attend_rows = _safe_query(db, DISTRICT_ATTENDANCE_SQL, [padded])
-    _, safety_rows = _safe_query(db, DISTRICT_SAFETY_SQL, [padded])
-    _, school_rows = _safe_query(db, DISTRICT_SCHOOLS_SQL, [padded])
+    _, agg_rows = _safe_query(pool, DISTRICT_AGGREGATE_SQL, [padded])
+    _, test_rows = _safe_query(pool, DISTRICT_TEST_SCORES_SQL, [padded, padded])
+    _, attend_rows = _safe_query(pool, DISTRICT_ATTENDANCE_SQL, [padded])
+    _, safety_rows = _safe_query(pool, DISTRICT_SAFETY_SQL, [padded])
+    _, school_rows = _safe_query(pool, DISTRICT_SCHOOLS_SQL, [padded])
 
     if not agg_rows or not agg_rows[0][0]:
         raise ToolError(f"No data found for District {district}. Valid districts: 1-32, 75, 79.")
@@ -6644,7 +6643,7 @@ def due_diligence(
     if len(name) < 3:
         raise ToolError("Name must be at least 3 characters.")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     extra_names = _vector_expand_names(ctx, name.strip().upper())
@@ -6659,20 +6658,20 @@ def due_diligence(
         last_guess = name
 
     # Attorney (exact last + fuzzy first)
-    _, atty_rows = _safe_query(db, DUE_DILIGENCE_ATTORNEY_SQL,
+    _, atty_rows = _safe_query(pool, DUE_DILIGENCE_ATTORNEY_SQL,
                                 [f"{last_guess}%", f"{first_guess}%", f"{'%' + first_guess + '%'}"])
     # Broker
-    _, broker_rows = _safe_query(db, DUE_DILIGENCE_BROKER_SQL, [name])
+    _, broker_rows = _safe_query(pool, DUE_DILIGENCE_BROKER_SQL, [name])
     # Tax warrants
-    _, tax_rows = _safe_query(db, DUE_DILIGENCE_TAX_WARRANT_SQL, [name, name])
+    _, tax_rows = _safe_query(pool, DUE_DILIGENCE_TAX_WARRANT_SQL, [name, name])
     # Child support warrants
-    _, cs_rows = _safe_query(db, DUE_DILIGENCE_CHILD_SUPPORT_SQL, [name])
+    _, cs_rows = _safe_query(pool, DUE_DILIGENCE_CHILD_SUPPORT_SQL, [name])
     # Contractor
-    _, contractor_rows = _safe_query(db, DUE_DILIGENCE_CONTRACTOR_SQL, [name, name])
+    _, contractor_rows = _safe_query(pool, DUE_DILIGENCE_CONTRACTOR_SQL, [name, name])
     # Debarred
-    _, debarred_rows = _safe_query(db, DUE_DILIGENCE_DEBARRED_SQL, [name])
+    _, debarred_rows = _safe_query(pool, DUE_DILIGENCE_DEBARRED_SQL, [name])
     # Ethics
-    _, ethics_rows = _safe_query(db, DUE_DILIGENCE_ETHICS_SQL, [name])
+    _, ethics_rows = _safe_query(pool, DUE_DILIGENCE_ETHICS_SQL, [name])
 
     # Phonetic fallback for professional databases
     phonetic_pro = []
@@ -6681,7 +6680,7 @@ def due_diligence(
         ph_sql, ph_params = phonetic_search_sql(
             first_name=first_guess if len(parts) >= 2 else None,
             last_name=last_guess, min_score=0.8, limit=10)
-        ph_cols, ph_rows = _execute(db, ph_sql, ph_params)
+        ph_cols, ph_rows = _execute(pool, ph_sql, ph_params)
         if ph_rows and not atty_rows and not broker_rows:
             phonetic_pro = [dict(zip(ph_cols, r)) for r in ph_rows]
             phonetic_pro = [m for m in phonetic_pro if any(s in m.get("source_table", "")
@@ -6874,7 +6873,7 @@ def cop_sheet(
     if len(name) < 3:
         raise ToolError("Name must be at least 3 characters.")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     extra_names = _vector_expand_names(ctx, name.strip().upper())
@@ -6888,15 +6887,15 @@ def cop_sheet(
         last = name
 
     # Officer summary
-    _, summary_rows = _safe_query(db, COP_SHEET_SUMMARY_SQL, [f"{last}%", f"{first}%"])
+    _, summary_rows = _safe_query(pool, COP_SHEET_SUMMARY_SQL, [f"{last}%", f"{first}%"])
     # CCRB complaints
-    _, complaint_rows = _safe_query(db, COP_SHEET_COMPLAINTS_SQL, [f"{last}%", f"{first}%"])
+    _, complaint_rows = _safe_query(pool, COP_SHEET_COMPLAINTS_SQL, [f"{last}%", f"{first}%"])
     # Settlements (search by officer last name in matter_name)
-    _, settlement_rows = _safe_query(db, COP_SHEET_SETTLEMENTS_SQL, [last, last])
+    _, settlement_rows = _safe_query(pool, COP_SHEET_SETTLEMENTS_SQL, [last, last])
     # Federal cases SDNY
-    _, sdny_rows = _safe_query(db, COP_SHEET_FEDERAL_SDNY_SQL, [last])
+    _, sdny_rows = _safe_query(pool, COP_SHEET_FEDERAL_SDNY_SQL, [last])
     # Federal cases EDNY
-    _, edny_rows = _safe_query(db, COP_SHEET_FEDERAL_EDNY_SQL, [last])
+    _, edny_rows = _safe_query(pool, COP_SHEET_FEDERAL_EDNY_SQL, [last])
 
     if not summary_rows and not complaint_rows:
         raise ToolError(f"No CCRB records found for '{name}'. Try last name only, or check spelling.")
@@ -7040,7 +7039,7 @@ def vital_records(
     if len(name) < 3:
         raise ToolError("Name must be at least 3 characters.")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     parts = name.split()
@@ -7051,11 +7050,11 @@ def vital_records(
         first = "%"
         last = name
 
-    _, death_rows = _safe_query(db, VITAL_DEATHS_SQL, [f"{last}%", f"{first}%"])
-    _, marriage_early = _safe_query(db, VITAL_MARRIAGES_EARLY_SQL, [f"{last}%"])
+    _, death_rows = _safe_query(pool, VITAL_DEATHS_SQL, [f"{last}%", f"{first}%"])
+    _, marriage_early = _safe_query(pool, VITAL_MARRIAGES_EARLY_SQL, [f"{last}%"])
     marriage_mid = []  # 1908-1949 table has no name columns — skip
-    _, marriage_modern = _safe_query(db, VITAL_MARRIAGES_MODERN_SQL, [f"{last}%", f"{last}%"])
-    _, birth_rows = _safe_query(db, VITAL_BIRTHS_SQL, [f"{last}%", f"{first}%"])
+    _, marriage_modern = _safe_query(pool, VITAL_MARRIAGES_MODERN_SQL, [f"{last}%", f"{last}%"])
+    _, birth_rows = _safe_query(pool, VITAL_BIRTHS_SQL, [f"{last}%", f"{first}%"])
 
     # Phonetic enhancement for historical records
     phonetic_deaths = []
@@ -7066,7 +7065,7 @@ def vital_records(
             table="lake.federal.nys_death_index",
             first_col="first_name", last_col="last_name",
             extra_cols="age, date_of_death", limit=20)
-        _, phonetic_deaths = _execute(db, ph_sql, ph_params)
+        _, phonetic_deaths = _execute(pool, ph_sql, ph_params)
     except Exception:
         pass
 
@@ -7183,7 +7182,7 @@ def money_trail(
     if len(name) < 3:
         raise ToolError("Name must be at least 3 characters.")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     extra_names = _vector_expand_names(ctx, name.strip().upper())
@@ -7192,11 +7191,11 @@ def money_trail(
     first = parts[0] if len(parts) >= 2 else "%"
     last = parts[-1] if len(parts) >= 2 else name
 
-    _, nys_rows = _safe_query(db, MONEY_NYS_DONATIONS_SQL, [f"{last}%", f"{first}%", name])
-    _, fec_rows = _safe_query(db, MONEY_FEC_SQL, [name])
-    _, nyc_rows = _safe_query(db, MONEY_NYC_DONATIONS_SQL, [name, name])
-    _, contract_rows = _safe_query(db, MONEY_CONTRACTS_SQL, [name])
-    _, procurement_rows = _safe_query(db, MONEY_PROCUREMENT_SQL, [name])
+    _, nys_rows = _safe_query(pool, MONEY_NYS_DONATIONS_SQL, [f"{last}%", f"{first}%", name])
+    _, fec_rows = _safe_query(pool, MONEY_FEC_SQL, [name])
+    _, nyc_rows = _safe_query(pool, MONEY_NYC_DONATIONS_SQL, [name, name])
+    _, contract_rows = _safe_query(pool, MONEY_CONTRACTS_SQL, [name])
+    _, procurement_rows = _safe_query(pool, MONEY_PROCUREMENT_SQL, [name])
 
     # Fuzzy enhancement for name variants
     fuzzy_fec = []
@@ -7206,7 +7205,7 @@ def money_trail(
             table="lake.federal.fec_contributions", name_col="contributor_name",
             extra_cols="committee_id, contribution_receipt_amount, contribution_receipt_date",
             min_score=75, limit=15)
-        _, fuzzy_fec = _execute(db, fec_sql, fec_params)
+        _, fuzzy_fec = _execute(pool, fec_sql, fec_params)
     except Exception:
         pass
 
@@ -7345,14 +7344,14 @@ def judge_profile(
     if len(name) < 3:
         raise ToolError("Name must be at least 3 characters.")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     parts = name.split()
     first = parts[0] if len(parts) >= 2 else "%"
     last = parts[-1] if len(parts) >= 2 else name
 
-    _, bio_rows = _safe_query(db, JUDGE_BIO_SQL, [f"{last}%", f"{first}%"])
+    _, bio_rows = _safe_query(pool, JUDGE_BIO_SQL, [f"{last}%", f"{first}%"])
 
     if not bio_rows:
         raise ToolError(f"No federal judge found for '{name}'. Try last name only.")
@@ -7370,7 +7369,7 @@ def judge_profile(
             lines.append(f"  Religion: {religion}")
 
         # Positions
-        _, pos_rows = _safe_query(db, JUDGE_POSITIONS_SQL, [judge_id])
+        _, pos_rows = _safe_query(pool, JUDGE_POSITIONS_SQL, [judge_id])
         if pos_rows:
             lines.append(f"\n  CAREER:")
             for p in pos_rows:
@@ -7382,7 +7381,7 @@ def judge_profile(
                     lines.append(f"      Appointed by: {appointer}")
 
         # Education
-        _, edu_rows = _safe_query(db, JUDGE_EDUCATION_SQL, [judge_id])
+        _, edu_rows = _safe_query(pool, JUDGE_EDUCATION_SQL, [judge_id])
         if edu_rows:
             lines.append(f"\n  EDUCATION:")
             for e in edu_rows:
@@ -7390,14 +7389,14 @@ def judge_profile(
                 lines.append(f"    {school or '?'} — {degree or '?'} ({year or '?'})")
 
         # Financial disclosures
-        _, disc_rows = _safe_query(db, JUDGE_DISCLOSURES_SQL, [judge_id])
+        _, disc_rows = _safe_query(pool, JUDGE_DISCLOSURES_SQL, [judge_id])
         if disc_rows:
             lines.append(f"\n  FINANCIAL DISCLOSURES ({len(disc_rows)} filings):")
             for d in disc_rows[:5]:
                 lines.append(f"    {d[0] or '?'}: {d[1] or 'Annual'}")
 
         # Top investments
-        _, inv_rows = _safe_query(db, JUDGE_INVESTMENTS_SQL, [judge_id])
+        _, inv_rows = _safe_query(pool, JUDGE_INVESTMENTS_SQL, [judge_id])
         if inv_rows:
             lines.append(f"\n  TOP INVESTMENTS ({len(inv_rows)} holdings):")
             for i in inv_rows[:10]:
@@ -7406,7 +7405,7 @@ def judge_profile(
                 lines.append(f"    {desc[:80]} (value code: {value})")
 
         # Gifts
-        _, gift_rows = _safe_query(db, JUDGE_GIFTS_SQL, [judge_id])
+        _, gift_rows = _safe_query(pool, JUDGE_GIFTS_SQL, [judge_id])
         if gift_rows:
             lines.append(f"\n  GIFTS RECEIVED ({len(gift_rows)}):")
             for g in gift_rows:
@@ -7501,15 +7500,15 @@ def climate_risk(
     if not re.match(r"^\d{5}$", zipcode):
         raise ToolError("Please provide a valid 5-digit NYC ZIP code.")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
-    _, heat_rows = _safe_query(db, CLIMATE_HEAT_SQL, [zipcode])
-    _, lead_rows = _safe_query(db, CLIMATE_LEAD_DETAIL_SQL, [zipcode])
-    _, energy_rows = _safe_query(db, CLIMATE_ENERGY_ZIP_SQL, [zipcode])
-    _, tree_count = _safe_query(db, CLIMATE_TREE_COUNT_SQL, [zipcode])
-    _, tree_rows = _safe_query(db, CLIMATE_TREES_SQL, [zipcode])
-    _, cleanup_rows = _safe_query(db, CLIMATE_CLEANUP_SQL, [zipcode])
+    _, heat_rows = _safe_query(pool, CLIMATE_HEAT_SQL, [zipcode])
+    _, lead_rows = _safe_query(pool, CLIMATE_LEAD_DETAIL_SQL, [zipcode])
+    _, energy_rows = _safe_query(pool, CLIMATE_ENERGY_ZIP_SQL, [zipcode])
+    _, tree_count = _safe_query(pool, CLIMATE_TREE_COUNT_SQL, [zipcode])
+    _, tree_rows = _safe_query(pool, CLIMATE_TREES_SQL, [zipcode])
+    _, cleanup_rows = _safe_query(pool, CLIMATE_CLEANUP_SQL, [zipcode])
 
     lines = [f"CLIMATE & ENVIRONMENTAL RISK — ZIP {zipcode}", "=" * 55]
 
@@ -7653,15 +7652,15 @@ def commercial_vitality(zipcode: ZIP, ctx: Context) -> ToolResult:
     if not re.match(r"^\d{5}$", zipcode):
         raise ToolError("ZIP code must be exactly 5 digits")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
-    _, lic_rows = _safe_query(db, COMMERCIAL_LICENSES_SQL, [zipcode])
-    _, cafe_rows = _safe_query(db, COMMERCIAL_SIDEWALK_CAFES_SQL, [zipcode])
-    _, permit_rows = _safe_query(db, COMMERCIAL_DOB_PERMITS_SQL, [zipcode])
-    _, rest_rows = _safe_query(db, COMMERCIAL_RESTAURANTS_SQL, [zipcode])
-    _, cert_rows = _safe_query(db, COMMERCIAL_CERTIFIED_BIZ_SQL, [zipcode])
-    _, svc311_rows = _safe_query(db, COMMERCIAL_311_SQL, [zipcode])
+    _, lic_rows = _safe_query(pool, COMMERCIAL_LICENSES_SQL, [zipcode])
+    _, cafe_rows = _safe_query(pool, COMMERCIAL_SIDEWALK_CAFES_SQL, [zipcode])
+    _, permit_rows = _safe_query(pool, COMMERCIAL_DOB_PERMITS_SQL, [zipcode])
+    _, rest_rows = _safe_query(pool, COMMERCIAL_RESTAURANTS_SQL, [zipcode])
+    _, cert_rows = _safe_query(pool, COMMERCIAL_CERTIFIED_BIZ_SQL, [zipcode])
+    _, svc311_rows = _safe_query(pool, COMMERCIAL_311_SQL, [zipcode])
 
     lines = [f"COMMERCIAL VITALITY — ZIP {zipcode}", "=" * 45]
 
@@ -7837,10 +7836,10 @@ def building_story(bbl: BBL, ctx: Context) -> ToolResult:
     """The narrative history of a NYC building — its era, what it's survived, complaint character, neighborhood comparison, and milestones witnessed. Use this for a storytelling view of a building's life. Differs from building_profile (quick stats) and building_context (era/contemporaries). Parameters: bbl (10 digits: borough(1) + block(5) + lot(4)). Example: 1000670001. For quick stats, use building_profile(bbl). For era context, use building_context(bbl)."""
 
     t0 = time.time()
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
 
     # --- PLUTO lookup ---
-    cols, rows = _safe_query(db, STORY_PLUTO_SQL, [bbl])
+    cols, rows = _safe_query(pool, STORY_PLUTO_SQL, [bbl])
     if not rows:
         raise ToolError(f"No building found for BBL {bbl} in PLUTO.")
 
@@ -7913,7 +7912,7 @@ def building_story(bbl: BBL, ctx: Context) -> ToolResult:
         lines.append(f"  Second alteration: {alter2}")
 
     # --- Violations ---
-    cols_v, rows_v = _safe_query(db, STORY_VIOLATIONS_SQL, [boro_digit, block, lot])
+    cols_v, rows_v = _safe_query(pool, STORY_VIOLATIONS_SQL, [boro_digit, block, lot])
     if rows_v:
         v = dict(zip(cols_v, rows_v[0]))
         total_v = int(v.get("total") or 0)
@@ -7929,7 +7928,7 @@ def building_story(bbl: BBL, ctx: Context) -> ToolResult:
                 lines.append(f"  Most recent: {latest_v}")
 
     # --- Complaint character ---
-    cols_c, rows_c = _safe_query(db, STORY_COMPLAINTS_SQL, [boro_digit, block, lot])
+    cols_c, rows_c = _safe_query(pool, STORY_COMPLAINTS_SQL, [boro_digit, block, lot])
     if rows_c:
         lines.append(f"\nWHAT RESIDENTS TALK ABOUT")
         for row in rows_c[:6]:
@@ -7940,7 +7939,7 @@ def building_story(bbl: BBL, ctx: Context) -> ToolResult:
 
     # --- 311 ---
     if zipcode:
-        cols_311, rows_311 = _safe_query(db, STORY_311_SQL, [zipcode, bbl])
+        cols_311, rows_311 = _safe_query(pool, STORY_311_SQL, [zipcode, bbl])
         if rows_311:
             lines.append(f"\n311 CALLS (since 2020)")
             for row in rows_311[:5]:
@@ -7948,7 +7947,7 @@ def building_story(bbl: BBL, ctx: Context) -> ToolResult:
                 lines.append(f"  {r.get('complaint_type')}: {int(r.get('cnt') or 0):,}")
 
     # --- Construction history ---
-    cols_p, rows_p = _safe_query(db, STORY_PERMITS_SQL, [boro_digit, block, lot])
+    cols_p, rows_p = _safe_query(pool, STORY_PERMITS_SQL, [boro_digit, block, lot])
     if rows_p:
         lines.append(f"\nCONSTRUCTION HISTORY")
         for row in rows_p:
@@ -7963,7 +7962,7 @@ def building_story(bbl: BBL, ctx: Context) -> ToolResult:
 
     # --- Neighborhood comparison ---
     if zipcode:
-        cols_n, rows_n = _safe_query(db, STORY_NEIGHBORS_SQL, [zipcode])
+        cols_n, rows_n = _safe_query(pool, STORY_NEIGHBORS_SQL, [zipcode])
         if rows_n:
             n = dict(zip(cols_n, rows_n[0]))
             total_n = int(n.get("total_buildings") or 0)
@@ -8029,11 +8028,11 @@ def similar_buildings(
         raise ToolError(f"Invalid BBL '{bbl}': must be exactly 10 digits.")
 
     t0 = time.time()
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
 
     # Lance file scan SQL doesn't support ? params — bbl is regex-validated above
-    with _db_lock:
-        target_rows = db.execute(
+    with pool.cursor() as cur:
+        target_rows = cur.execute(
             f"SELECT features FROM '{LANCE_DIR}/building_vectors.lance' WHERE bbl = '{bbl}'"
         ).fetchall()
 
@@ -8062,9 +8061,10 @@ ORDER BY bv._distance ASC
 LIMIT {limit}
 """
 
-    with _db_lock:
-        result = db.execute(knn_sql).fetchall()
-        cols = [d[0] for d in db.description]
+    with pool.cursor() as cur:
+        knn_result = cur.execute(knn_sql)
+        result = knn_result.fetchall()
+        cols = [d[0] for d in knn_result.description]
 
     elapsed = round((time.time() - t0) * 1000)
 
@@ -8211,7 +8211,7 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
     """What makes a NYC neighborhood distinctive — cuisine fingerprint, building stock, noise level, business mix, and how it compares to the city. Use this for neighborhood questions by ZIP. For comparing multiple ZIPs side-by-side, use neighborhood_compare([zips]). For environmental justice analysis, use environmental_justice(zipcode). For gentrification tracking, use gentrification_tracker([zips]). For schools in this ZIP, use school_search(zipcode). ZIP: 5 digits. Example: 10003 (East Village), 11201 (Downtown Brooklyn)."""
 
     t0 = time.time()
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
 
     # Validate
     if not zipcode or len(zipcode) != 5 or not zipcode.isdigit():
@@ -8237,8 +8237,8 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
     lines.append("=" * 60)
 
     # --- Cuisine fingerprint ---
-    cols_c, rows_c = _safe_query(db, PORTRAIT_CUISINE_SQL, [zipcode])
-    cols_city, rows_city = _safe_query(db, PORTRAIT_CUISINE_CITY_SQL)
+    cols_c, rows_c = _safe_query(pool, PORTRAIT_CUISINE_SQL, [zipcode])
+    cols_city, rows_city = _safe_query(pool, PORTRAIT_CUISINE_CITY_SQL)
     city_totals = {}
     city_restaurants = 0
     city_zips = 200  # approximate number of NYC ZIPs
@@ -8272,7 +8272,7 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append(f"\n  Signature: {standout[0]} — {standout[1]:.1f}x the city average")
 
     # --- Restaurant grades ---
-    cols_g, rows_g = _safe_query(db, PORTRAIT_GRADES_SQL, [zipcode])
+    cols_g, rows_g = _safe_query(pool, PORTRAIT_GRADES_SQL, [zipcode])
     if rows_g:
         grades = {dict(zip(cols_g, r))["grade"]: int(dict(zip(cols_g, r))["cnt"]) for r in rows_g}
         total_graded = sum(grades.values())
@@ -8284,7 +8284,7 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
                 lines.append(f"    {g}: {grades[g]}")
 
     # --- Building stock ---
-    cols_b, rows_b = _safe_query(db, PORTRAIT_BUILDINGS_SQL, [zipcode])
+    cols_b, rows_b = _safe_query(pool, PORTRAIT_BUILDINGS_SQL, [zipcode])
     if rows_b:
         b = dict(zip(cols_b, rows_b[0]))
         total_bldg = int(b.get("total") or 0)
@@ -8306,7 +8306,7 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append(f"  In historic district: {hist_ct}")
 
     # --- 311 character ---
-    cols_311, rows_311 = _safe_query(db, PORTRAIT_311_SQL, [zipcode])
+    cols_311, rows_311 = _safe_query(pool, PORTRAIT_311_SQL, [zipcode])
     if rows_311:
         lines.append(f"\n311 CHARACTER (since 2020)")
         total_311 = 0
@@ -8317,8 +8317,8 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append(f"  {r.get('complaint_type')}: {cnt:,}")
 
     # Noise comparison
-    cols_noise, rows_noise = _safe_query(db, PORTRAIT_311_NOISE_SQL, [zipcode])
-    cols_cn, rows_cn = _safe_query(db, PORTRAIT_311_CITY_NOISE_SQL)
+    cols_noise, rows_noise = _safe_query(pool, PORTRAIT_311_NOISE_SQL, [zipcode])
+    cols_cn, rows_cn = _safe_query(pool, PORTRAIT_311_CITY_NOISE_SQL)
     if rows_noise and rows_cn:
         local_noise = int(dict(zip(cols_noise, rows_noise[0])).get("noise_total") or 0)
         city_avg_noise = float(dict(zip(cols_cn, rows_cn[0])).get("avg_noise_per_zip") or 1)
@@ -8332,7 +8332,7 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
                 lines.append(f"\n  Noise level: about average for NYC")
 
     # --- Business mix ---
-    cols_biz, rows_biz = _safe_query(db, PORTRAIT_BIZ_SQL, [zipcode])
+    cols_biz, rows_biz = _safe_query(pool, PORTRAIT_BIZ_SQL, [zipcode])
     if rows_biz:
         lines.append(f"\nBUSINESS MIX (active licenses)")
         for row in rows_biz[:6]:
@@ -8342,10 +8342,10 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
     # H3-based safety snapshot
     try:
         from spatial import h3_zip_centroid_sql, h3_neighborhood_stats_sql
-        _, centroid = _execute(db, *h3_zip_centroid_sql(zipcode))
+        _, centroid = _execute(pool, *h3_zip_centroid_sql(zipcode))
         if centroid and centroid[0][0] is not None:
             c_lat, c_lng = centroid[0][1], centroid[0][2]
-            _, stats = _execute(db, *h3_neighborhood_stats_sql(c_lat, c_lng, radius_rings=6))
+            _, stats = _execute(pool, *h3_neighborhood_stats_sql(c_lat, c_lng, radius_rings=6))
             if stats:
                 s = dict(zip(["total_crimes", "total_arrests", "restaurants_h3", "n311_calls", "shootings", "street_trees"], stats[0]))
                 lines.append(f"\nSAFETY SNAPSHOT (H3 hex radius)")
@@ -8430,10 +8430,10 @@ def nyc_twins(bbl: BBL, ctx: Context) -> ToolResult:
     """Find statistically similar buildings (twins) across NYC — same era, same building class, similar size — and compare violation rates and assessed values. Use this to benchmark one building against its peers in other boroughs. Parameters: bbl (10 digits). Example: 1000670001. For the building's own history, use building_story(bbl). For block-level trends, use block_timeline(bbl)."""
 
     t0 = time.time()
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
 
     # Get target building
-    cols_t, rows_t = _safe_query(db, STORY_PLUTO_SQL, [bbl])
+    cols_t, rows_t = _safe_query(pool, STORY_PLUTO_SQL, [bbl])
     if not rows_t:
         raise ToolError(f"No building found for BBL {bbl} in PLUTO.")
 
@@ -8450,10 +8450,10 @@ def nyc_twins(bbl: BBL, ctx: Context) -> ToolResult:
         raise ToolError(f"Building has no valid year built ({year}). Cannot find twins.")
 
     # Find twins in OTHER boroughs
-    cols_tw, rows_tw = _safe_query(db, TWINS_FIND_SQL, [bbl, bbl])
+    cols_tw, rows_tw = _safe_query(pool, TWINS_FIND_SQL, [bbl, bbl])
 
     # Count total similar citywide
-    cols_ct, rows_ct = _safe_query(db, TWINS_COUNT_SQL, [bldg_class, year - 5, year + 5])
+    cols_ct, rows_ct = _safe_query(pool, TWINS_COUNT_SQL, [bldg_class, year - 5, year + 5])
     total_similar = 0
     if rows_ct:
         total_similar = int(dict(zip(cols_ct, rows_ct[0])).get("total_similar") or 0)
@@ -8476,7 +8476,7 @@ def nyc_twins(bbl: BBL, ctx: Context) -> ToolResult:
         twin_bbls = [dict(zip(cols_tw, r))["twin_bbl"] for r in rows_tw]
         all_bbls = [bbl] + twin_bbls
         viol_sql = _fill_placeholders(TWINS_VIOLATIONS_SQL, all_bbls)
-        cols_v, rows_v = _safe_query(db, viol_sql, all_bbls)
+        cols_v, rows_v = _safe_query(pool, viol_sql, all_bbls)
         viol_map = {}
         if rows_v:
             for row in rows_v:
@@ -8608,10 +8608,10 @@ def block_timeline(bbl: BBL, ctx: Context) -> ToolResult:
     """A NYC block through time — all buildings, construction permits by year, restaurant scene, 311 complaint trends, and HPD complaint patterns over the last decade. Uses the block portion of the BBL to find all buildings on the block. Parameters: bbl (10 digits). Example: 1000670001. For a single building's story, use building_story(bbl). For neighborhood-wide trends, use neighborhood_portrait(zipcode)."""
 
     t0 = time.time()
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
 
     # Look up the target building
-    cols_b, rows_b = _safe_query(db, BLOCK_PLUTO_SQL, [bbl])
+    cols_b, rows_b = _safe_query(pool, BLOCK_PLUTO_SQL, [bbl])
     if not rows_b:
         raise ToolError(f"No building found for BBL {bbl}.")
 
@@ -8629,7 +8629,7 @@ def block_timeline(bbl: BBL, ctx: Context) -> ToolResult:
     lines.append("=" * 60)
 
     # --- All buildings on the block ---
-    cols_n, rows_n = _safe_query(db, BLOCK_NEIGHBORS_SQL, [block_prefix])
+    cols_n, rows_n = _safe_query(pool, BLOCK_NEIGHBORS_SQL, [block_prefix])
     if rows_n:
         buildings = [dict(zip(cols_n, r)) for r in rows_n]
         years = [b["yearbuilt"] for b in buildings if b.get("yearbuilt")]
@@ -8658,7 +8658,7 @@ def block_timeline(bbl: BBL, ctx: Context) -> ToolResult:
             lines.append(f"    {b.get('address')}: {y}, {fl}fl, {cls}{marker}")
 
     # --- Construction permits (last 10 years) ---
-    cols_p, rows_p = _safe_query(db, BLOCK_PERMITS_SQL, [boro_digit, block])
+    cols_p, rows_p = _safe_query(pool, BLOCK_PERMITS_SQL, [boro_digit, block])
     if rows_p:
         lines.append(f"\nCONSTRUCTION ACTIVITY (last 10 years)")
         by_year = {}
@@ -8689,7 +8689,7 @@ def block_timeline(bbl: BBL, ctx: Context) -> ToolResult:
 
     # --- Restaurant scene ---
     if zipcode:
-        cols_r, rows_r = _safe_query(db, BLOCK_RESTAURANTS_SQL, [zipcode])
+        cols_r, rows_r = _safe_query(pool, BLOCK_RESTAURANTS_SQL, [zipcode])
         if rows_r:
             restaurants = [dict(zip(cols_r, r)) for r in rows_r]
             cuisines = {}
@@ -8705,7 +8705,7 @@ def block_timeline(bbl: BBL, ctx: Context) -> ToolResult:
     # --- 311 trends ---
     if zipcode:
         bbl_prefix = bbl[:6] + "%"  # match all lots on this block
-        cols_311, rows_311 = _safe_query(db, BLOCK_311_SQL, [zipcode, bbl_prefix])
+        cols_311, rows_311 = _safe_query(pool, BLOCK_311_SQL, [zipcode, bbl_prefix])
         if rows_311:
             lines.append(f"\n311 COMPLAINTS ON YOUR BLOCK (since 2020)")
             by_year_311 = {}
@@ -8724,7 +8724,7 @@ def block_timeline(bbl: BBL, ctx: Context) -> ToolResult:
                 lines.append(f"  {yr}: {total} calls ({top_str})")
 
     # --- HPD complaint trends ---
-    cols_h, rows_h = _safe_query(db, BLOCK_HPD_SQL, [boro_digit, block])
+    cols_h, rows_h = _safe_query(pool, BLOCK_HPD_SQL, [boro_digit, block])
     if rows_h:
         lines.append(f"\nHPD COMPLAINTS ON YOUR BLOCK")
         by_year_hpd = {}
@@ -8830,10 +8830,10 @@ def building_context(bbl: BBL, ctx: Context) -> ToolResult:
     """What was happening when a NYC building was born — famous building contemporaries, citywide construction activity that year, and historical era context. Differs from building_story (narrative history) and building_profile (quick stats). Use this for historical/architectural curiosity about a building's era. Parameters: bbl (10 digits). Example: 1000670001. For the building's full life narrative, use building_story(bbl)."""
 
     t0 = time.time()
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
 
     # Look up building
-    cols_b, rows_b = _safe_query(db, STORY_PLUTO_SQL, [bbl])
+    cols_b, rows_b = _safe_query(pool, STORY_PLUTO_SQL, [bbl])
     if not rows_b:
         raise ToolError(f"No building found for BBL {bbl} in PLUTO.")
 
@@ -8883,7 +8883,7 @@ def building_context(bbl: BBL, ctx: Context) -> ToolResult:
         lines.append(f"  {closest[1]} ({closest[0]}) — built {diff} years {direction}")
 
     # --- How many buildings that year ---
-    cols_c, rows_c = _safe_query(db, CONTEXT_ERA_BUILDINGS_SQL, [year])
+    cols_c, rows_c = _safe_query(pool, CONTEXT_ERA_BUILDINGS_SQL, [year])
     if rows_c:
         c = dict(zip(cols_c, rows_c[0]))
         total = int(c.get("total_same_year") or 0)
@@ -8892,7 +8892,7 @@ def building_context(bbl: BBL, ctx: Context) -> ToolResult:
         lines.append(f"  {total:,} buildings were constructed across {zips} ZIP codes")
 
     # Borough breakdown
-    cols_boro, rows_boro = _safe_query(db, CONTEXT_ERA_BOROUGH_SQL, [year])
+    cols_boro, rows_boro = _safe_query(pool, CONTEXT_ERA_BOROUGH_SQL, [year])
     if rows_boro:
         lines.append(f"  By borough:")
         boro_names = {"MN": "Manhattan", "BK": "Brooklyn", "BX": "Bronx", "QN": "Queens", "SI": "Staten Island"}
@@ -8904,7 +8904,7 @@ def building_context(bbl: BBL, ctx: Context) -> ToolResult:
     # --- The decade ---
     decade_start = (year // 10) * 10
     decade_end = decade_start + 9
-    cols_d, rows_d = _safe_query(db, CONTEXT_DECADE_SQL, [decade_start, decade_end])
+    cols_d, rows_d = _safe_query(pool, CONTEXT_DECADE_SQL, [decade_start, decade_end])
     if rows_d:
         d = dict(zip(cols_d, rows_d[0]))
         total_decade = int(d.get("total_decade") or 0)
@@ -8915,7 +8915,7 @@ def building_context(bbl: BBL, ctx: Context) -> ToolResult:
 
     # --- Your neighborhood at the time ---
     if zipcode:
-        cols_z, rows_z = _safe_query(db, CONTEXT_ZIP_ERA_SQL, [year, zipcode])
+        cols_z, rows_z = _safe_query(pool, CONTEXT_ZIP_ERA_SQL, [year, zipcode])
         if rows_z:
             z = dict(zip(cols_z, rows_z[0]))
             total_zip = int(z.get("buildings_in_zip") or 0)
@@ -8989,12 +8989,12 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
     if not re.match(r"^\d{10}$", bbl):
         raise ToolError("BBL must be exactly 10 digits")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     # Traverse: Building <- Owns - Owner - Owns -> Building -> HasViolation -> Violation
     # Note: DuckPGQ MATCH does not support parameterized queries — bbl is regex-validated above
-    cols, rows = _execute(db, f"""
+    cols, rows = _execute(pool, f"""
         FROM GRAPH_TABLE (nyc_housing
             MATCH (b1:Building WHERE b1.bbl = '{bbl}')<-[o1:Owns]-(owner:Owner)-[o2:Owns]->(b2:Building)
             COLUMNS (
@@ -9019,7 +9019,7 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
 
     # Get violation aggregates for the portfolio
     placeholders = ", ".join(["?"] * len(portfolio_bbls))
-    v_cols, v_rows = _execute(db, f"""
+    v_cols, v_rows = _execute(pool, f"""
         SELECT
             bbl, COUNT(*) AS total_violations,
             COUNT(*) FILTER (WHERE severity = 'C') AS class_c,
@@ -9033,7 +9033,7 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
     viol_map = {r[0]: {"total": r[1], "class_c": r[2], "class_b": r[3], "open": r[4]} for r in v_rows}
 
     # Get building flags (AEP, litigations, tax liens, DOB violations)
-    f_cols, f_rows = _execute(db, f"""
+    f_cols, f_rows = _execute(pool, f"""
         SELECT bbl, is_aep, litigation_count, harassment_findings, lien_count, dob_violation_count
         FROM main.graph_building_flags
         WHERE bbl IN ({placeholders})
@@ -9043,7 +9043,7 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
                        "liens": r[4], "dob": r[5]} for r in f_rows}
 
     # Get ACRIS sale data
-    s_cols, s_rows = _execute(db, f"""
+    s_cols, s_rows = _execute(pool, f"""
         SELECT bbl, last_sale_price, last_sale_date
         FROM main.graph_acris_sales
         WHERE bbl IN ({placeholders})
@@ -9051,7 +9051,7 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
     sale_map = {r[0]: {"price": r[1], "date": r[2]} for r in s_rows}
 
     # Get rent stabilization data
-    rs_cols, rs_rows = _execute(db, f"""
+    rs_cols, rs_rows = _execute(pool, f"""
         SELECT bbl, earliest_stab_units, latest_stab_units
         FROM main.graph_rent_stabilization
         WHERE bbl IN ({placeholders})
@@ -9059,7 +9059,7 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
     stab_map = {r[0]: {"earliest": r[1], "latest": r[2]} for r in rs_rows}
 
     # Get NYS corp contacts for this owner
-    corp_cols, corp_rows = _execute(db, """
+    corp_cols, corp_rows = _execute(pool, """
         SELECT dos_id, current_entity_name, dos_process_name,
                dos_process_address_1, dos_process_city,
                registered_agent_name, chairman_name
@@ -9068,7 +9068,7 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
     """, [owner_id])
 
     # Get businesses at portfolio buildings
-    biz_cols, biz_rows = _execute(db, f"""
+    biz_cols, biz_rows = _execute(pool, f"""
         SELECT bbl, business_name, business_category, license_status
         FROM main.graph_business_at_building
         WHERE bbl IN ({placeholders})
@@ -9078,7 +9078,7 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
         biz_map.setdefault(r[0], []).append({"name": r[1], "category": r[2], "status": r[3]})
 
     # Get ACRIS ownership chain (recent buyers/sellers)
-    chain_cols, chain_rows = _execute(db, f"""
+    chain_cols, chain_rows = _execute(pool, f"""
         SELECT bbl, party_name, role, amount, doc_date
         FROM main.graph_acris_chain
         WHERE bbl IN ({placeholders})
@@ -9087,7 +9087,7 @@ def landlord_network(bbl: BBL, ctx: Context) -> ToolResult:
 
     # Get eviction records for portfolio buildings
     try:
-        evict_cols, evict_rows = _execute(db, f"""
+        evict_cols, evict_rows = _execute(pool, f"""
             SELECT bbl, COUNT(*) AS eviction_count,
                    MAX(executed_date) AS latest_eviction
             FROM main.graph_eviction_petitioners
@@ -9251,12 +9251,12 @@ def ownership_graph(bbl: BBL, depth: Annotated[int, Field(description="Hops thro
         raise ToolError("BBL must be exactly 10 digits")
     depth = min(max(depth, 1), 6)  # clamp 1-6
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     # Use building network graph (same vertex type → supports shortest path properly)
     # DuckPGQ MATCH patterns don't support ? params — bbl is regex-validated above
-    cols, rows = _execute(db, f"""
+    cols, rows = _execute(pool, f"""
         FROM GRAPH_TABLE (nyc_building_network
             MATCH p = ANY SHORTEST
                 (start:Building WHERE start.bbl = '{bbl}')
@@ -9298,7 +9298,7 @@ def ownership_graph(bbl: BBL, depth: Annotated[int, Field(description="Hops thro
 def ownership_clusters(ctx: Context, min_buildings: Annotated[int, Field(description="Min buildings per cluster. Default: 5", ge=2, le=100)] = 5, borough: Annotated[str, Field(description="Borough filter. Empty for all boroughs")] = "") -> ToolResult:
     """Find hidden ownership networks using Weakly Connected Components (WCC) across ALL NYC buildings — groups of buildings linked through shared landlords, even across different corporate names. Differs from ownership_graph (BFS from one BBL) and ownership_cliques (clustering coefficient). Use this to discover large ownership empires. Parameters: min_buildings (default 5), borough (optional filter). For worst landlords ranked by violations, use worst_landlords()."""
     _require_graph(ctx)
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     min_buildings = min(max(min_buildings, 2), 100)
 
@@ -9307,7 +9307,7 @@ def ownership_clusters(ctx: Context, min_buildings: Annotated[int, Field(descrip
     if boro_code.lower() in boro_map:
         boro_code = boro_map[boro_code.lower()]
 
-    cols, rows = _execute(db, f"""
+    cols, rows = _execute(pool, f"""
         WITH wcc AS (
             SELECT * FROM weakly_connected_component(nyc_building_network, Building, SharedOwner)
         ),
@@ -9378,11 +9378,11 @@ def ownership_clusters(ctx: Context, min_buildings: Annotated[int, Field(descrip
 def ownership_cliques(ctx: Context, top_n: Annotated[int, Field(description="Number of results. Default: 20", ge=1, le=100)] = 20) -> ToolResult:
     """Find buildings at the center of tight-knit ownership cliques using Local Clustering Coefficient (LCC). High LCC means a building's co-owned neighbors are also co-owned with each other — indicating concentrated ownership (potential shell company networks or portfolio landlords). Differs from ownership_graph (BFS from one BBL) and ownership_clusters (WCC across all buildings). Parameters: top_n (default 20). For shell company detection, use shell_detector()."""
     _require_graph(ctx)
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     top_n = min(max(top_n, 1), 100)
 
-    cols, rows = _execute(db, f"""
+    cols, rows = _execute(pool, f"""
         WITH lcc AS (
             SELECT * FROM local_clustering_coefficient(nyc_building_network, Building, SharedOwner)
         )
@@ -9429,7 +9429,7 @@ def ownership_cliques(ctx: Context, top_n: Annotated[int, Field(description="Num
 def worst_landlords(ctx: Context, borough: Annotated[str, Field(description="Borough name or code 1-5. Empty for all boroughs")] = "", top_n: Annotated[int, Field(description="Number of results. Default: 25", ge=1, le=100)] = 25) -> ToolResult:
     """Rank the worst landlords in NYC by a composite slumlord score across violations, litigations, harassment findings, AEP buildings, tax liens, evictions, and complaints. Uses DuckPGQ ownership graph to aggregate across entire portfolios. Use this for 'who are the worst landlords' questions. Parameters: borough (optional filter), top_n (default 25). For a specific landlord's portfolio, use landlord_watchdog(bbl) or landlord_network(bbl)."""
     _require_graph(ctx)
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     # Map borough names to codes
@@ -9440,7 +9440,7 @@ def worst_landlords(ctx: Context, borough: Annotated[str, Field(description="Bor
     borough_filter = f"AND b.boroid = '{boro_code}'" if boro_code in ("1", "2", "3", "4", "5") else ""
     top_n = min(max(top_n, 1), 100)
 
-    cols, rows = _execute(db, f"""
+    cols, rows = _execute(pool, f"""
         WITH portfolio AS (
             SELECT o.owner_id,
                    COUNT(DISTINCT o.bbl) AS buildings,
@@ -9560,14 +9560,14 @@ def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
     if len(entity_name.strip()) < 3:
         raise ToolError("Entity name must be at least 3 characters")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     search_term = entity_name.strip().upper()
 
     extra_names = _vector_expand_names(ctx, search_term)
 
     # 1. NYS corporations — registered agents, chairmen, process contacts
-    corp_cols, corp_rows = _execute(db, """
+    corp_cols, corp_rows = _execute(pool, """
         SELECT current_entity_name, entity_type, initial_dos_filing_date,
                dos_process_name, dos_process_address_1, dos_process_city, dos_process_state,
                registered_agent_name, registered_agent_address_1,
@@ -9578,7 +9578,7 @@ def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
     """, [f"%{search_term}%"])
 
     # 2. ACRIS parties — buyers/sellers on property transactions
-    acris_cols, acris_rows = _execute(db, """
+    acris_cols, acris_rows = _execute(pool, """
         SELECT p.name, p.party_type, p.address_1, p.city, p.state, p.zip,
                m.doc_type, TRY_CAST(m.document_amt AS DOUBLE) AS amount,
                TRY_CAST(m.document_date AS DATE) AS doc_date,
@@ -9591,7 +9591,7 @@ def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
     """, [f"%{search_term}%"])
 
     # 3. HPD registration contacts — who's registered as owner
-    hpd_cols, hpd_rows = _execute(db, """
+    hpd_cols, hpd_rows = _execute(pool, """
         SELECT registrationid, type, corporationname, firstname, lastname,
                businesshousenumber, businessstreetname, businesszip
         FROM lake.housing.hpd_registration_contacts
@@ -9659,7 +9659,7 @@ def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
     )
 
 
-def _resolve_name_variants(db, name: str) -> list[tuple[str, str]]:
+def _resolve_name_variants(pool, name: str) -> list[tuple[str, str]]:
     """Look up Splink resolved_entities to find all name variants in the same cluster.
 
     Parses the input name into words and tries both word orderings as
@@ -9687,14 +9687,14 @@ def _resolve_name_variants(db, name: str) -> list[tuple[str, str]]:
         cluster_ids = set()
         for last, first in candidates:
             if first:
-                cols, rows = _execute(db, """
+                cols, rows = _execute(pool, """
                     SELECT DISTINCT cluster_id
                     FROM lake.federal.resolved_entities
                     WHERE last_name = ? AND first_name = ?
                     LIMIT 5
                 """, [last, first])
             else:
-                cols, rows = _execute(db, """
+                cols, rows = _execute(pool, """
                     SELECT DISTINCT cluster_id
                     FROM lake.federal.resolved_entities
                     WHERE last_name = ?
@@ -9709,7 +9709,7 @@ def _resolve_name_variants(db, name: str) -> list[tuple[str, str]]:
 
         # Get all name variants in these clusters
         placeholders = ", ".join(["?"] * len(cluster_ids))
-        cols, rows = _execute(db, f"""
+        cols, rows = _execute(pool, f"""
             SELECT DISTINCT last_name, first_name
             FROM lake.federal.resolved_entities
             WHERE cluster_id IN ({placeholders})
@@ -9730,7 +9730,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     if len(name.strip()) < 3:
         raise ToolError("Name must be at least 3 characters")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     search = name.strip().upper()
     # Split into words for cross-column matching (handles "BARTON PERLBINDER"
@@ -9740,10 +9740,10 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     extra_names = _vector_expand_names(ctx, search)
 
     # Splink probabilistic name resolution — find all name variants in the same cluster
-    name_variants = _resolve_name_variants(db, name)
+    name_variants = _resolve_name_variants(pool, name)
 
     # 1. NYS corps — find ALL entities this person/name is associated with
-    corp_cols, corp_rows = _execute(db, """
+    corp_cols, corp_rows = _execute(pool, """
         SELECT current_entity_name, entity_type, initial_dos_filing_date,
                dos_process_name, registered_agent_name, chairman_name, county
         FROM lake.business.nys_corporations
@@ -9755,7 +9755,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     """, [f"%{search}%"] * 4)
 
     # 2. Business licenses
-    biz_cols, biz_rows = _execute(db, """
+    biz_cols, biz_rows = _execute(pool, """
         SELECT business_name, dba_trade_name, business_category,
                license_type, license_status, bbl,
                address_building || ' ' || address_street_name AS address,
@@ -9766,7 +9766,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     """, [f"%{search}%"] * 2)
 
     # 3. Restaurant inspections
-    rest_cols, rest_rows = _execute(db, """
+    rest_cols, rest_rows = _execute(pool, """
         SELECT DISTINCT dba, cuisine_description, building || ' ' || street AS address,
                boro, zipcode, grade, bbl
         FROM lake.health.restaurant_inspections
@@ -9798,7 +9798,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             LIMIT 20
         """
         camp_params = [f"%{search}%"] * 2
-    camp_cols, camp_rows = _execute(db, camp_sql, camp_params)
+    camp_cols, camp_rows = _execute(pool, camp_sql, camp_params)
 
     # 5. OATH hearings — search both first and last name with word splitting
     if len(words) > 1:
@@ -9845,10 +9845,10 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             LIMIT 20
         """
         oath_params = [f"%{search}%"] * 2
-    oath_cols, oath_rows = _execute(db, oath_sql, oath_params)
+    oath_cols, oath_rows = _execute(pool, oath_sql, oath_params)
 
     # 6. ACRIS property transactions — who's buying/selling real estate
-    acris_cols, acris_rows = _execute(db, """
+    acris_cols, acris_rows = _execute(pool, """
         SELECT p.name AS party_name, p.party_type,
                m.doc_type, TRY_CAST(m.document_amt AS DOUBLE) AS amount,
                m.document_date,
@@ -9863,7 +9863,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     """, [f"%{search}%"])
 
     # 7. PLUTO — property portfolio by owner name (assessed value, zoning, units)
-    pluto_cols, pluto_rows = _execute(db, """
+    pluto_cols, pluto_rows = _execute(pool, """
         SELECT ownername, bbl, address, zonedist1,
                TRY_CAST(assesstot AS DOUBLE) AS assessed_total,
                TRY_CAST(unitsres AS INTEGER) AS res_units,
@@ -9877,7 +9877,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     """, [f"%{search}%"])
 
     # 8. Campaign expenditures — where politicians spend (vendors, consultants)
-    expend_cols, expend_rows = _execute(db, """
+    expend_cols, expend_rows = _execute(pool, """
         SELECT name, candlast || ', ' || candfirst AS candidate,
                TRY_CAST(amnt AS DOUBLE) AS amount,
                purpose, explain, date, city
@@ -9918,10 +9918,10 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             LIMIT 15
         """
         dob_params = [f"%{search}%"] * 2
-    dob_cols, dob_rows = _execute(db, dob_sql, dob_params)
+    dob_cols, dob_rows = _execute(pool, dob_sql, dob_params)
 
     # 10. DCWP consumer protection charges
-    dcwp_cols, dcwp_rows = _execute(db, """
+    dcwp_cols, dcwp_rows = _execute(pool, """
         SELECT business_name, dba_trade_name, business_category,
                charge, violation_date, outcome, charge_count
         FROM lake.business.dcwp_charges
@@ -9958,7 +9958,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             LIMIT 10
         """
         sbs_params = [f"%{search}%"] * 3
-    sbs_cols, sbs_rows = _execute(db, sbs_sql, sbs_params)
+    sbs_cols, sbs_rows = _execute(pool, sbs_sql, sbs_params)
 
     # 12. Citywide payroll — city employees
     if len(words) > 1:
@@ -9985,11 +9985,11 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             LIMIT 10
         """
         payroll_params = [f"%{search}%"]
-    payroll_cols, payroll_rows = _execute(db, payroll_sql, payroll_params)
+    payroll_cols, payroll_rows = _execute(pool, payroll_sql, payroll_params)
 
     # 13. DOB Application Owners — who's on permit applications (different from HPD owner)
     try:
-        dob_app_cols, dob_app_rows = _execute(db, """
+        dob_app_cols, dob_app_rows = _execute(pool, """
             SELECT owner_name, business_name,
                    owner_address, owner_city, owner_state, owner_zip
             FROM main.graph_dob_owners
@@ -10001,7 +10001,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
 
     # 14. Doing Business disclosures — city contractor principals
     try:
-        doing_biz_cols, doing_biz_rows = _execute(db, """
+        doing_biz_cols, doing_biz_rows = _execute(pool, """
             SELECT entity_name, person_name, title, transaction_type,
                    entity_address, entity_city, entity_state
             FROM main.graph_doing_business
@@ -10013,7 +10013,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
 
     # 15. EPA ECHO facilities — environmental compliance
     try:
-        epa_cols, epa_rows = _execute(db, """
+        epa_cols, epa_rows = _execute(pool, """
             SELECT facility_name, address, city, zip, county,
                    current_violation, total_penalties, inspection_count,
                    formal_action_count, last_penalty_amount
@@ -10026,7 +10026,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
 
     # 17. NYS Attorney Registrations — bar admissions
     try:
-        atty_cols, atty_rows = _execute(db, """
+        atty_cols, atty_rows = _execute(pool, """
             SELECT first_name, last_name, registration_number, law_school,
                    company_name, status, year_admitted, city, state
             FROM lake.financial.nys_attorney_registrations
@@ -10038,7 +10038,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
 
     # 18. ACRIS Personal Property (UCC filings)
     try:
-        pp_cols, pp_rows = _execute(db, """
+        pp_cols, pp_rows = _execute(pool, """
             SELECT name, party_type, document_id, address_1, city, state, zip
             FROM lake.business.acris_pp_parties
             WHERE UPPER(name) LIKE ?
@@ -10067,13 +10067,13 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
                 LIMIT 20
             """
             civil_params = [f"%{search}%"]
-        civil_cols, civil_rows = _execute(db, civil_sql, civil_params)
+        civil_cols, civil_rows = _execute(pool, civil_sql, civil_params)
     except Exception:
         civil_cols, civil_rows = [], []
 
     # 20. NYS Lobbyist Registration
     try:
-        lobby_cols, lobby_rows = _execute(db, """
+        lobby_cols, lobby_rows = _execute(pool, """
             SELECT principal_lobbyist_name, contractual_client_name,
                    lobbying_subjects, compensation_amount, reporting_year,
                    level_of_government, individual_lobbyist_s
@@ -10108,13 +10108,13 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
                 LIMIT 20
             """
             death_params = [f"%{search}%"]
-        death_cols, death_rows = _execute(db, death_sql, death_params)
+        death_cols, death_rows = _execute(pool, death_sql, death_params)
     except Exception:
         death_cols, death_rows = [], []
 
     # 22. NYS Real Estate Brokers
     try:
-        broker_cols, broker_rows = _execute(db, """
+        broker_cols, broker_rows = _execute(pool, """
             SELECT license_holder_name, business_name, license_type,
                    license_number, license_expiration_date, county,
                    business_city, business_state
@@ -10127,7 +10127,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
 
     # 23. NYS Notaries
     try:
-        notary_cols, notary_rows = _execute(db, """
+        notary_cols, notary_rows = _execute(pool, """
             SELECT commission_holder_name, commissioned_county,
                    commission_type_traditional_or_electronic,
                    term_issue_date, term_expiration_date,
@@ -10348,7 +10348,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
         else:
             mar_where = "UPPER(groom_surname) = ? OR UPPER(bride_surname) = ?"
             mar_params = [search, search]
-        marriage_cols, marriage_rows = _execute(db, f"""
+        marriage_cols, marriage_rows = _execute(pool, f"""
             SELECT groom_first_name, groom_middle_name, groom_surname,
                    bride_first_name, bride_middle_name, bride_surname,
                    LICENSE_BOROUGH_ID AS license_borough, LICENSE_YEAR AS license_year
@@ -10364,7 +10364,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     hist_marriage_rows = []
     try:
         if len(words) > 1:
-            _, hist_marriage_rows = _execute(db, """
+            _, hist_marriage_rows = _execute(pool, """
                 SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
                 FROM lake.city_government.marriage_certificates_1866_1937
                 WHERE (UPPER(last_name) = ? AND UPPER(first_name) LIKE ?)
@@ -10373,7 +10373,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
                 LIMIT 10
             """, [words[-1], words[0] + '%', words[0], words[-1] + '%'])
         else:
-            _, hist_marriage_rows = _execute(db, """
+            _, hist_marriage_rows = _execute(pool, """
                 SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
                 FROM lake.city_government.marriage_certificates_1866_1937
                 WHERE UPPER(last_name) = ?
@@ -10404,7 +10404,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             variant_last = name_variants[0][0]
             variant_first = name_variants[0][1]
             # Use the first variant to find cluster_ids, then get all records
-            _, cid_rows = _execute(db, """
+            _, cid_rows = _execute(pool, """
                 SELECT DISTINCT cluster_id
                 FROM lake.federal.resolved_entities
                 WHERE last_name = ? AND first_name = ?
@@ -10414,7 +10414,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
 
             if cluster_ids:
                 placeholders = ", ".join(["?"] * len(cluster_ids))
-                splink_cols, splink_cluster_rows = _execute(db, f"""
+                splink_cols, splink_cluster_rows = _execute(pool, f"""
                     SELECT source_table, last_name, first_name,
                            city, zip, cluster_id
                     FROM lake.federal.resolved_entities
@@ -10452,7 +10452,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             phonetic_sql, phonetic_params = phonetic_search_sql(
                 first_name=None, last_name=name, min_score=0.7, limit=20
             )
-        ph_cols, ph_rows = _execute(db, phonetic_sql, phonetic_params)
+        ph_cols, ph_rows = _execute(pool, phonetic_sql, phonetic_params)
         phonetic_matches = [dict(zip(ph_cols, r)) for r in ph_rows]
     except Exception:
         pass  # Phonetic index may not exist yet
@@ -10554,12 +10554,12 @@ def fuzzy_entity_search(
         ORDER BY _distance ASC
     """
 
-    with _db_lock:
+    pool = ctx.lifespan_context["pool"]
+    with pool.cursor() as cur:
         try:
-            db = ctx.lifespan_context["db"]
-            cur = db.execute(sql)
-            cols = [d[0] for d in cur.description]
-            rows = cur.fetchall()
+            result = cur.execute(sql)
+            cols = [d[0] for d in result.description]
+            rows = result.fetchall()
         except Exception as e:
             raise ToolError(f"Fuzzy entity search failed: {e}")
 
@@ -10597,7 +10597,7 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
     if len(surname.strip()) < 2:
         raise ToolError("Surname must be at least 2 characters")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     search_last = surname.strip().upper()
     search_first = first_name.strip().upper() if first_name else ""
@@ -10614,7 +10614,7 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
             first_col="groom_first_name", last_col="groom_surname",
             extra_cols="bride_first_name, bride_surname, LICENSE_BOROUGH_ID, LICENSE_YEAR",
             limit=30)
-        _, ph_rows = _execute(db, ph_sql, ph_params)
+        _, ph_rows = _execute(pool, ph_sql, ph_params)
         if ph_rows:
             phonetic_results = list(ph_rows)
     except Exception:
@@ -10622,7 +10622,7 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
 
     # Source 1: Marriage index parquet (1950-2017)
     if search_first:
-        cols, rows = _execute(db, """
+        cols, rows = _execute(pool, """
             SELECT groom_first_name, groom_middle_name, groom_surname,
                    bride_first_name, bride_middle_name, bride_surname,
                    LICENSE_BOROUGH_ID AS license_borough, LICENSE_YEAR AS license_year
@@ -10633,7 +10633,7 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
             LIMIT 50
         """, [search_last, f"{search_first}%", search_last, f"{search_first}%"])
     else:
-        cols, rows = _execute(db, """
+        cols, rows = _execute(pool, """
             SELECT groom_first_name, groom_middle_name, groom_surname,
                    bride_first_name, bride_middle_name, bride_surname,
                    LICENSE_BOROUGH_ID AS license_borough, LICENSE_YEAR AS license_year
@@ -10648,7 +10648,7 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
     # These are individual records (one per person), not paired bride+groom
     try:
         if search_first:
-            _, hist_rows = _execute(db, """
+            _, hist_rows = _execute(pool, """
                 SELECT first_name, NULL AS middle_name, last_name,
                        NULL AS spouse_first, NULL AS spouse_middle, NULL AS spouse_last,
                        county, year
@@ -10658,7 +10658,7 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
                 LIMIT 30
             """, [search_last, f"{search_first}%"])
         else:
-            _, hist_rows = _execute(db, """
+            _, hist_rows = _execute(pool, """
                 SELECT first_name, NULL AS middle_name, last_name,
                        NULL AS spouse_first, NULL AS spouse_middle, NULL AS spouse_last,
                        county, year
@@ -10730,14 +10730,14 @@ def property_history(bbl: BBL, ctx: Context) -> ToolResult:
     if not re.match(r"^\d{10}$", bbl):
         raise ToolError("BBL must be exactly 10 digits")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     borough = bbl[0]
     block = bbl[1:6].lstrip("0") or "0"
     lot = bbl[6:10].lstrip("0") or "0"
 
     # Get all documents for this BBL via acris_legals, joined to master + parties
-    cols, rows = _execute(db, """
+    cols, rows = _execute(pool, """
         WITH docs AS (
             SELECT DISTINCT m.document_id, m.doc_type,
                    TRY_CAST(m.document_amt AS DOUBLE) AS amount,
@@ -10875,14 +10875,14 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
     if not re.match(r"^\d{10}$", bbl):
         raise ToolError("BBL must be exactly 10 digits")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     borough = bbl[0]
     block = bbl[1:6].lstrip("0") or "0"
     lot = bbl[6:10].lstrip("0") or "0"
 
     # 1. HPD violations
-    hpd_cols, hpd_rows = _execute(db, """
+    hpd_cols, hpd_rows = _execute(pool, """
         SELECT
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE violationstatus = 'Open') AS open_v,
@@ -10897,7 +10897,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
     hpd = dict(zip(hpd_cols, hpd_rows[0])) if hpd_rows else {}
 
     # 2. DOB ECB violations
-    dob_cols, dob_rows = _execute(db, """
+    dob_cols, dob_rows = _execute(pool, """
         SELECT
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE UPPER(violation_type) LIKE '%HAZARD%'
@@ -10912,7 +10912,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
     dob = dict(zip(dob_cols, dob_rows[0])) if dob_rows else {}
 
     # 3. FDNY violations
-    fdny_cols, fdny_rows = _execute(db, """
+    fdny_cols, fdny_rows = _execute(pool, """
         SELECT
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE UPPER(action) NOT IN ('CLOSED', 'DISMISSED')) AS open_v,
@@ -10924,7 +10924,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
     fdny = dict(zip(fdny_cols, fdny_rows[0])) if fdny_rows else {}
 
     # 4. OATH hearings (enforcement hub — DOB, DOHMH, FDNY, DCWP, etc.)
-    oath_cols, oath_rows = _execute(db, """
+    oath_cols, oath_rows = _execute(pool, """
         SELECT
             issuing_agency,
             COUNT(*) AS total,
@@ -10941,7 +10941,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
     """, [block, lot])
 
     # 5. Restaurant inspections (if applicable)
-    rest_cols, rest_rows = _execute(db, """
+    rest_cols, rest_rows = _execute(pool, """
         SELECT dba, cuisine_description, grade,
                inspection_date, violation_code, violation_description,
                critical_flag, score
@@ -10952,7 +10952,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
     """, [bbl])
 
     # 6. HPD complaints summary
-    complaint_cols, complaint_rows = _execute(db, """
+    complaint_cols, complaint_rows = _execute(pool, """
         SELECT
             COUNT(DISTINCT complaint_id) AS total_complaints,
             COUNT(DISTINCT complaint_id) FILTER (WHERE UPPER(complaint_status) = 'OPEN') AS open_complaints,
@@ -10964,7 +10964,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
 
     # 7. DOB Complaints (construction complaints)
     try:
-        dob_comp_cols, dob_comp_rows = _execute(db, """
+        dob_comp_cols, dob_comp_rows = _execute(pool, """
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE UPPER(status) = 'ACTIVE') AS active,
@@ -10984,7 +10984,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
 
     # 8. DOB Safety Facades
     try:
-        facade_cols, facade_rows = _execute(db, """
+        facade_cols, facade_rows = _execute(pool, """
             SELECT current_status, filing_status, cycle,
                    owner_name, exterior_wall_type_sx, comments
             FROM lake.housing.dob_safety_facades
@@ -10997,7 +10997,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
 
     # 9. DOB Safety Boilers
     try:
-        boiler_cols, boiler_rows = _execute(db, """
+        boiler_cols, boiler_rows = _execute(pool, """
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE UPPER(defects_exist) = 'YES') AS with_defects,
@@ -11016,7 +11016,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
 
     # 10. SRO Buildings
     try:
-        sro_cols, sro_rows = _execute(db, """
+        sro_cols, sro_rows = _execute(pool, """
             SELECT buildingid, managementprogram, legalclassa, legalclassb,
                    dobbuildingclass, legalstories
             FROM lake.housing.sro_buildings
@@ -11156,7 +11156,7 @@ def enforcement_web(bbl: BBL, ctx: Context) -> ToolResult:
 @mcp.tool(annotations=READONLY, tags={"finance"})
 def flipper_detector(ctx: Context, borough: Annotated[str, Field(description="Borough name or code 1-5. Empty for all boroughs")] = "", months: Annotated[int, Field(description="Max months between buy and sell. Default: 24", ge=1, le=120)] = 24, min_profit_pct: Annotated[int, Field(description="Min price increase percentage. Default: 20", ge=1, le=1000)] = 20) -> ToolResult:
     """Detect property flips — investors who buy and resell NYC properties for profit within a short window. Finds house flipping, investor speculation, and profit patterns. Cross-references with DOB permits (renovation) and tax lien sales (distressed acquisition). Use this for flip detection, investor speculation, or profit analysis questions. Parameters: borough (optional), months (max hold period, default 24), min_profit_pct (default 20). For a specific property's transaction history, use property_history(bbl)."""
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     boro_map = {"manhattan": "1", "bronx": "2", "brooklyn": "3", "queens": "4", "staten island": "5"}
@@ -11168,7 +11168,7 @@ def flipper_detector(ctx: Context, borough: Annotated[str, Field(description="Bo
     months = min(max(months, 3), 120)
     min_profit_pct = min(max(min_profit_pct, 5), 500)
 
-    cols, rows = _execute(db, f"""
+    cols, rows = _execute(pool, f"""
         WITH deed_sales AS (
             SELECT
                 (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
@@ -11313,14 +11313,14 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
     if len(name.strip()) < 3:
         raise ToolError("Name must be at least 3 characters")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     search = name.strip().upper()
 
     extra_names = _vector_expand_names(ctx, search)
 
     # Find matching entities
-    ent_cols, ent_rows = _execute(db, """
+    ent_cols, ent_rows = _execute(pool, """
         SELECT entity_name, tx_count, property_count, as_seller, as_buyer, total_amount
         FROM main.graph_tx_entities
         WHERE entity_name LIKE ?
@@ -11335,7 +11335,7 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
     primary_name = primary[0]
 
     # Get their properties
-    prop_cols, prop_rows = _execute(db, """
+    prop_cols, prop_rows = _execute(pool, """
         SELECT bbl, role, amount, doc_date, document_id
         FROM main.graph_tx_edges
         WHERE entity_name = ?
@@ -11345,7 +11345,7 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
     # Graph traversal: co-transactors via DuckPGQ
     # DuckPGQ MATCH patterns don't support ? params — primary_name is from DB lookup
     try:
-        graph_cols, graph_rows = _execute(db, f"""
+        graph_cols, graph_rows = _execute(pool, f"""
             FROM GRAPH_TABLE (nyc_transaction_network
                 MATCH (start:TxEntity WHERE start.entity_name = '{primary_name.replace("'", "''")}')-[e:SharedTransaction]-{{1,2}}(target:TxEntity)
                 COLUMNS (
@@ -11363,7 +11363,7 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
         """)
     except Exception:
         # Fallback to direct SQL if graph traversal fails
-        graph_cols, graph_rows = _execute(db, """
+        graph_cols, graph_rows = _execute(pool, """
             SELECT entity2 AS connected_entity, e.shared_docs AS tx_count,
                    t.property_count, t.as_seller, t.as_buyer, t.total_amount, NULL
             FROM main.graph_tx_shared e
@@ -11435,14 +11435,14 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
     if len(entity_name.strip()) < 3:
         raise ToolError("Name must be at least 3 characters")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     search = entity_name.strip().upper()
 
     extra_names = _vector_expand_names(ctx, search)
 
     # Search corps by name
-    corp_cols, corp_rows = _execute(db, """
+    corp_cols, corp_rows = _execute(pool, """
         SELECT dos_id, current_entity_name, entity_type, county,
                dos_process_name, chairman_name, initial_dos_filing_date
         FROM main.graph_corps
@@ -11454,7 +11454,7 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
     """, [f"%{search}%"] * 3)
 
     # Search people
-    people_cols, people_rows = _execute(db, """
+    people_cols, people_rows = _execute(pool, """
         SELECT person_name, corp_count, primary_address
         FROM main.graph_corp_people
         WHERE person_name LIKE ?
@@ -11468,7 +11468,7 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
         primary_dos = corp_rows[0][0]
         # DuckPGQ MATCH patterns don't support ? params — primary_dos is from DB lookup
         try:
-            gc_cols, gc_rows = _execute(db, f"""
+            gc_cols, gc_rows = _execute(pool, f"""
                 FROM GRAPH_TABLE (nyc_corporate_web
                     MATCH (start:Corp WHERE start.dos_id = '{primary_dos}')-[e:SharedOfficer]-{{1,2}}(target:Corp)
                     COLUMNS (
@@ -11483,7 +11483,7 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
             connected_corps = gc_rows
         except Exception:
             # Fallback to SQL
-            gc_cols, gc_rows = _execute(db, """
+            gc_cols, gc_rows = _execute(pool, """
                 SELECT c.dos_id, c.current_entity_name, c.entity_type, c.chairman_name
                 FROM main.graph_corp_shared_officer s
                 JOIN main.graph_corps c ON s.corp2 = c.dos_id
@@ -11501,7 +11501,7 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
     person_corps = []
     if people_rows:
         primary_person = people_rows[0][0]
-        pc_cols, pc_rows = _execute(db, """
+        pc_cols, pc_rows = _execute(pool, """
             SELECT c.dos_id, c.current_entity_name, c.entity_type, c.chairman_name
             FROM main.graph_corp_officer_edges e
             JOIN main.graph_corps c ON e.dos_id = c.dos_id
@@ -11516,7 +11516,7 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
     corp_names = [r[1] for r in corp_rows] + [r[1] for r in connected_corps]
     if corp_names:
         placeholders = ", ".join(["?"] * min(len(corp_names), 50))
-        hpd_cols, hpd_rows = _execute(db, f"""
+        hpd_cols, hpd_rows = _execute(pool, f"""
             SELECT owner_name, owner_id
             FROM main.graph_owners
             WHERE UPPER(owner_name) IN ({placeholders})
@@ -11585,14 +11585,14 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     if len(entity_name.strip()) < 3:
         raise ToolError("Name must be at least 3 characters")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     search = entity_name.strip().upper()
 
     extra_names = _vector_expand_names(ctx, search)
 
     # Find matching political entities
-    ent_cols, ent_rows = _execute(db, """
+    ent_cols, ent_rows = _execute(pool, """
         SELECT entity_name, roles, total_amount, total_transactions
         FROM main.graph_pol_entities
         WHERE entity_name LIKE ?
@@ -11609,7 +11609,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     # Graph traversal: connected entities via DuckPGQ
     # DuckPGQ MATCH patterns don't support ? params — primary_name is from DB lookup
     try:
-        graph_cols, graph_rows = _execute(db, f"""
+        graph_cols, graph_rows = _execute(pool, f"""
             FROM GRAPH_TABLE (nyc_influence_network
                 MATCH (start:PoliticalEntity WHERE start.entity_name = '{primary_name.replace("'", "''")}')-[e]-{{1,2}}(target:PoliticalEntity)
                 COLUMNS (
@@ -11625,7 +11625,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
         graph_cols, graph_rows = [], []
 
     # Donations: who they donate to / who donates to them
-    don_to_cols, don_to_rows = _execute(db, """
+    don_to_cols, don_to_rows = _execute(pool, """
         SELECT candidate_name, total_donated, donation_count, employer, latest_date
         FROM main.graph_pol_donations
         WHERE donor_name = ?
@@ -11633,7 +11633,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
         LIMIT 20
     """, [primary_name])
 
-    don_from_cols, don_from_rows = _execute(db, """
+    don_from_cols, don_from_rows = _execute(pool, """
         SELECT donor_name, total_donated, donation_count, employer, latest_date
         FROM main.graph_pol_donations
         WHERE candidate_name = ?
@@ -11642,7 +11642,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     """, [primary_name])
 
     # Contracts
-    con_cols, con_rows = _execute(db, """
+    con_cols, con_rows = _execute(pool, """
         SELECT agency_name, total_amount, contract_count, latest_date
         FROM main.graph_pol_contracts
         WHERE vendor_name = ?
@@ -11651,7 +11651,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     """, [primary_name])
 
     # Lobbying (as lobbyist or as client)
-    lob_cols, lob_rows = _execute(db, """
+    lob_cols, lob_rows = _execute(pool, """
         SELECT client_name, total_compensation, filing_count, industry, latest_year
         FROM main.graph_pol_lobbying
         WHERE lobbyist_name = ?
@@ -11659,7 +11659,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
         LIMIT 10
     """, [primary_name])
 
-    client_cols, client_rows = _execute(db, """
+    client_cols, client_rows = _execute(pool, """
         SELECT lobbyist_name, total_compensation, filing_count, industry, latest_year
         FROM main.graph_pol_lobbying
         WHERE client_name = ?
@@ -11668,7 +11668,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     """, [primary_name])
 
     # Pay-to-play detection: donors whose employers have city contracts
-    p2p_cols, p2p_rows = _execute(db, """
+    p2p_cols, p2p_rows = _execute(pool, """
         SELECT d.donor_name, d.candidate_name, d.total_donated, d.employer,
                c.agency_name, c.total_amount AS contract_amount
         FROM main.graph_pol_donations d
@@ -11679,7 +11679,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     """, [primary_name, primary_name])
 
     # FEC federal donations
-    fec_cols, fec_rows = _execute(db, """
+    fec_cols, fec_rows = _execute(pool, """
         SELECT committee_id, total_donated, donation_count, employer, occupation, latest_cycle
         FROM main.graph_fec_contributions
         WHERE donor_name = ?
@@ -11688,7 +11688,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     """, [primary_name])
 
     # Litigation history (if this entity is a landlord)
-    lit_cols, lit_rows = _execute(db, """
+    lit_cols, lit_rows = _execute(pool, """
         SELECT respondent_name, bbl, casetype, casestatus, case_open_date, findingofharassment
         FROM main.graph_litigation_respondents
         WHERE respondent_name = ?
@@ -11790,7 +11790,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
     if len(name_or_license.strip()) < 3:
         raise ToolError("Input must be at least 3 characters")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     search = name_or_license.strip().upper()
 
@@ -11798,12 +11798,12 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
 
     # Find contractor by license or name
     if search.isdigit():
-        c_cols, c_rows = _execute(db, """
+        c_cols, c_rows = _execute(pool, """
             SELECT license, business_name, permit_count, building_count, first_permit, last_permit
             FROM main.graph_contractors WHERE license = ?
         """, [search])
     else:
-        c_cols, c_rows = _execute(db, """
+        c_cols, c_rows = _execute(pool, """
             SELECT license, business_name, permit_count, building_count, first_permit, last_permit
             FROM main.graph_contractors WHERE business_name LIKE ?
             ORDER BY permit_count DESC LIMIT 10
@@ -11816,7 +11816,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
     license_num = primary[0]
 
     # Buildings this contractor worked on
-    bldg_cols, bldg_rows = _execute(db, """
+    bldg_cols, bldg_rows = _execute(pool, """
         SELECT pe.bbl, pe.permit_count, pe.job_type, pe.first_date, pe.last_date, pe.owner_name,
                b.housenumber || ' ' || b.streetname AS address, b.zip, b.total_units
         FROM main.graph_permit_edges pe
@@ -11831,7 +11831,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
     violation_stats = {}
     if building_bbls:
         placeholders = ", ".join(["?"] * min(len(building_bbls), 30))
-        v_cols, v_rows = _execute(db, f"""
+        v_cols, v_rows = _execute(pool, f"""
             SELECT bbl,
                    COUNT(*) AS total_violations,
                    COUNT(*) FILTER (WHERE UPPER(class) = 'C') AS class_c,
@@ -11845,7 +11845,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
     # Connected contractors via DuckPGQ
     # DuckPGQ MATCH patterns don't support ? params — license_num is from DB lookup
     try:
-        net_cols, net_rows = _execute(db, f"""
+        net_cols, net_rows = _execute(pool, f"""
             FROM GRAPH_TABLE (nyc_contractor_network
                 MATCH (start:Contractor WHERE start.license = '{license_num}')-[e:SharedBuilding]-(target:Contractor)
                 COLUMNS (
@@ -11860,7 +11860,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
             LIMIT 25
         """)
     except Exception:
-        net_cols, net_rows = _execute(db, """
+        net_cols, net_rows = _execute(pool, """
             SELECT c.license, c.business_name, c.permit_count, c.building_count, s.shared_buildings
             FROM main.graph_contractor_shared s
             JOIN main.graph_contractors c ON s.license2 = c.license
@@ -11875,7 +11875,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
         """, [license_num, license_num])
 
     # Top owners served
-    owner_cols, owner_rows = _execute(db, """
+    owner_cols, owner_rows = _execute(pool, """
         SELECT owner_name, COUNT(*) AS buildings, SUM(permit_count) AS total_permits
         FROM main.graph_permit_edges
         WHERE license = ? AND owner_name IS NOT NULL AND LENGTH(owner_name) > 3
@@ -11947,7 +11947,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
 def shell_detector(ctx: Context, borough: Annotated[str, Field(description="Borough/county filter. Empty for all")] = "", min_corps: Annotated[int, Field(description="Min corporations per cluster. Default: 5", ge=2, le=50)] = 5) -> ToolResult:
     """Detect shell company clusters connected through shared officers using DuckPGQ Weakly Connected Components. Reveals hidden LLC corporate networks — groups of companies linked through the same people, even across different corporate names. Use this for shell company detection, corporate opacity, or beneficial owner investigation. Parameters: borough (optional county filter), min_corps (default 5). For a specific entity's corporate web, use corporate_web(entity_name). For LLC piercing, use llc_piercer(entity_name)."""
     _require_graph(ctx)
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     min_corps = min(max(min_corps, 2), 50)
 
@@ -11958,7 +11958,7 @@ def shell_detector(ctx: Context, borough: Annotated[str, Field(description="Boro
         borough_params = [borough.strip()]
 
     try:
-        cols, rows = _execute(db, f"""
+        cols, rows = _execute(pool, f"""
             WITH wcc AS (
                 SELECT * FROM weakly_connected_component(nyc_corporate_web, Corp, SharedOfficer)
             ),
@@ -12032,7 +12032,7 @@ def shell_detector(ctx: Context, borough: Annotated[str, Field(description="Boro
 @mcp.tool(annotations=READONLY, tags={"investigation"})
 def person_crossref(name: NAME, ctx: Context) -> ToolResult:
     """Find every appearance of a person across the NYC data lake using Splink probabilistic matching. Matches the same person across 44 source tables even when name formats differ (e.g., 'Barton Perlbinder' matches 'PERLBINDER, BARTON M'). Use this for thorough cross-referencing. For a quick entity scan, use entity_xray(name). Returns: all source tables, record counts, addresses, cities, zips, and cluster details."""
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     search = name.strip().upper()
@@ -12053,14 +12053,14 @@ def person_crossref(name: NAME, ctx: Context) -> ToolResult:
         cluster_ids = set()
         for last, first in candidates:
             if first:
-                cols, rows = _execute(db, """
+                cols, rows = _execute(pool, """
                     SELECT DISTINCT cluster_id
                     FROM lake.federal.resolved_entities
                     WHERE last_name = ? AND first_name = ?
                     LIMIT 10
                 """, [last, first])
             else:
-                cols, rows = _execute(db, """
+                cols, rows = _execute(pool, """
                     SELECT DISTINCT cluster_id
                     FROM lake.federal.resolved_entities
                     WHERE last_name = ?
@@ -12082,14 +12082,14 @@ def person_crossref(name: NAME, ctx: Context) -> ToolResult:
                         FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=3)
                         ORDER BY _distance ASC
                     """
-                    with _db_lock:
-                        sim_rows = db.execute(sim_sql).fetchall()
+                    with pool.cursor() as cur:
+                        sim_rows = cur.execute(sim_sql).fetchall()
                     for matched_name, dist in sim_rows:
                         if dist < LANCE_TIGHT_DISTANCE:
                             parts = matched_name.split()
                             if len(parts) >= 2:
                                 for last, first in [(parts[-1], parts[0]), (parts[0], parts[-1])]:
-                                    cols, rows = _execute(db, """
+                                    cols, rows = _execute(pool, """
                                         SELECT DISTINCT cluster_id
                                         FROM lake.federal.resolved_entities
                                         WHERE last_name = ? AND first_name = ?
@@ -12111,7 +12111,7 @@ def person_crossref(name: NAME, ctx: Context) -> ToolResult:
         placeholders = ", ".join(["?"] * len(cluster_list))
 
         # Get all records in the cluster(s)
-        detail_cols, detail_rows = _execute(db, f"""
+        detail_cols, detail_rows = _execute(pool, f"""
             SELECT source_table, last_name, first_name, address, city, zip, cluster_id
             FROM lake.federal.resolved_entities
             WHERE cluster_id IN ({placeholders})
@@ -12119,7 +12119,7 @@ def person_crossref(name: NAME, ctx: Context) -> ToolResult:
         """, cluster_list)
 
         # Aggregate by source_table
-        agg_cols, agg_rows = _execute(db, f"""
+        agg_cols, agg_rows = _execute(pool, f"""
             SELECT source_table, COUNT(*) as records,
                    ARRAY_AGG(DISTINCT city) FILTER (WHERE city IS NOT NULL) as cities,
                    ARRAY_AGG(DISTINCT zip) FILTER (WHERE zip IS NOT NULL) as zips
@@ -12130,7 +12130,7 @@ def person_crossref(name: NAME, ctx: Context) -> ToolResult:
         """, cluster_list)
 
         # Collect name variants
-        variant_cols, variant_rows = _execute(db, f"""
+        variant_cols, variant_rows = _execute(pool, f"""
             SELECT DISTINCT last_name, first_name
             FROM lake.federal.resolved_entities
             WHERE cluster_id IN ({placeholders})
@@ -12200,7 +12200,7 @@ def top_crossrefs(
     limit: Annotated[int, Field(description="Max results. Default: 50", ge=1, le=200)] = 50,
 ) -> ToolResult:
     """Find the most cross-referenced people in the NYC data lake — those appearing in the most source tables. Reveals high-profile persons, repeat offenders, major property owners, or politically connected individuals via Splink entity resolution. Parameters: min_tables (default 5), last_name_prefix (optional filter), limit (default 50). For a specific person's cross-references, use person_crossref(name)."""
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
     min_tables = min(max(min_tables, 2), 30)
@@ -12209,7 +12209,7 @@ def top_crossrefs(
 
     try:
         if prefix:
-            cols, rows = _execute(db, """
+            cols, rows = _execute(pool, """
                 SELECT cluster_id,
                        MIN(last_name) as last_name,
                        MIN(first_name) as first_name,
@@ -12225,7 +12225,7 @@ def top_crossrefs(
                 LIMIT ?
             """, [prefix, min_tables, limit])
         else:
-            cols, rows = _execute(db, """
+            cols, rows = _execute(pool, """
                 SELECT cluster_id,
                        MIN(last_name) as last_name,
                        MIN(first_name) as first_name,
@@ -12309,14 +12309,14 @@ def hotspot_map(
     if not source:
         raise ToolError(f"Unknown category '{category}'. Use: {', '.join(TABLE_MAP.keys())}")
 
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     sql, params = h3_heatmap_sql(
         source_table="lake.foundation.h3_index",
         filter_table=source,
         lat=latitude, lng=longitude,
         radius_rings=min(radius, 5),
     )
-    cols, raw_rows = _execute(db, sql, params)
+    cols, raw_rows = _execute(pool, sql, params)
     if not raw_rows:
         return f"No {category} data found near ({latitude}, {longitude}). Foundation H3 index may need materialization."
 
@@ -12342,14 +12342,14 @@ def name_variants(
 ) -> str:
     """Find all phonetic matches for a name across the entire data lake.
     Catches typos, maiden names, spelling variants, nicknames."""
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     parts = name.strip().split()
     if len(parts) >= 2:
         sql, params = phonetic_search_sql(first_name=parts[0], last_name=parts[-1], limit=50)
     else:
         sql, params = phonetic_search_sql(first_name=None, last_name=name, limit=50)
 
-    cols, raw_rows = _execute(db, sql, params)
+    cols, raw_rows = _execute(pool, sql, params)
     if not raw_rows:
         return f"No phonetic matches for '{name}'. The phonetic index may need materialization."
 
@@ -12376,14 +12376,14 @@ def lake_health(
     schema: Annotated[str | None, Field(description="Filter to specific schema. Example: 'housing'")] = None,
 ) -> str:
     """Data lake health dashboard — row counts, null rates, freshness per table."""
-    db = ctx.lifespan_context["db"]
+    pool = ctx.lifespan_context["pool"]
     if schema:
         where = "WHERE schema_name = ?"
         params = [schema]
     else:
         where = ""
         params = []
-    cols, raw_rows = _execute(db, f"""
+    cols, raw_rows = _execute(pool, f"""
         SELECT schema_name, table_name, row_count, column_count, high_null_columns, profiled_at
         FROM lake.foundation.data_health
         {where}
@@ -12672,11 +12672,13 @@ async def catalog_json(request: Request) -> JSONResponse:
         )
 
     db = None
+    pool = None
     try:
         db = _catalog_connect()
+        pool = CursorPool(db, size=1)
 
         # Query table stats from DuckDB metadata
-        cols, rows = _execute(db, """
+        cols, rows = _execute(pool, """
             SELECT
                 t.schema_name,
                 t.table_name,
@@ -12698,7 +12700,7 @@ async def catalog_json(request: Request) -> JSONResponse:
         # Try to get DuckLake file metadata separately (may fail if schema differs)
         ducklake_info = {}
         try:
-            _, dl_rows = _execute(db, "SELECT table_name, file_count, file_size_bytes, table_uuid FROM ducklake_table_info('lake')")
+            _, dl_rows = _execute(pool, "SELECT table_name, file_count, file_size_bytes, table_uuid FROM ducklake_table_info('lake')")
             for dlr in dl_rows:
                 ducklake_info[dlr[0]] = {"file_count": dlr[1], "file_size_bytes": dlr[2], "table_uuid": str(dlr[3]) if dlr[3] else None}
         except Exception:
@@ -12709,7 +12711,7 @@ async def catalog_json(request: Request) -> JSONResponse:
         pipeline_state = {}
         try:
             try:
-                _, ps_rows = _execute(db, """
+                _, ps_rows = _execute(pool, """
                     SELECT dataset_name, last_updated_at, row_count, last_run_at,
                            source_rows, sync_status, source_checked_at
                     FROM lake._pipeline_state
@@ -12725,7 +12727,7 @@ async def catalog_json(request: Request) -> JSONResponse:
                     }
             except Exception:
                 # Fallback: source columns don't exist yet (sensor hasn't run)
-                _, ps_rows = _execute(db, """
+                _, ps_rows = _execute(pool, """
                     SELECT dataset_name, last_updated_at, row_count, last_run_at
                     FROM lake._pipeline_state
                 """)
