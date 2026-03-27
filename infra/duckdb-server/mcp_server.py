@@ -3430,6 +3430,7 @@ def semantic_search(
     vec = embed_fn(query.strip())
     vec_literal = vec_to_sql(vec)
 
+    # Lance vector search SQL doesn't support ? params — source validated against VALID_DESC_SOURCES frozenset
     source_filter = f"WHERE source = '{source}'" if source != "all" else ""
 
     sql = f"""
@@ -4726,12 +4727,12 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
     # H3 crime hotspot analysis
     try:
         from spatial import h3_heatmap_sql
-        _, pct_center = _execute(db, f"""
+        _, pct_center = _execute(db, """
             SELECT AVG(TRY_CAST(latitude AS DOUBLE)), AVG(TRY_CAST(longitude AS DOUBLE))
             FROM lake.city_government.pluto
-            WHERE policeprct = '{precinct}'
+            WHERE policeprct = ?
               AND TRY_CAST(latitude AS DOUBLE) BETWEEN 40.4 AND 41.0
-        """)
+        """, [str(precinct)])
         if pct_center and pct_center[0][0]:
             lat, lng = pct_center[0][0], pct_center[0][1]
             hm_cols, hm_rows = _execute(db, *h3_heatmap_sql(
@@ -8016,6 +8017,7 @@ def similar_buildings(
     t0 = time.time()
     db = ctx.lifespan_context["db"]
 
+    # Lance file scan SQL doesn't support ? params — bbl is regex-validated above
     with _db_lock:
         target_rows = db.execute(
             f"SELECT features FROM '{LANCE_DIR}/building_vectors.lance' WHERE bbl = '{bbl}'"
@@ -8027,6 +8029,7 @@ def similar_buildings(
     target_vec = target_rows[0][0]
     vec_literal = "[" + ",".join(f"{v:.6g}" for v in target_vec) + "]::FLOAT[]"
 
+    # Lance vector search SQL doesn't support ? params — bbl is regex-validated above
     knn_sql = f"""
 SELECT
     bv.bbl,
@@ -9238,6 +9241,7 @@ def ownership_graph(bbl: BBL, depth: Annotated[int, Field(description="Hops thro
     t0 = time.time()
 
     # Use building network graph (same vertex type → supports shortest path properly)
+    # DuckPGQ MATCH patterns don't support ? params — bbl is regex-validated above
     cols, rows = _execute(db, f"""
         FROM GRAPH_TABLE (nyc_building_network
             MATCH p = ANY SHORTEST
@@ -10317,14 +10321,19 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     marriage_cols, marriage_rows = [], []
     try:
         if len(words) > 1:
-            mar_where = " OR ".join([
-                f"(UPPER(groom_surname) = '{words[-1]}' AND UPPER(groom_first_name) LIKE '{words[0]}%')",
-                f"(UPPER(bride_surname) = '{words[-1]}' AND UPPER(bride_first_name) LIKE '{words[0]}%')",
-                f"(UPPER(groom_surname) = '{words[0]}' AND UPPER(groom_first_name) LIKE '{words[-1]}%')",
-                f"(UPPER(bride_surname) = '{words[0]}' AND UPPER(bride_first_name) LIKE '{words[-1]}%')",
-            ])
+            mar_where = """(UPPER(groom_surname) = ? AND UPPER(groom_first_name) LIKE ?)
+                OR (UPPER(bride_surname) = ? AND UPPER(bride_first_name) LIKE ?)
+                OR (UPPER(groom_surname) = ? AND UPPER(groom_first_name) LIKE ?)
+                OR (UPPER(bride_surname) = ? AND UPPER(bride_first_name) LIKE ?)"""
+            mar_params = [
+                words[-1], words[0] + '%',
+                words[-1], words[0] + '%',
+                words[0], words[-1] + '%',
+                words[0], words[-1] + '%',
+            ]
         else:
-            mar_where = f"UPPER(groom_surname) = '{search}' OR UPPER(bride_surname) = '{search}'"
+            mar_where = "UPPER(groom_surname) = ? OR UPPER(bride_surname) = ?"
+            mar_params = [search, search]
         marriage_cols, marriage_rows = _execute(db, f"""
             SELECT groom_first_name, groom_middle_name, groom_surname,
                    bride_first_name, bride_middle_name, bride_surname,
@@ -10333,7 +10342,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             WHERE {mar_where}
             ORDER BY license_year
             LIMIT 20
-        """)
+        """, mar_params)
     except Exception:
         pass
 
@@ -10341,22 +10350,22 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     hist_marriage_rows = []
     try:
         if len(words) > 1:
-            _, hist_marriage_rows = _execute(db, f"""
+            _, hist_marriage_rows = _execute(db, """
                 SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
                 FROM lake.city_government.marriage_certificates_1866_1937
-                WHERE (UPPER(last_name) = '{words[-1]}' AND UPPER(first_name) LIKE '{words[0]}%')
-                   OR (UPPER(last_name) = '{words[0]}' AND UPPER(first_name) LIKE '{words[-1]}%')
+                WHERE (UPPER(last_name) = ? AND UPPER(first_name) LIKE ?)
+                   OR (UPPER(last_name) = ? AND UPPER(first_name) LIKE ?)
                 ORDER BY year
                 LIMIT 10
-            """)
+            """, [words[-1], words[0] + '%', words[0], words[-1] + '%'])
         else:
-            _, hist_marriage_rows = _execute(db, f"""
+            _, hist_marriage_rows = _execute(db, """
                 SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
                 FROM lake.city_government.marriage_certificates_1866_1937
-                WHERE UPPER(last_name) = '{search}'
+                WHERE UPPER(last_name) = ?
                 ORDER BY year
                 LIMIT 10
-            """)
+            """, [search])
     except Exception:
         pass
 
@@ -10520,6 +10529,7 @@ def fuzzy_entity_search(
     vec = embed_fn(name.strip())
     vec_literal = vec_to_sql(vec)
 
+    # Lance vector search SQL doesn't support ? params — source validated against VALID_ENTITY_SOURCES frozenset
     source_filter = f"WHERE source = '{source}'" if source != "all" else ""
 
     sql = f"""
@@ -11319,6 +11329,7 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
     """, [primary_name])
 
     # Graph traversal: co-transactors via DuckPGQ
+    # DuckPGQ MATCH patterns don't support ? params — primary_name is from DB lookup
     try:
         graph_cols, graph_rows = _execute(db, f"""
             FROM GRAPH_TABLE (nyc_transaction_network
@@ -11441,6 +11452,7 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
     connected_corps = []
     if corp_rows:
         primary_dos = corp_rows[0][0]
+        # DuckPGQ MATCH patterns don't support ? params — primary_dos is from DB lookup
         try:
             gc_cols, gc_rows = _execute(db, f"""
                 FROM GRAPH_TABLE (nyc_corporate_web
@@ -11581,6 +11593,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     primary_name = primary[0]
 
     # Graph traversal: connected entities via DuckPGQ
+    # DuckPGQ MATCH patterns don't support ? params — primary_name is from DB lookup
     try:
         graph_cols, graph_rows = _execute(db, f"""
             FROM GRAPH_TABLE (nyc_influence_network
@@ -11816,6 +11829,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
         violation_stats = {r[0]: {"total": r[1], "class_c": r[2], "open": r[3]} for r in v_rows}
 
     # Connected contractors via DuckPGQ
+    # DuckPGQ MATCH patterns don't support ? params — license_num is from DB lookup
     try:
         net_cols, net_rows = _execute(db, f"""
             FROM GRAPH_TABLE (nyc_contractor_network
