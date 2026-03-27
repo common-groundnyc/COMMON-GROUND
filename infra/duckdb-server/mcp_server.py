@@ -691,8 +691,8 @@ async def app_lifespan(server):
     ext_status = load_extensions(conn)
 
     # Configure S3 for MinIO (DuckLake stores parquet in s3://ducklake/data/)
-    minio_user = os.environ.get("MINIO_ROOT_USER", "minioadmin")
-    minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "")
+    minio_user = os.environ.get("MINIO_ROOT_USER", "minioadmin").replace("'", "''")
+    minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
     conn.execute("SET s3_region = 'us-east-1'")
     conn.execute("SET s3_endpoint = 'minio:9000'")
     conn.execute(f"SET s3_access_key_id = '{minio_user}'")
@@ -717,7 +717,7 @@ async def app_lifespan(server):
     conn.execute("SET default_collation = 'NOCASE'")
     print("Performance tuning applied", flush=True)
 
-    pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "\\'")
+    pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
     conn.execute(f"""
         ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
         AS lake (METADATA_SCHEMA 'lake')
@@ -12609,8 +12609,8 @@ def _catalog_connect():
     from extensions import load_extensions
     load_extensions(conn)
 
-    minio_user = os.environ.get("MINIO_ROOT_USER", "minioadmin")
-    minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "")
+    minio_user = os.environ.get("MINIO_ROOT_USER", "minioadmin").replace("'", "''")
+    minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
     conn.execute("SET s3_region = 'us-east-1'")
     conn.execute("SET s3_endpoint = 'minio:9000'")
     conn.execute(f"SET s3_access_key_id = '{minio_user}'")
@@ -12618,7 +12618,7 @@ def _catalog_connect():
     conn.execute("SET s3_use_ssl = false")
     conn.execute("SET s3_url_style = 'path'")
 
-    pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "\\'")
+    pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
     conn.execute(f"""
         ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
         AS lake (METADATA_SCHEMA 'lake')

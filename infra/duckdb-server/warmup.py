@@ -2,7 +2,7 @@
 import os, sys
 import duckdb
 
-pg_pass = os.environ.get('DAGSTER_PG_PASSWORD', '')
+pg_pass = os.environ.get('DAGSTER_PG_PASSWORD', '').replace("'", "''")
 conn = duckdb.connect()
 for ext in ['ducklake', 'postgres', 'httpfs']:
     conn.execute(f'LOAD {ext}')
