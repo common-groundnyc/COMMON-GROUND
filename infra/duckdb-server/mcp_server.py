@@ -12295,6 +12295,22 @@ async def catalog_json(request: Request) -> JSONResponse:
         except Exception:
             pass  # DuckLake metadata unavailable — continue without it
 
+        # Get pipeline cursor state — last_run_at and row_count per dataset
+        pipeline_state = {}
+        try:
+            _, ps_rows = _execute(db, """
+                SELECT dataset_name, last_updated_at, row_count, last_run_at
+                FROM lake._pipeline_state
+            """)
+            for psr in ps_rows:
+                pipeline_state[psr[0]] = {
+                    "cursor": str(psr[1]) if psr[1] else None,
+                    "rows_written": psr[2],
+                    "last_run_at": str(psr[3]) if psr[3] else None,
+                }
+        except Exception:
+            pass  # _pipeline_state may not exist yet
+
         tables = []
         schema_stats = {}
         total_rows = 0
@@ -12320,6 +12336,10 @@ async def catalog_json(request: Request) -> JSONResponse:
                 except (ValueError, OSError):
                     pass
 
+            # Pipeline cursor state
+            ps_key = f"{schema}.{table}"
+            ps = pipeline_state.get(ps_key, {})
+
             tables.append({
                 "schema": schema,
                 "table": table,
@@ -12328,6 +12348,9 @@ async def catalog_json(request: Request) -> JSONResponse:
                 "files": file_count or 0,
                 "size_bytes": file_size or 0,
                 "created_at": created_at,
+                "last_run_at": ps.get("last_run_at"),
+                "cursor": ps.get("cursor"),
+                "rows_written": ps.get("rows_written"),
             })
             total_rows += (est_size or 0)
             if schema not in schema_stats:
