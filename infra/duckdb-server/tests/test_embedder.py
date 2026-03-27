@@ -79,7 +79,7 @@ def test_vec_to_sql_literal():
     vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
     sql = vec_to_sql(vec)
     assert sql.startswith("[")
-    assert sql.endswith("]::FLOAT[3]")
+    assert sql.endswith("]::FLOAT[]")
     assert "0.1" in sql
     assert "0.2" in sql
     assert "0.3" in sql

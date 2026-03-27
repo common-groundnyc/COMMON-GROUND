@@ -17,6 +17,10 @@ dependencies = [
     "orjson>=3.11.7",
     "dagster-docker>=0.28.0",
     "splink>=4.0",
+]
+
+[project.optional-dependencies]
+ml = [
     "blockingpy>=0.1.0",
     "semhash>=0.1.0",
     "bertopic>=0.16.0",
