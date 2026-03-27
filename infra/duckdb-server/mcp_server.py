@@ -2637,7 +2637,7 @@ async def app_lifespan(server):
     # PostHog analytics — track MCP tool usage
     ph_key = os.environ.get("POSTHOG_API_KEY", "")
     if ph_key:
-        posthog.project_api_key = ph_key
+        posthog.api_key = ph_key
         posthog.host = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com")
         posthog.debug = False
         print("PostHog analytics enabled", flush=True)
