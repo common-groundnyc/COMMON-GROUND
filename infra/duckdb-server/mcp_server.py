@@ -59,6 +59,43 @@ _SAFE_DDL = re.compile(
 _db_lock = threading.Lock()
 LANCE_DIR = "/data/common-ground/lance"
 
+# Distance thresholds for embedding similarity
+LANCE_NAME_DISTANCE = 0.4      # ~60% cosine — allows spelling variants
+LANCE_TIGHT_DISTANCE = 0.3     # ~70% cosine — higher-confidence cross-domain
+LANCE_CATALOG_DISTANCE = 0.7   # loose — table/schema discovery
+LANCE_CATEGORY_SIM = 0.5       # cosine similarity for resource categories
+
+
+def _vector_expand_names(ctx, search_term: str, threshold: float = LANCE_NAME_DISTANCE, k: int = 5) -> set:
+    """Find similar entity names via Lance vector search. Returns empty set on failure."""
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    if not embed_fn:
+        return set()
+    try:
+        from embedder import vec_to_sql
+        query_vec = embed_fn(search_term)
+        vec_literal = vec_to_sql(query_vec)
+        sql = f"""
+            SELECT name, _distance AS dist
+            FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k={k})
+            ORDER BY _distance ASC
+        """
+        db = ctx.lifespan_context["db"]
+        lock = ctx.lifespan_context.get("lock")
+        if lock:
+            with lock:
+                rows = db.execute(sql).fetchall()
+        else:
+            rows = db.execute(sql).fetchall()
+        result = set()
+        for name, dist in rows:
+            if dist < threshold:
+                result.add(name.upper())
+        result.discard(search_term.upper())
+        return result
+    except Exception:
+        return set()
+
 # ---------------------------------------------------------------------------
 # SQL constants — domain tools
 # ---------------------------------------------------------------------------
@@ -3135,7 +3172,7 @@ def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search
             with _db_lock:
                 sem_rows = db.execute(sem_sql).fetchall()
             # Only include if similarity > 0.3 (distance < 0.7)
-            good_matches = [(s, t, d) for s, t, d, dist in sem_rows if dist < 0.7]
+            good_matches = [(s, t, d) for s, t, d, dist in sem_rows if dist < LANCE_CATALOG_DISTANCE]
             if good_matches:
                 semantic_note = "\n\nSemantic matches (by description similarity):\n"
                 for s, t, d in good_matches:
@@ -3326,7 +3363,7 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
             semantic_suggestions = [
                 (src, desc, round(max(0, 1.0 / (1.0 + dist)) * 100))
                 for src, desc, dist in sem_rows
-                if dist < 0.7
+                if dist < LANCE_CATALOG_DISTANCE
             ]
         except Exception:
             pass
@@ -5580,7 +5617,7 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
             for cat, cat_vec in cat_vecs.items():
                 c_norm = cat_vec / (np.linalg.norm(cat_vec) + 1e-9)
                 sim = float(np.dot(q_norm, c_norm))
-                if sim > 0.5:
+                if sim > LANCE_CATEGORY_SIM:
                     matched_categories.add(cat)
         except Exception:
             pass
@@ -6595,27 +6632,7 @@ def due_diligence(
     db = ctx.lifespan_context["db"]
     t0 = time.time()
 
-    # Vector pre-pass: find similar names to expand search
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn:
-        try:
-            from embedder import vec_to_sql
-            query_vec = embed_fn(name.strip().upper())
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:
-                    extra_names.add(matched_name.upper())
-            extra_names.discard(name.strip().upper())
-        except Exception:
-            pass
+    extra_names = _vector_expand_names(ctx, name.strip().upper())
 
     # Parse first/last for attorney search
     parts = name.split()
@@ -6845,27 +6862,7 @@ def cop_sheet(
     db = ctx.lifespan_context["db"]
     t0 = time.time()
 
-    # Vector pre-pass: find similar names to expand search
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn:
-        try:
-            from embedder import vec_to_sql
-            query_vec = embed_fn(name.strip().upper())
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:
-                    extra_names.add(matched_name.upper())
-            extra_names.discard(name.strip().upper())
-        except Exception:
-            pass
+    extra_names = _vector_expand_names(ctx, name.strip().upper())
 
     parts = name.split()
     if len(parts) >= 2:
@@ -7174,27 +7171,7 @@ def money_trail(
     db = ctx.lifespan_context["db"]
     t0 = time.time()
 
-    # Vector pre-pass: find similar names to expand search
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn:
-        try:
-            from embedder import vec_to_sql
-            query_vec = embed_fn(name.strip().upper())
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:
-                    extra_names.add(matched_name.upper())
-            extra_names.discard(name.strip().upper())
-        except Exception:
-            pass
+    extra_names = _vector_expand_names(ctx, name.strip().upper())
 
     parts = name.split()
     first = parts[0] if len(parts) >= 2 else "%"
@@ -9569,27 +9546,7 @@ def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
     t0 = time.time()
     search_term = entity_name.strip().upper()
 
-    # Vector pre-pass: find similar names to expand search
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn:
-        try:
-            from embedder import vec_to_sql
-            query_vec = embed_fn(search_term)
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:
-                    extra_names.add(matched_name.upper())
-            extra_names.discard(search_term)
-        except Exception:
-            pass
+    extra_names = _vector_expand_names(ctx, search_term)
 
     # 1. NYS corporations — registered agents, chairmen, process contacts
     corp_cols, corp_rows = _execute(db, """
@@ -9762,28 +9719,7 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     # matching "Perlbinder, Barton M" or last_name=PERLBINDER first_name=BARTON)
     words = [w for w in search.split() if len(w) >= 2]
 
-    # Vector pre-pass: find similar names to expand search
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn:
-        try:
-            from embedder import vec_to_sql
-            query_vec = embed_fn(search)
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:  # high similarity threshold — only very close matches
-                    extra_names.add(matched_name.upper())
-            # Remove the search term itself to avoid duplicating the base query
-            extra_names.discard(search)
-        except Exception:
-            pass
+    extra_names = _vector_expand_names(ctx, search)
 
     # Splink probabilistic name resolution — find all name variants in the same cluster
     name_variants = _resolve_name_variants(db, name)
@@ -10642,28 +10578,7 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
     search_last = surname.strip().upper()
     search_first = first_name.strip().upper() if first_name else ""
 
-    # Vector pre-pass: find similar names to expand search
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn:
-        try:
-            from embedder import vec_to_sql
-            embed_input = f"{search_first} {search_last}".strip()
-            query_vec = embed_fn(embed_input)
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:
-                    extra_names.add(matched_name.upper())
-            extra_names.discard(embed_input.upper())
-        except Exception:
-            pass
+    extra_names = _vector_expand_names(ctx, f"{search_first} {search_last}".strip())
 
     # Phonetic search for spelling variants
     phonetic_results = []
@@ -11378,27 +11293,7 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
     t0 = time.time()
     search = name.strip().upper()
 
-    # Vector pre-pass: find similar names to expand search
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn:
-        try:
-            from embedder import vec_to_sql
-            query_vec = embed_fn(search)
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:
-                    extra_names.add(matched_name.upper())
-            extra_names.discard(search)
-        except Exception:
-            pass
+    extra_names = _vector_expand_names(ctx, search)
 
     # Find matching entities
     ent_cols, ent_rows = _execute(db, """
@@ -11519,27 +11414,7 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
     t0 = time.time()
     search = entity_name.strip().upper()
 
-    # Vector pre-pass: find similar names to expand search
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn:
-        try:
-            from embedder import vec_to_sql
-            query_vec = embed_fn(search)
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:
-                    extra_names.add(matched_name.upper())
-            extra_names.discard(search)
-        except Exception:
-            pass
+    extra_names = _vector_expand_names(ctx, search)
 
     # Search corps by name
     corp_cols, corp_rows = _execute(db, """
@@ -11688,27 +11563,7 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
     t0 = time.time()
     search = entity_name.strip().upper()
 
-    # Vector pre-pass: find similar names to expand search
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn:
-        try:
-            from embedder import vec_to_sql
-            query_vec = embed_fn(search)
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:
-                    extra_names.add(matched_name.upper())
-            extra_names.discard(search)
-        except Exception:
-            pass
+    extra_names = _vector_expand_names(ctx, search)
 
     # Find matching political entities
     ent_cols, ent_rows = _execute(db, """
@@ -11912,27 +11767,7 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
     t0 = time.time()
     search = name_or_license.strip().upper()
 
-    # Vector pre-pass: find similar names to expand search (skip for license numbers)
-    embed_fn = ctx.lifespan_context.get("embed_fn")
-    extra_names = set()
-    if embed_fn and not search.replace('-', '').isdigit():
-        try:
-            from embedder import vec_to_sql
-            query_vec = embed_fn(search)
-            vec_literal = vec_to_sql(query_vec)
-            sim_sql = f"""
-                SELECT name, _distance AS dist
-                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
-                ORDER BY _distance ASC
-            """
-            with _db_lock:
-                sim_rows = db.execute(sim_sql).fetchall()
-            for matched_name, dist in sim_rows:
-                if dist < 0.4:
-                    extra_names.add(matched_name.upper())
-            extra_names.discard(search)
-        except Exception:
-            pass
+    extra_names = set() if search.replace('-', '').isdigit() else _vector_expand_names(ctx, search)
 
     # Find contractor by license or name
     if search.isdigit():
@@ -12222,7 +12057,7 @@ def person_crossref(name: NAME, ctx: Context) -> ToolResult:
                     with _db_lock:
                         sim_rows = db.execute(sim_sql).fetchall()
                     for matched_name, dist in sim_rows:
-                        if dist < 0.3:
+                        if dist < LANCE_TIGHT_DISTANCE:
                             parts = matched_name.split()
                             if len(parts) >= 2:
                                 for last, first in [(parts[-1], parts[0]), (parts[0], parts[-1])]:
