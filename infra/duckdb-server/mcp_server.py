@@ -2845,6 +2845,7 @@ NYC open data lake — 294 tables, 12 schemas, 60M+ rows of public records.
 WHAT'S HERE: Every public dataset about NYC — housing violations, property sales, landlord networks, restaurant inspections, crime stats, school performance, 311 complaints, campaign donations, corporate filings, and more. Data goes back to 1966 for property transactions.
 
 ROUTING — pick the FIRST match:
+* BUILDING by ADDRESS → address_lookup (finds BBL), then building_profile
 * BUILDING by BBL → building_profile, landlord_watchdog, building_story
 * PERSON/COMPANY by name → entity_xray, person_crossref
 * LANDLORD/OWNER → landlord_network, worst_landlords, llc_piercer
@@ -2893,6 +2894,7 @@ ALWAYS_VISIBLE = [
     "export_data",
     # Building-centric (most common user intent)
     "building_profile",
+    "address_lookup",
     "landlord_watchdog",
     # Person/entity investigation
     "entity_xray",
@@ -3170,6 +3172,87 @@ def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
         content=summary,
         structured_content={"building": row},
         meta={"bbl": bbl},
+    )
+
+
+@mcp.tool(annotations=READONLY, tags={"building", "housing"})
+def address_lookup(
+    address: Annotated[str, Field(description="Street address or partial address. Examples: '123 Main St', '350 5th Ave', 'Empire State Building'")],
+    ctx: Context,
+    borough: Annotated[str, Field(description="Optional borough filter: Manhattan, Brooklyn, Bronx, Queens, 'Staten Island'")] = "",
+) -> ToolResult:
+    """Look up NYC buildings by street address — returns BBL, full address, borough, and key building info. USE THIS FIRST when you have an address but need a BBL for building_profile, landlord_watchdog, or other BBL-based tools. Fuzzy matches partial addresses. For exact BBL queries, use building_profile(bbl) directly."""
+    if len(address.strip()) < 3:
+        raise ToolError("Address must be at least 3 characters")
+
+    pool = ctx.lifespan_context["pool"]
+    t0 = time.time()
+    search = address.strip().upper()
+
+    # Parse out house number if present
+    parts = search.split(None, 1)
+    has_number = parts[0].isdigit() if parts else False
+
+    if has_number and len(parts) > 1:
+        house_num = parts[0]
+        street = parts[1]
+        sql = """
+            SELECT bbl, address, borough, zipcode, ownername,
+                   bldgclass, numfloors, unitsres, unitstotal, yearbuilt, assesstot
+            FROM lake.city_government.pluto
+            WHERE UPPER(address) LIKE ?
+            ORDER BY assesstot DESC NULLS LAST
+            LIMIT 20
+        """
+        params = [f"%{house_num}%{street}%"]
+    else:
+        sql = """
+            SELECT bbl, address, borough, zipcode, ownername,
+                   bldgclass, numfloors, unitsres, unitstotal, yearbuilt, assesstot
+            FROM lake.city_government.pluto
+            WHERE UPPER(address) LIKE ?
+            ORDER BY assesstot DESC NULLS LAST
+            LIMIT 20
+        """
+        params = [f"%{search}%"]
+
+    if borough.strip():
+        boro_map = {"MANHATTAN": "MN", "BROOKLYN": "BK", "BRONX": "BX", "QUEENS": "QN", "STATEN ISLAND": "SI"}
+        boro_code = boro_map.get(borough.strip().upper(), borough.strip().upper())
+        sql = sql.replace("ORDER BY", f"AND borough = '{boro_code}' ORDER BY")
+
+    cols, rows = _execute(pool, sql, params)
+
+    if not rows:
+        raise ToolError(f"No buildings found matching '{address}'. Try a simpler search like '350 5th' or add a borough filter.")
+
+    elapsed = round((time.time() - t0) * 1000)
+    lines = [f"ADDRESS LOOKUP — '{address}'", f"Found {len(rows)} buildings", "=" * 55]
+
+    for r in rows:
+        bbl_val, addr, boro, zip_code, owner, bldg_class, floors, res_units, total_units, year, assessed = r
+        lines.append(f"\n  {addr}, {boro} {zip_code or ''}")
+        lines.append(f"    BBL: {bbl_val}")
+        if owner:
+            lines.append(f"    Owner: {owner}")
+        details = []
+        if floors:
+            details.append(f"{floors} floors")
+        if res_units:
+            details.append(f"{res_units} residential units")
+        if year:
+            details.append(f"built {year}")
+        if details:
+            lines.append(f"    {', '.join(details)}")
+
+    lines.append(f"\nUse building_profile(bbl) for full details on any building above.")
+    lines.append(f"Use landlord_watchdog(bbl) to check the owner's portfolio.")
+    lines.append(f"\n({elapsed}ms)")
+
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={"results": [{"bbl": r[0], "address": r[1], "borough": r[2], "zipcode": r[3]} for r in rows]},
+        meta={"query": address, "result_count": len(rows), "query_time_ms": elapsed},
     )
 
 
