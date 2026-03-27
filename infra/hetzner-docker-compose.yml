@@ -125,6 +125,31 @@ services:
           memory: 256M
     restart: unless-stopped
 
+  pg-backup:
+    image: postgres:17-alpine
+    environment:
+      PGPASSWORD: ${DAGSTER_PG_PASSWORD}
+    volumes:
+      - /mnt/data/common-ground/backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          echo "[$(date)] Starting Postgres backup..."
+          pg_dump -h postgres -U dagster ducklake | gzip > /backups/ducklake_$(date +%Y%m%d_%H%M%S).sql.gz
+          find /backups -name "ducklake_*.sql.gz" -mtime +7 -delete
+          echo "[$(date)] Backup complete. Sleeping 24h..."
+          sleep 86400
+        done
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
 volumes:
   xyops-data:
     driver: local
