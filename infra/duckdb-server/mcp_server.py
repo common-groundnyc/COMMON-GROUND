@@ -6829,6 +6829,29 @@ def cop_sheet(
     db = ctx.lifespan_context["db"]
     t0 = time.time()
 
+    # Vector pre-pass: find similar names to expand search
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(name.strip().upper())
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:
+                    extra_names.add(matched_name.upper())
+            extra_names.discard(name.strip().upper())
+        except Exception:
+            pass
+
     parts = name.split()
     if len(parts) >= 2:
         first = parts[0]
@@ -6912,6 +6935,11 @@ def cop_sheet(
             lines.append(f"    {docket or '?'} | Filed: {filed or '?'} | {status_str}")
             if nature:
                 lines.append(f"    Nature: {nature}")
+
+    if extra_names:
+        lines.append(f"\nSIMILAR NAMES (vector match):")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
 
     elapsed = round((time.time() - t0) * 1000)
     lines.append(f"\n({elapsed}ms)")
@@ -7131,6 +7159,29 @@ def money_trail(
     db = ctx.lifespan_context["db"]
     t0 = time.time()
 
+    # Vector pre-pass: find similar names to expand search
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            query_vec = embed_fn(name.strip().upper())
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:
+                    extra_names.add(matched_name.upper())
+            extra_names.discard(name.strip().upper())
+        except Exception:
+            pass
+
     parts = name.split()
     first = parts[0] if len(parts) >= 2 else "%"
     last = parts[-1] if len(parts) >= 2 else name
@@ -7206,6 +7257,11 @@ def money_trail(
         lines.append(f"\nFUZZY FEC MATCHES ({len(fuzzy_fec)} — name variants):")
         for r in fuzzy_fec[:5]:
             lines.append(f"  {r[0]} — ${float(r[2] or 0):,.0f} (score: {r[-1]:.0f})")
+
+    if extra_names:
+        lines.append(f"\nSIMILAR NAMES (vector match):")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
 
     elapsed = round((time.time() - t0) * 1000)
     lines.append(f"\n({elapsed}ms)")
@@ -10575,6 +10631,30 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
     search_last = surname.strip().upper()
     search_first = first_name.strip().upper() if first_name else ""
 
+    # Vector pre-pass: find similar names to expand search
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    extra_names = set()
+    if embed_fn:
+        try:
+            from embedder import vec_to_sql
+            embed_input = f"{search_first} {search_last}".strip()
+            query_vec = embed_fn(embed_input)
+            vec_literal = vec_to_sql(query_vec)
+            sim_sql = f"""
+                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                FROM main.entity_name_embeddings
+                ORDER BY array_cosine_distance(embedding, {vec_literal})
+                LIMIT 5
+            """
+            with _db_lock:
+                sim_rows = db.execute(sim_sql).fetchall()
+            for matched_name, dist in sim_rows:
+                if dist < 0.4:
+                    extra_names.add(matched_name.upper())
+            extra_names.discard(embed_input.upper())
+        except Exception:
+            pass
+
     # Phonetic search for spelling variants
     phonetic_results = []
     try:
@@ -10664,6 +10744,11 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
         lines.append(f"\nPHONETIC MATCHES ({len(phonetic_results)} — spelling variants):")
         for r in phonetic_results[:10]:
             lines.append(f"  {' | '.join(str(v) for v in r[:6] if v)}")
+
+    if extra_names:
+        lines.append(f"\nSIMILAR NAMES (vector match):")
+        for en in sorted(extra_names):
+            lines.append(f"  → {en}")
 
     lines.append(f"\n({elapsed}ms)")
 
