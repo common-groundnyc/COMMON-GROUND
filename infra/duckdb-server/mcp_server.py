@@ -2668,23 +2668,27 @@ async def app_lifespan(server):
         print(f"Warning: embedding model unavailable: {e}", flush=True)
 
     if embed_fn is not None:
-        try:
-            # Load persisted embeddings from volume Parquet → main.* (fast, no API calls)
-            _load_persisted_embeddings(conn, embed_dims)
+        # Load cached embeddings immediately (fast, no API calls)
+        _load_persisted_embeddings(conn, embed_dims)
 
-            # Incrementally embed only NEW rows (cheap after first run)
-            print("Checking for new data to embed...", flush=True)
-            _incremental_catalog_embeddings(conn, embed_batch_fn, embed_dims)
-            _incremental_description_embeddings(conn, embed_batch_fn, embed_dims)
-            if graph_ready:
-                _incremental_entity_name_embeddings(conn, embed_batch_fn, embed_dims)
-                _build_building_vectors(conn)
+        # Run incremental embedding in background thread so server starts NOW
+        def _background_embed():
+            try:
+                print("Background: checking for new data to embed...", flush=True)
+                _incremental_catalog_embeddings(conn, embed_batch_fn, embed_dims)
+                _incremental_description_embeddings(conn, embed_batch_fn, embed_dims)
+                if graph_ready:
+                    _incremental_entity_name_embeddings(conn, embed_batch_fn, embed_dims)
+                    _build_building_vectors(conn)
+                _create_hnsw_indexes(conn)
+                print("Background: embedding pipeline complete", flush=True)
+            except Exception as e:
+                print(f"Background: embedding pipeline error: {e}", flush=True)
 
-            _create_hnsw_indexes(conn)
-            print("Embedding pipeline complete", flush=True)
-        except Exception as e:
-            print(f"Warning: embedding pipeline partially complete: {e}", flush=True)
-            # embed_fn stays set — semantic search works on whatever tables DID load
+        import threading
+        embed_thread = threading.Thread(target=_background_embed, daemon=True)
+        embed_thread.start()
+        print("Embedding pipeline started in background — server starting now", flush=True)
 
     try:
         yield {

@@ -66,7 +66,25 @@ def _create_gemini_embedder(api_key: str):
     dims = _GEMINI_DIMS
     throttle = _AdaptiveThrottle()
 
+    # Rate limiter: max 40 requests/sec (stay under 3,000 RPM with headroom)
+    _rate_lock = threading.Lock()
+    _req_times: list[float] = []
+    _MAX_RPS = 40
+
+    def _rate_limit():
+        """Block until we're under the rate limit."""
+        with _rate_lock:
+            now = time.time()
+            # Prune requests older than 1 second
+            _req_times[:] = [t for t in _req_times if now - t < 1.0]
+            if len(_req_times) >= _MAX_RPS:
+                sleep_time = 1.0 - (now - _req_times[0]) + 0.05
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+            _req_times.append(time.time())
+
     def _call_api(texts: list[str]) -> list[list[float]]:
+        _rate_limit()
         for attempt in range(3):
             try:
                 result = client.models.embed_content(
