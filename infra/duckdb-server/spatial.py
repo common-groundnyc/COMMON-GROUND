@@ -2,22 +2,18 @@
 
 Replaces ZIP/precinct/community district crosswalk hacks with
 H3 k-ring aggregation. Resolution 9 (~100m) for block-level NYC analysis.
-
-All functions return (sql, params) tuples for parameterized execution.
 """
 
 H3_RES = 9
 
 
-def h3_kring_sql(lat: float, lng: float, radius_rings: int = 2):
+def h3_kring_sql(lat: float, lng: float, radius_rings: int = 2) -> str:
     """SQL to get all H3 cells within radius_rings of a point."""
-    sql = """
+    return f"""
         SELECT UNNEST(
-            h3_grid_disk(h3_latlng_to_cell(?, ?, ?), ?)
+            h3_grid_disk(h3_latlng_to_cell({lat}, {lng}, {H3_RES}), {radius_rings})
         ) AS h3_cell
     """
-    params = [lat, lng, H3_RES, radius_rings]
-    return sql, params
 
 
 def h3_aggregate_sql(
@@ -26,13 +22,12 @@ def h3_aggregate_sql(
     lat: float,
     lng: float,
     radius_rings: int = 3,
-):
+) -> str:
     """SQL to aggregate counts from h3_index within a hex k-ring."""
-    kring_sql, kring_params = h3_kring_sql(lat, lng, radius_rings)
-    placeholders = ", ".join("?" for _ in filter_tables)
-    sql = f"""
+    table_filter = ", ".join(f"'{t}'" for t in filter_tables)
+    return f"""
         WITH target_cells AS (
-            {kring_sql}
+            {h3_kring_sql(lat, lng, radius_rings)}
         )
         SELECT
             source_table,
@@ -40,12 +35,10 @@ def h3_aggregate_sql(
             COUNT(DISTINCT h3_res9) AS cell_count
         FROM {source_table}
         WHERE h3_res9 IN (SELECT h3_cell FROM target_cells)
-          AND source_table IN ({placeholders})
+          AND source_table IN ({table_filter})
         GROUP BY source_table
         ORDER BY row_count DESC
     """
-    params = kring_params + list(filter_tables)
-    return sql, params
 
 
 def h3_heatmap_sql(
@@ -54,12 +47,11 @@ def h3_heatmap_sql(
     lat: float,
     lng: float,
     radius_rings: int = 5,
-):
+) -> str:
     """SQL to generate per-cell counts for heatmap visualization."""
-    kring_sql, kring_params = h3_kring_sql(lat, lng, radius_rings)
-    sql = f"""
+    return f"""
         WITH target_cells AS (
-            {kring_sql}
+            {h3_kring_sql(lat, lng, radius_rings)}
         )
         SELECT
             h3_res9 AS h3_cell,
@@ -68,39 +60,34 @@ def h3_heatmap_sql(
             COUNT(*) AS count
         FROM {source_table}
         WHERE h3_res9 IN (SELECT h3_cell FROM target_cells)
-          AND source_table = ?
+          AND source_table = '{filter_table}'
         GROUP BY h3_res9
         ORDER BY count DESC
     """
-    params = kring_params + [filter_table]
-    return sql, params
 
 
-def h3_zip_centroid_sql(zipcode: str):
+def h3_zip_centroid_sql(zipcode: str) -> str:
     """SQL to get the H3 centroid cell for a ZIP code using PLUTO data."""
-    sql = """
+    return f"""
         SELECT h3_latlng_to_cell(
             AVG(TRY_CAST(latitude AS DOUBLE)),
             AVG(TRY_CAST(longitude AS DOUBLE)),
-            ?
+            {H3_RES}
         ) AS center_cell,
         AVG(TRY_CAST(latitude AS DOUBLE)) AS center_lat,
         AVG(TRY_CAST(longitude AS DOUBLE)) AS center_lng
         FROM lake.city_government.pluto
-        WHERE zipcode = ?
+        WHERE zipcode = '{zipcode}'
           AND TRY_CAST(latitude AS DOUBLE) BETWEEN 40.4 AND 41.0
           AND TRY_CAST(longitude AS DOUBLE) BETWEEN -74.3 AND -73.6
     """
-    params = [H3_RES, zipcode]
-    return sql, params
 
 
-def h3_neighborhood_stats_sql(lat: float, lng: float, radius_rings: int = 8):
+def h3_neighborhood_stats_sql(lat: float, lng: float, radius_rings: int = 8) -> str:
     """SQL to get multi-dimension neighborhood stats via H3 aggregation."""
-    kring_sql, kring_params = h3_kring_sql(lat, lng, radius_rings)
-    sql = f"""
+    return f"""
         WITH target_cells AS (
-            {kring_sql}
+            {h3_kring_sql(lat, lng, radius_rings)}
         ),
         h3_stats AS (
             SELECT source_table, COUNT(*) AS cnt
@@ -121,5 +108,3 @@ def h3_neighborhood_stats_sql(lat: float, lng: float, radius_rings: int = 8):
             COALESCE(MAX(cnt) FILTER (WHERE source_table = 'environment.street_trees'), 0) AS street_trees
         FROM h3_stats
     """
-    params = kring_params
-    return sql, params
