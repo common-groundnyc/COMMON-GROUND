@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir \
     duckdb==1.5.0 \
     "fastmcp[http]==3.1.1" \
     posthog \
+    openpyxl \
     onnxruntime \
     onnx \
     tokenizers \
@@ -36,6 +37,7 @@ ENV FASTMCP_STATELESS_HTTP=true
 # Pre-install community extensions at build time (avoids download on every startup)
 RUN python -c "\
 import duckdb; conn = duckdb.connect(); \
+conn.execute('INSTALL lance'); \
 [conn.execute(f'INSTALL {ext} FROM community') for ext in \
 ['h3','splink_udfs','rapidfuzz','anofox_tabular','datasketches','hashfuncs', \
 'lindel','dqtest','duckpgq','anofox_forecast','lsh','finetype','curl_httpfs']]; \

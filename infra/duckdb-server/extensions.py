@@ -1,6 +1,6 @@
 """DuckDB extension loader with graceful fallback."""
 
-CORE_EXTS = ["ducklake", "postgres", "spatial", "fts", "httpfs", "json"]
+CORE_EXTS = ["ducklake", "postgres", "spatial", "fts", "httpfs", "json", "lance"]
 
 COMMUNITY_EXTS = [
     # Graph (phase 08 tools)
@@ -18,8 +18,7 @@ COMMUNITY_EXTS = [
     "dqtest",
     # Performance
     "hashfuncs",
-    # Vector search (only on 1.5.1+)
-    "hnsw_acorn",
+    # Vector search (lance replaces hnsw_acorn)
     # Available on 1.5.0
     "lsh",
     "finetype",
