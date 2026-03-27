@@ -42,14 +42,15 @@ def _create_gemini_embedder(api_key: str):
     _req_times: list[float] = []
 
     def _rate_limit():
+        wait = 0
         with _rate_lock:
             now = time.time()
             _req_times[:] = [t for t in _req_times if now - t < 1.0]
             if len(_req_times) >= _MAX_RPS:
                 wait = 1.0 - (now - _req_times[0]) + 0.05
-                if wait > 0:
-                    time.sleep(wait)
             _req_times.append(time.time())
+        if wait > 0:
+            time.sleep(wait)
 
     def _call_api(texts: list[str]) -> list[list[float]]:
         _rate_limit()
@@ -71,6 +72,7 @@ def _create_gemini_embedder(api_key: str):
                 if m:
                     wait = max(wait, int(m.group(1)) + 1)
                 time.sleep(wait)
+        raise RuntimeError("All retry attempts exhausted")
 
     def embed(text: str) -> np.ndarray:
         return np.array(_call_api([text])[0], dtype=np.float32)
@@ -98,8 +100,18 @@ def _create_gemini_embedder(api_key: str):
                 idx = futures[f]
                 try:
                     all_embeddings[idx] = f.result()
-                except Exception:
-                    all_embeddings[idx] = [[0.0] * dims] * len(chunks[idx])
+                except Exception as e:
+                    print(f"    Warning: chunk {idx} failed, retrying in sub-batches: {e}", flush=True)
+                    sub_results = []
+                    chunk = chunks[idx]
+                    for sub_start in range(0, len(chunk), 10):
+                        sub = chunk[sub_start:sub_start + 10]
+                        try:
+                            sub_results.extend(_call_api(sub))
+                        except Exception:
+                            print(f"    Sub-batch {sub_start}-{sub_start+len(sub)} failed, zero-filling", flush=True)
+                            sub_results.extend([[0.0] * dims] * len(sub))
+                    all_embeddings[idx] = sub_results
                     failed += 1
                 done += 1
                 if done % 100 == 0 or done == len(chunks):
@@ -149,7 +161,7 @@ def _create_openrouter_embedder(api_key: str):
             futs = {pool.submit(_call, c): i for i, c in enumerate(chunks)}
             for f in futs:
                 try: results[futs[f]] = f.result()
-                except: results[futs[f]] = [[0.0]*dims]*len(chunks[futs[f]])
+                except Exception: results[futs[f]] = [[0.0]*dims]*len(chunks[futs[f]])
         return np.array([v for batch in results for v in batch], dtype=np.float32)
 
     return embed, embed_batch, dims
