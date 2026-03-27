@@ -64,3 +64,47 @@ def h3_heatmap_sql(
         GROUP BY h3_res9
         ORDER BY count DESC
     """
+
+
+def h3_zip_centroid_sql(zipcode: str) -> str:
+    """SQL to get the H3 centroid cell for a ZIP code using PLUTO data."""
+    return f"""
+        SELECT h3_latlng_to_cell(
+            AVG(TRY_CAST(latitude AS DOUBLE)),
+            AVG(TRY_CAST(longitude AS DOUBLE)),
+            {H3_RES}
+        ) AS center_cell,
+        AVG(TRY_CAST(latitude AS DOUBLE)) AS center_lat,
+        AVG(TRY_CAST(longitude AS DOUBLE)) AS center_lng
+        FROM lake.city_government.pluto
+        WHERE zipcode = '{zipcode}'
+          AND TRY_CAST(latitude AS DOUBLE) BETWEEN 40.4 AND 41.0
+          AND TRY_CAST(longitude AS DOUBLE) BETWEEN -74.3 AND -73.6
+    """
+
+
+def h3_neighborhood_stats_sql(lat: float, lng: float, radius_rings: int = 8) -> str:
+    """SQL to get multi-dimension neighborhood stats via H3 aggregation."""
+    return f"""
+        WITH target_cells AS (
+            {h3_kring_sql(lat, lng, radius_rings)}
+        ),
+        h3_stats AS (
+            SELECT source_table, COUNT(*) AS cnt
+            FROM lake.foundation.h3_index
+            WHERE h3_res9 IN (SELECT h3_cell FROM target_cells)
+            GROUP BY source_table
+        )
+        SELECT
+            COALESCE(MAX(cnt) FILTER (WHERE source_table = 'public_safety.nypd_complaints_historic'), 0)
+                + COALESCE(MAX(cnt) FILTER (WHERE source_table = 'public_safety.nypd_complaints_ytd'), 0)
+                AS total_crimes,
+            COALESCE(MAX(cnt) FILTER (WHERE source_table = 'public_safety.nypd_arrests_historic'), 0)
+                + COALESCE(MAX(cnt) FILTER (WHERE source_table = 'public_safety.nypd_arrests_ytd'), 0)
+                AS total_arrests,
+            COALESCE(MAX(cnt) FILTER (WHERE source_table = 'health.restaurant_inspections'), 0) AS restaurants,
+            COALESCE(MAX(cnt) FILTER (WHERE source_table = 'social_services.n311_service_requests'), 0) AS n311_calls,
+            COALESCE(MAX(cnt) FILTER (WHERE source_table = 'public_safety.shootings'), 0) AS shootings,
+            COALESCE(MAX(cnt) FILTER (WHERE source_table = 'environment.street_trees'), 0) AS street_trees
+        FROM h3_stats
+    """

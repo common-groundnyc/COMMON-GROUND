@@ -69,3 +69,59 @@ def fuzzy_name_sql(
         ORDER BY match_score DESC
         LIMIT {limit}
     """
+
+
+def phonetic_vital_search_sql(
+    first_name: str | None,
+    last_name: str,
+    table: str,
+    first_col: str,
+    last_col: str,
+    extra_cols: str = "",
+    limit: int = 30,
+) -> str:
+    """Phonetic search for historical records where spelling was inconsistent."""
+    escaped_last = last_name.replace("'", "''")
+    extra = f", {extra_cols}" if extra_cols else ""
+
+    if first_name:
+        escaped_first = first_name.replace("'", "''")
+        return f"""
+            SELECT {first_col}, {last_col}{extra},
+                jaro_winkler_similarity(UPPER({last_col}), UPPER('{escaped_last}')) AS last_score,
+                jaro_winkler_similarity(UPPER({first_col}), UPPER('{escaped_first}')) AS first_score
+            FROM {table}
+            WHERE soundex(UPPER({last_col})) = soundex(UPPER('{escaped_last}'))
+            ORDER BY last_score DESC, first_score DESC
+            LIMIT {limit}
+        """
+    else:
+        return f"""
+            SELECT {first_col}, {last_col}{extra},
+                jaro_winkler_similarity(UPPER({last_col}), UPPER('{escaped_last}')) AS last_score
+            FROM {table}
+            WHERE soundex(UPPER({last_col})) = soundex(UPPER('{escaped_last}'))
+            ORDER BY last_score DESC
+            LIMIT {limit}
+        """
+
+
+def fuzzy_money_search_sql(
+    name: str,
+    table: str,
+    name_col: str,
+    extra_cols: str = "",
+    min_score: int = 70,
+    limit: int = 30,
+) -> str:
+    """Fuzzy name matching for campaign finance / money trail."""
+    escaped = name.replace("'", "''")
+    extra = f", {extra_cols}" if extra_cols else ""
+    return f"""
+        SELECT {name_col}{extra},
+            rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER('{escaped}')) AS match_score
+        FROM {table}
+        WHERE rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER('{escaped}')) >= {min_score}
+        ORDER BY match_score DESC
+        LIMIT {limit}
+    """

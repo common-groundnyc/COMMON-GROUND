@@ -32,3 +32,20 @@ def test_heatmap_sql():
     assert "h3_cell_to_lat" in sql
     assert "h3_cell_to_lng" in sql
     assert "COUNT(*) AS count" in sql
+
+
+def test_zip_centroid_sql():
+    from spatial import h3_zip_centroid_sql
+    sql = h3_zip_centroid_sql("10003")
+    assert "h3_latlng_to_cell" in sql
+    assert "10003" in sql
+    assert "pluto" in sql
+
+
+def test_neighborhood_stats_sql():
+    from spatial import h3_neighborhood_stats_sql
+    sql = h3_neighborhood_stats_sql(40.7128, -74.006, radius_rings=5)
+    assert "h3_grid_disk" in sql
+    assert "total_crimes" in sql
+    assert "restaurants" in sql
+    assert "n311_calls" in sql
