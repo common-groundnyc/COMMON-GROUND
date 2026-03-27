@@ -12628,6 +12628,19 @@ def _catalog_connect():
     return conn
 
 
+_ALLOWED_ORIGINS = frozenset({
+    "https://common-ground.nyc",
+    "https://www.common-ground.nyc",
+    "http://localhost:3002",
+    "http://localhost:3000",
+})
+
+
+def _cors_origin(request):
+    origin = request.headers.get("origin", "")
+    return origin if origin in _ALLOWED_ORIGINS else ""
+
+
 @mcp.custom_route("/api/catalog", methods=["GET", "OPTIONS"])
 async def catalog_json(request: Request) -> JSONResponse:
     """Return table catalog as JSON for the data health page."""
@@ -12638,7 +12651,8 @@ async def catalog_json(request: Request) -> JSONResponse:
             {},
             status_code=204,
             headers={
-                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
                 "Access-Control-Allow-Methods": "GET, OPTIONS",
                 "Access-Control-Max-Age": "86400",
             },
@@ -12778,7 +12792,8 @@ async def catalog_json(request: Request) -> JSONResponse:
         return JSONResponse(
             result,
             headers={
-                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
                 "Cache-Control": "public, max-age=300",
             },
         )
