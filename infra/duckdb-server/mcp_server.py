@@ -752,16 +752,20 @@ async def app_lifespan(server):
     from extensions import load_extensions
     ext_status = load_extensions(conn)
 
-    # Configure S3 for MinIO (DuckLake stores parquet in s3://ducklake/data/)
+    # Configure S3 for MinIO via CREATE SECRET (survives DETACH/ATTACH cycles)
     minio_user = os.environ.get("MINIO_ROOT_USER", "").replace("'", "''")
     minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
-    conn.execute("SET s3_region = 'us-east-1'")
-    conn.execute("SET s3_endpoint = 'minio:9000'")
-    conn.execute(f"SET s3_access_key_id = '{minio_user}'")
-    conn.execute(f"SET s3_secret_access_key = '{minio_pass}'")
-    conn.execute("SET s3_use_ssl = false")
-    conn.execute("SET s3_url_style = 'path'")
-    print("S3/MinIO credentials configured", flush=True)
+    conn.execute(f"""
+        CREATE OR REPLACE SECRET minio_s3 (
+            TYPE s3,
+            KEY_ID '{minio_user}',
+            SECRET '{minio_pass}',
+            ENDPOINT 'minio:9000',
+            USE_SSL false,
+            URL_STYLE 'path'
+        )
+    """)
+    print("S3/MinIO credentials configured (SECRET)", flush=True)
 
     # Performance tuning
     conn.execute("SET memory_limit = '8GB'")
@@ -797,13 +801,13 @@ async def app_lifespan(server):
         conn = duckdb.connect(config={"allow_unsigned_extensions": "true"})
         from extensions import load_extensions
         ext_status = load_extensions(conn)
-        # Reconfigure S3 and performance tuning on new connection
-        conn.execute("SET s3_region = 'us-east-1'")
-        conn.execute("SET s3_endpoint = 'minio:9000'")
-        conn.execute(f"SET s3_access_key_id = '{minio_user}'")
-        conn.execute(f"SET s3_secret_access_key = '{minio_pass}'")
-        conn.execute("SET s3_use_ssl = false")
-        conn.execute("SET s3_url_style = 'path'")
+        # Reconfigure S3 via SECRET and performance tuning on new connection
+        conn.execute(f"""
+            CREATE OR REPLACE SECRET minio_s3 (
+                TYPE s3, KEY_ID '{minio_user}', SECRET '{minio_pass}',
+                ENDPOINT 'minio:9000', USE_SSL false, URL_STYLE 'path'
+            )
+        """)
         conn.execute("SET memory_limit = '8GB'")
         conn.execute("SET threads = 8")
         conn.execute("SET temp_directory = '/tmp/duckdb_temp'")
@@ -2758,9 +2762,11 @@ async def app_lifespan(server):
                 print("Background: building Lance embeddings...", flush=True)
                 _build_catalog_embeddings(bg_conn, embed_batch_fn, embed_dims)
                 _build_description_embeddings(read_cursor, bg_conn, embed_batch_fn, embed_dims)
-                if graph_ready:
-                    _build_entity_name_embeddings(read_cursor, bg_conn, embed_batch_fn, embed_dims)
-                    _build_building_vectors(read_cursor, bg_conn)
+                # Entity name embeddings (130K+) disabled — OOMs and crashes the server
+                # TODO: re-enable with chunked/streaming approach
+                # if graph_ready:
+                #     _build_entity_name_embeddings(read_cursor, bg_conn, embed_batch_fn, embed_dims)
+                #     _build_building_vectors(read_cursor, bg_conn)
                 _create_lance_indexes(bg_conn)
                 bg_conn.close()
                 print("Background: Lance embedding pipeline complete", flush=True)
@@ -12812,12 +12818,12 @@ def _catalog_connect():
 
     minio_user = os.environ.get("MINIO_ROOT_USER", "").replace("'", "''")
     minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
-    conn.execute("SET s3_region = 'us-east-1'")
-    conn.execute("SET s3_endpoint = 'minio:9000'")
-    conn.execute(f"SET s3_access_key_id = '{minio_user}'")
-    conn.execute(f"SET s3_secret_access_key = '{minio_pass}'")
-    conn.execute("SET s3_use_ssl = false")
-    conn.execute("SET s3_url_style = 'path'")
+    conn.execute(f"""
+        CREATE OR REPLACE SECRET minio_s3 (
+            TYPE s3, KEY_ID '{minio_user}', SECRET '{minio_pass}',
+            ENDPOINT 'minio:9000', USE_SSL false, URL_STYLE 'path'
+        )
+    """)
 
     pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
     conn.execute(f"""
