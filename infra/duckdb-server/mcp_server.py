@@ -10422,14 +10422,14 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     try:
         parts = name.strip().split()
         if len(parts) >= 2:
-            phonetic_sql = phonetic_search_sql(
+            phonetic_sql, phonetic_params = phonetic_search_sql(
                 first_name=parts[0], last_name=parts[-1], min_score=0.7, limit=20
             )
         else:
-            phonetic_sql = phonetic_search_sql(
+            phonetic_sql, phonetic_params = phonetic_search_sql(
                 first_name=None, last_name=name, min_score=0.7, limit=20
             )
-        ph_cols, ph_rows = _execute(db, phonetic_sql)
+        ph_cols, ph_rows = _execute(db, phonetic_sql, phonetic_params)
         phonetic_matches = [dict(zip(ph_cols, r)) for r in ph_rows]
     except Exception:
         pass  # Phonetic index may not exist yet
@@ -10584,13 +10584,13 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
     phonetic_results = []
     try:
         from entity import phonetic_vital_search_sql
-        ph_sql = phonetic_vital_search_sql(
+        ph_sql, ph_params = phonetic_vital_search_sql(
             first_name=search_first or None, last_name=search_last,
             table="lake.city_government.marriage_licenses_1950_2017",
             first_col="groom_first_name", last_col="groom_surname",
             extra_cols="bride_first_name, bride_surname, LICENSE_BOROUGH_ID, LICENSE_YEAR",
             limit=30)
-        _, ph_rows = _execute(db, ph_sql)
+        _, ph_rows = _execute(db, ph_sql, ph_params)
         if ph_rows:
             phonetic_results = list(ph_rows)
     except Exception:
@@ -12317,11 +12317,11 @@ def name_variants(
     db = ctx.lifespan_context["db"]
     parts = name.strip().split()
     if len(parts) >= 2:
-        sql = phonetic_search_sql(first_name=parts[0], last_name=parts[-1], limit=50)
+        sql, params = phonetic_search_sql(first_name=parts[0], last_name=parts[-1], limit=50)
     else:
-        sql = phonetic_search_sql(first_name=None, last_name=name, limit=50)
+        sql, params = phonetic_search_sql(first_name=None, last_name=name, limit=50)
 
-    cols, raw_rows = _execute(db, sql)
+    cols, raw_rows = _execute(db, sql, params)
     if not raw_rows:
         return f"No phonetic matches for '{name}'. The phonetic index may need materialization."
 
