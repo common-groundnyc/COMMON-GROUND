@@ -3724,12 +3724,12 @@ def neighborhood_compare(zip_codes: Annotated[list[str], Field(description="2-7 
         from spatial import h3_zip_centroid_sql, h3_neighborhood_stats_sql
         results = []
         for z in zip_codes:
-            centroid_cols, centroid_rows = _execute(db, h3_zip_centroid_sql(z))
+            centroid_cols, centroid_rows = _execute(db, *h3_zip_centroid_sql(z))
             if not centroid_rows or centroid_rows[0][0] is None:
                 continue
             center = dict(zip(centroid_cols, centroid_rows[0]))
             stats_cols, stats_rows = _execute(db,
-                h3_neighborhood_stats_sql(center["center_lat"], center["center_lng"], radius_rings=8))
+                *h3_neighborhood_stats_sql(center["center_lat"], center["center_lng"], radius_rings=8))
             if stats_rows:
                 s = dict(zip(stats_cols, stats_rows[0]))
                 s["zip"] = z
@@ -4734,7 +4734,7 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
         """)
         if pct_center and pct_center[0][0]:
             lat, lng = pct_center[0][0], pct_center[0][1]
-            hm_cols, hm_rows = _execute(db, h3_heatmap_sql(
+            hm_cols, hm_rows = _execute(db, *h3_heatmap_sql(
                 source_table="lake.foundation.h3_index",
                 filter_table="public_safety.nypd_complaints_ytd",
                 lat=lat, lng=lng, radius_rings=10))
@@ -6663,10 +6663,10 @@ def due_diligence(
     phonetic_pro = []
     try:
         from entity import phonetic_search_sql
-        ph_sql = phonetic_search_sql(
+        ph_sql, ph_params = phonetic_search_sql(
             first_name=first_guess if len(parts) >= 2 else None,
             last_name=last_guess, min_score=0.8, limit=10)
-        ph_cols, ph_rows = _execute(db, ph_sql)
+        ph_cols, ph_rows = _execute(db, ph_sql, ph_params)
         if ph_rows and not atty_rows and not broker_rows:
             phonetic_pro = [dict(zip(ph_cols, r)) for r in ph_rows]
             phonetic_pro = [m for m in phonetic_pro if any(s in m.get("source_table", "")
@@ -7046,12 +7046,12 @@ def vital_records(
     phonetic_deaths = []
     try:
         from entity import phonetic_vital_search_sql
-        ph_sql = phonetic_vital_search_sql(
+        ph_sql, ph_params = phonetic_vital_search_sql(
             first_name=first if first != "%" else None, last_name=last,
             table="lake.federal.nys_death_index",
             first_col="first_name", last_col="last_name",
             extra_cols="age, date_of_death", limit=20)
-        _, phonetic_deaths = _execute(db, ph_sql)
+        _, phonetic_deaths = _execute(db, ph_sql, ph_params)
     except Exception:
         pass
 
@@ -7187,11 +7187,11 @@ def money_trail(
     fuzzy_fec = []
     try:
         from entity import fuzzy_money_search_sql
-        fec_sql = fuzzy_money_search_sql(name=name,
+        fec_sql, fec_params = fuzzy_money_search_sql(name=name,
             table="lake.federal.fec_contributions", name_col="contributor_name",
             extra_cols="committee_id, contribution_receipt_amount, contribution_receipt_date",
             min_score=75, limit=15)
-        _, fuzzy_fec = _execute(db, fec_sql)
+        _, fuzzy_fec = _execute(db, fec_sql, fec_params)
     except Exception:
         pass
 
@@ -8325,10 +8325,10 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
     # H3-based safety snapshot
     try:
         from spatial import h3_zip_centroid_sql, h3_neighborhood_stats_sql
-        _, centroid = _execute(db, h3_zip_centroid_sql(zipcode))
+        _, centroid = _execute(db, *h3_zip_centroid_sql(zipcode))
         if centroid and centroid[0][0] is not None:
             c_lat, c_lng = centroid[0][1], centroid[0][2]
-            _, stats = _execute(db, h3_neighborhood_stats_sql(c_lat, c_lng, radius_rings=6))
+            _, stats = _execute(db, *h3_neighborhood_stats_sql(c_lat, c_lng, radius_rings=6))
             if stats:
                 s = dict(zip(["total_crimes", "total_arrests", "restaurants_h3", "n311_calls", "shootings", "street_trees"], stats[0]))
                 lines.append(f"\nSAFETY SNAPSHOT (H3 hex radius)")
@@ -12282,13 +12282,13 @@ def hotspot_map(
         raise ToolError(f"Unknown category '{category}'. Use: {', '.join(TABLE_MAP.keys())}")
 
     db = ctx.lifespan_context["db"]
-    sql = h3_heatmap_sql(
+    sql, params = h3_heatmap_sql(
         source_table="lake.foundation.h3_index",
         filter_table=source,
         lat=latitude, lng=longitude,
         radius_rings=min(radius, 5),
     )
-    cols, raw_rows = _execute(db, sql)
+    cols, raw_rows = _execute(db, sql, params)
     if not raw_rows:
         return f"No {category} data found near ({latitude}, {longitude}). Foundation H3 index may need materialization."
 
