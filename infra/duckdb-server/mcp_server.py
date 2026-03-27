@@ -47,7 +47,8 @@ READONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentH
 ADMIN = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True)
 
 _UNSAFE_SQL = re.compile(
-    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY)\b",
+    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY"
+    r"|CALL|LOAD|INSTALL|ATTACH|DETACH|EXPORT|IMPORT)\b",
     re.IGNORECASE,
 )
 
