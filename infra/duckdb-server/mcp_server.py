@@ -54,6 +54,9 @@ _UNSAFE_SQL = re.compile(
     re.IGNORECASE,
 )
 
+_RECONNECT_ERRORS = ("HTTP 403", "HTTP 400", "HTTP 301", "Bad Request", "s3://ducklake")
+_last_reconnect = 0
+
 _SAFE_DDL = re.compile(
     r"^\s*CREATE\s+OR\s+REPLACE\s+VIEW\b",
     re.IGNORECASE,
@@ -598,6 +601,7 @@ def _validate_sql(sql):
 
 
 def _execute(pool, sql, params=None):
+    global _last_reconnect
     with pool.cursor() as cur:
         try:
             result = cur.execute(sql, params or [])
@@ -606,13 +610,64 @@ def _execute(pool, sql, params=None):
             return cols, rows
         except duckdb.Error as e:
             err = str(e)
+
+            # S3/DuckLake stale connection — auto-reconnect (max once per 60s)
+            if any(sig in err for sig in _RECONNECT_ERRORS) and time.time() - _last_reconnect > 60:
+                _last_reconnect = time.time()
+                try:
+                    print(f"Auto-reconnect: DuckLake S3 error, re-attaching catalog...", flush=True)
+                    with pool.cursor() as rc:
+                        rc.execute("DETACH lake")
+                        pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
+                        minio_user = os.environ.get("MINIO_ROOT_USER", "").replace("'", "''")
+                        minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
+                        rc.execute(f"SET s3_endpoint = 'minio:9000'")
+                        rc.execute(f"SET s3_access_key_id = '{minio_user}'")
+                        rc.execute(f"SET s3_secret_access_key = '{minio_pass}'")
+                        rc.execute("SET s3_use_ssl = false")
+                        rc.execute("SET s3_url_style = 'path'")
+                        rc.execute(f"""
+                            ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
+                            AS lake (METADATA_SCHEMA 'lake')
+                        """)
+                    print("Auto-reconnect: DuckLake re-attached successfully", flush=True)
+                    # Retry the original query
+                    with pool.cursor() as retry_cur:
+                        result = retry_cur.execute(sql, params or [])
+                        cols = [d[0] for d in result.description] if result.description else []
+                        rows = result.fetchmany(MAX_QUERY_ROWS)
+                        return cols, rows
+                except Exception as reconnect_err:
+                    print(f"Auto-reconnect failed: {reconnect_err}", flush=True)
+
+            # Improved error hints
             hint = ""
             if "does not exist" in err.lower():
-                hint = " Use data_catalog(keyword) to find table names, or list_tables(schema) to browse a schema."
+                if "schema" in err.lower():
+                    # Fuzzy-match the wrong schema name against real schemas
+                    schema_match = re.search(r'schema "(\w+)"', err, re.IGNORECASE)
+                    if schema_match:
+                        wrong_schema = schema_match.group(1)
+                        real_schemas = list(SCHEMA_DESCRIPTIONS.keys())
+                        suggestions = [s for s in real_schemas if wrong_schema.lower() in s.lower() or s.lower() in wrong_schema.lower()]
+                        if suggestions:
+                            hint = f" Schema '{wrong_schema}' doesn't exist. Did you mean: {', '.join(suggestions)}? Use list_schemas() to see all schemas."
+                        else:
+                            hint = f" Schema '{wrong_schema}' doesn't exist. Available schemas: {', '.join(real_schemas[:6])}... Use list_schemas() for the full list."
+                    else:
+                        hint = " Use list_schemas() to see available schemas, then data_catalog(keyword) to find tables."
+                elif "table" in err.lower():
+                    hint = " Use data_catalog(keyword) to find table names, or list_tables(schema) to browse a schema."
+                elif "column" in err.lower() or "not found" in err.lower():
+                    hint = " Use describe_table(schema, table) to see exact column names before querying."
+                else:
+                    hint = " Use data_catalog(keyword) to find table names, or list_tables(schema) to browse a schema."
             elif "not found" in err.lower():
                 hint = " Use describe_table(schema, table) to check column names."
             elif "permission" in err.lower() or "read-only" in err.lower():
                 hint = " Only SELECT queries are allowed. Use sql_query() for reads."
+            elif any(sig in err for sig in _RECONNECT_ERRORS):
+                hint = " Data temporarily unavailable — try again in a moment."
             raise ToolError(f"SQL error: {e}{hint}")
 
 
