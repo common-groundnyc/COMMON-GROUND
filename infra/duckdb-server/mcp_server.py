@@ -12202,6 +12202,38 @@ def person_crossref(name: NAME, ctx: Context) -> ToolResult:
                     cluster_ids.add(r[0])
 
         if not cluster_ids:
+            embed_fn = ctx.lifespan_context.get("embed_fn")
+            if embed_fn:
+                try:
+                    from embedder import vec_to_sql
+                    query_vec = embed_fn(search)
+                    vec_literal = vec_to_sql(query_vec)
+                    sim_sql = f"""
+                        SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
+                        FROM main.entity_name_embeddings
+                        ORDER BY array_cosine_distance(embedding, {vec_literal})
+                        LIMIT 3
+                    """
+                    with _db_lock:
+                        sim_rows = db.execute(sim_sql).fetchall()
+                    for matched_name, dist in sim_rows:
+                        if dist < 0.3:
+                            parts = matched_name.split()
+                            if len(parts) >= 2:
+                                for last, first in [(parts[-1], parts[0]), (parts[0], parts[-1])]:
+                                    cols, rows = _execute(db, """
+                                        SELECT DISTINCT cluster_id
+                                        FROM lake.federal.resolved_entities
+                                        WHERE last_name = ? AND first_name = ?
+                                        LIMIT 5
+                                    """, [last, first])
+                                    for r in rows:
+                                        if r[0] is not None:
+                                            cluster_ids.add(r[0])
+                except Exception:
+                    pass
+
+        if not cluster_ids:
             return ToolResult(
                 content=f"No records found for '{name}' in resolved_entities. "
                         "Try entity_xray for LIKE-based search.",
