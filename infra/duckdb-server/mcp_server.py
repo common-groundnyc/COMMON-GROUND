@@ -2740,7 +2740,7 @@ ROUTING — pick the FIRST match:
 * CORRUPTION/INFLUENCE → pay_to_play, shell_detector, flipper_detector
 * FIND DATA by keyword → data_catalog, then list_tables
 * CUSTOM QUERY → sql_query (read-only, all tables in 'lake' database)
-* EXPORT/DOWNLOAD/CSV → export_csv (branded CSV with row IDs and metadata)
+* EXPORT/DOWNLOAD/SPREADSHEET → export_data (branded XLSX with hyperlinks and percentile heatmap)
 * DON'T KNOW WHAT TO EXPLORE → suggest_explorations
 * SEMANTIC SEARCH by concept → semantic_search (finds similar descriptions even with different words)
 
@@ -2749,7 +2749,7 @@ POWER FEATURES:
 * text_search does full-text search across CFPB complaint narratives and restaurant violations
 * semantic_search does vector similarity search across 311 complaints, restaurant violations, HPD violations, OATH hearings
 * person_crossref links a name across every dataset (property, donations, businesses, violations)
-* export_csv generates branded CSV files with Common Ground watermark, row IDs, and full data attribution
+* export_data generates branded XLSX with Common Ground styling, source hyperlinks, and percentile color scales
 
 SUGGEST INTERESTING THINGS: When the user is exploring or says "what's interesting", call suggest_explorations to get pre-computed highlights — worst landlords, biggest property flips, corporate shell networks, neighborhood comparisons. Use these as conversation starters.
 
@@ -2769,7 +2769,7 @@ ALWAYS_VISIBLE = [
     "list_schemas",
     "suggest_explorations",
     "semantic_search",
-    "export_csv",
+    "export_data",
     # Building-centric (most common user intent)
     "building_profile",
     "landlord_watchdog",
@@ -3179,13 +3179,14 @@ def suggest_explorations(ctx: Context) -> str:
 
 
 @mcp.tool(annotations=READONLY, tags={"discovery"})
-def export_csv(
-    sql: Annotated[str, Field(description="SQL query to export. Use the exact query that produced the data you want. All tables in 'lake' database. Example: SELECT * FROM lake.housing.hpd_violations WHERE bbl = '1000670001'")],
+def export_data(
+    sql: Annotated[str, Field(description="SQL query to export. All tables in 'lake' database. Example: SELECT * FROM lake.housing.hpd_violations WHERE bbl = '1000670001'")],
     ctx: Context,
-    name: Annotated[str, Field(description="Short name for the export file. Example: 'violations_10003', 'worst_landlords_brooklyn'")] = "export",
-    sources: Annotated[str, Field(description="Comma-separated data sources for attribution. Example: 'HPD violations, DOB permits'")] = "",
+    name: Annotated[str, Field(description="Short name for the file. Example: 'violations_10003', 'worst_landlords'")] = "export",
+    sources: Annotated[str, Field(description="Comma-separated data sources. Example: 'HPD violations, DOB permits'")] = "",
+    table_name: Annotated[str, Field(description="Source table name for deep-links. Example: 'hpd_violations', 'restaurant_inspections'. Leave empty if unknown.")] = "",
 ) -> str:
-    """Export query results as a branded CSV file with Common Ground watermark, row IDs, and metadata. Use this when the user wants to download data, save results, get a spreadsheet, or export to CSV. The file is written to the server's export directory and the path is returned. Returns a preview of the first rows. Maximum 100,000 rows per export."""
+    """Export query results as a branded XLSX spreadsheet with Common Ground styling, clickable hyperlinks to source records, and percentile color scales. Use when the user wants to download data, save results, get a spreadsheet, or export. BBL columns link to WhoOwnsWhat. Source column links to original Socrata records. Maximum 100,000 rows."""
     _validate_sql(sql)
     db = ctx.lifespan_context["db"]
     t0 = time.time()
@@ -3204,13 +3205,22 @@ def export_csv(
     elapsed = round((time.time() - t0) * 1000)
     source_list = [s.strip() for s in sources.split(",") if s.strip()] if sources else []
 
-    csv_text = generate_branded_csv(
+    from xlsx_export import generate_branded_xlsx
+
+    xlsx_bytes = generate_branded_xlsx(
         cols, rows,
+        table_name=table_name,
         sql=sql,
         sources=source_list,
     )
 
-    path = write_export(csv_text, name)
+    safe_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)[:100]
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    export_dir = "/data/common-ground/exports"
+    os.makedirs(export_dir, exist_ok=True)
+    path = os.path.join(export_dir, f"{safe_name}_{timestamp}.xlsx")
+    with open(path, "wb") as f:
+        f.write(xlsx_bytes)
 
     preview_rows = rows[:5]
     preview_lines = [" | ".join(str(c) for c in cols)]
@@ -3219,9 +3229,13 @@ def export_csv(
         preview_lines.append(" | ".join(str(v) if v is not None else "" for v in row))
 
     return (
-        f"Exported {len(rows):,} rows to CSV ({elapsed}ms).\n\n"
+        f"Exported {len(rows):,} rows to XLSX ({elapsed}ms).\n\n"
         f"File: {path}\n"
-        f"Size: {len(csv_text):,} bytes\n\n"
+        f"Size: {len(xlsx_bytes):,} bytes\n\n"
+        f"Features: branded header, frozen columns, "
+        + ("BBL hyperlinks to WhoOwnsWhat, " if any(c.lower() == "bbl" for c in cols) else "")
+        + (f"Source links to {table_name} on Socrata, " if table_name else "")
+        + "percentile color scales\n\n"
         f"Preview (first {len(preview_rows)} rows):\n"
         + "\n".join(preview_lines)
         + (f"\n\n... and {len(rows) - 5:,} more rows" if len(rows) > 5 else "")
@@ -3670,6 +3684,72 @@ def neighborhood_compare(zip_codes: Annotated[list[str], Field(description="2-7 
             raise ToolError(f"Invalid ZIP code: {z}. Must be exactly 5 digits.")
 
     db = ctx.lifespan_context["db"]
+
+    # Try H3-based comparison first
+    try:
+        from spatial import h3_zip_centroid_sql, h3_neighborhood_stats_sql
+        results = []
+        for z in zip_codes:
+            centroid_cols, centroid_rows = _execute(db, h3_zip_centroid_sql(z))
+            if not centroid_rows or centroid_rows[0][0] is None:
+                continue
+            center = dict(zip(centroid_cols, centroid_rows[0]))
+            stats_cols, stats_rows = _execute(db,
+                h3_neighborhood_stats_sql(center["center_lat"], center["center_lng"], radius_rings=8))
+            if stats_rows:
+                s = dict(zip(stats_cols, stats_rows[0]))
+                s["zip"] = z
+                results.append(s)
+
+        if len(results) >= 2:
+            # Supplement with ZIP-based income + housing (no H3 equivalent)
+            for r in results:
+                z = r["zip"]
+                try:
+                    _, inc = _execute(db, """
+                        SELECT ROUND(1000.0 * SUM(TRY_CAST(agi_amount AS DOUBLE))
+                               / NULLIF(SUM(TRY_CAST(num_returns AS DOUBLE)), 0), 0)
+                        FROM lake.economics.irs_soi_zip_income
+                        WHERE zipcode = ? AND TRY_CAST(tax_year AS INTEGER) = (
+                            SELECT MAX(TRY_CAST(tax_year AS INTEGER)) FROM lake.economics.irs_soi_zip_income)
+                    """, [z])
+                    if inc and inc[0][0]:
+                        r["avg_income"] = inc[0][0]
+                except Exception:
+                    pass
+                try:
+                    _, hpd = _execute(db, """
+                        SELECT COUNT(DISTINCT complaint_id)
+                        FROM lake.housing.hpd_complaints
+                        WHERE post_code = ? AND TRY_CAST(received_date AS DATE) >= CURRENT_DATE - INTERVAL 365 DAY
+                    """, [z])
+                    if hpd and hpd[0][0]:
+                        r["housing_complaints"] = hpd[0][0]
+                except Exception:
+                    pass
+
+            lines = ["Neighborhood Comparison (H3 hex-based):"]
+            for r in results:
+                lines.append(f"\nZIP {r['zip']}:")
+                lines.append(f"  Crime: {r.get('total_crimes', 0):,} incidents nearby")
+                lines.append(f"  Arrests: {r.get('total_arrests', 0):,} nearby")
+                lines.append(f"  Food: {r.get('restaurants', 0):,} restaurants")
+                lines.append(f"  311 calls: {r.get('n311_calls', 0):,}")
+                lines.append(f"  Shootings: {r.get('shootings', 0):,}")
+                lines.append(f"  Trees: {r.get('street_trees', 0):,}")
+                if r.get("avg_income"):
+                    lines.append(f"  Income: ${r['avg_income']:,.0f} avg AGI")
+                if r.get("housing_complaints"):
+                    lines.append(f"  Housing: {r['housing_complaints']:,} HPD complaints/yr")
+
+            return ToolResult(
+                content="\n".join(lines),
+                structured_content={"neighborhoods": results},
+                meta={"zip_codes": zip_codes, "method": "h3"},
+            )
+    except Exception:
+        pass  # Fall back to original SQL
+
     cols, rows = _execute(db, NEIGHBORHOOD_COMPARE_SQL, [zip_codes])
 
     if not rows:
@@ -6481,8 +6561,25 @@ def due_diligence(
     # Ethics
     _, ethics_rows = _safe_query(db, DUE_DILIGENCE_ETHICS_SQL, [name])
 
+    # Phonetic fallback for professional databases
+    phonetic_pro = []
+    try:
+        from entity import phonetic_search_sql
+        ph_sql = phonetic_search_sql(
+            first_name=first_guess if len(parts) >= 2 else None,
+            last_name=last_guess, min_score=0.8, limit=10)
+        ph_cols, ph_rows = _execute(db, ph_sql)
+        if ph_rows and not atty_rows and not broker_rows:
+            phonetic_pro = [dict(zip(ph_cols, r)) for r in ph_rows]
+            phonetic_pro = [m for m in phonetic_pro if any(s in m.get("source_table", "")
+                for s in ["attorney", "broker", "notary", "tax_warrant", "child_support"])]
+    except Exception:
+        pass
+
     sections_found = sum(1 for r in [atty_rows, broker_rows, tax_rows, cs_rows,
                                       contractor_rows, debarred_rows, ethics_rows] if r)
+    if phonetic_pro:
+        sections_found += 1
 
     if sections_found == 0:
         raise ToolError(f"No records found for '{name}' in any professional/financial database. Try a different name spelling.")
@@ -6567,6 +6664,11 @@ def due_diligence(
             if suspension: parts.append(f"Suspension: {suspension} days")
             if parts:
                 lines.append(f"    {', '.join(parts)}")
+
+    if phonetic_pro:
+        lines.append(f"\nPHONETIC MATCHES ({len(phonetic_pro)} — name variants in professional databases):")
+        for m in phonetic_pro[:5]:
+            lines.append(f"  {m.get('first_name', '')} {m.get('last_name', '')} in {m.get('source_table', '')} (score: {m.get('combined_score', 0):.2f})")
 
     lines.append(f"\n{sections_found} of 7 databases returned results.")
 
@@ -6830,6 +6932,19 @@ def vital_records(
     _, marriage_modern = _safe_query(db, VITAL_MARRIAGES_MODERN_SQL, [f"{last}%", f"{last}%"])
     _, birth_rows = _safe_query(db, VITAL_BIRTHS_SQL, [f"{last}%", f"{first}%"])
 
+    # Phonetic enhancement for historical records
+    phonetic_deaths = []
+    try:
+        from entity import phonetic_vital_search_sql
+        ph_sql = phonetic_vital_search_sql(
+            first_name=first if first != "%" else None, last_name=last,
+            table="lake.federal.nys_death_index",
+            first_col="first_name", last_col="last_name",
+            extra_cols="age, date_of_death", limit=20)
+        _, phonetic_deaths = _execute(db, ph_sql)
+    except Exception:
+        pass
+
     all_marriages = (marriage_early or []) + (marriage_mid or []) + (marriage_modern or [])
     total = len(death_rows or []) + len(all_marriages) + len(birth_rows or [])
 
@@ -6857,6 +6972,11 @@ def vital_records(
         for r in birth_rows:
             fname, lname, year, county = r
             lines.append(f"  {fname or '?'} {lname or '?'} — born {year or '?'}, {county or '?'}")
+
+    if phonetic_deaths:
+        lines.append(f"\nPHONETIC DEATH MATCHES ({len(phonetic_deaths)} — spelling variants):")
+        for r in phonetic_deaths[:10]:
+            lines.append(f"  {r[0] or '?'} {r[1] or '?'} — score: {r[-2]:.2f}/{r[-1]:.2f}")
 
     elapsed = round((time.time() - t0) * 1000)
     lines.append(f"\n({elapsed}ms)")
@@ -6951,6 +7071,18 @@ def money_trail(
     _, contract_rows = _safe_query(db, MONEY_CONTRACTS_SQL, [name])
     _, procurement_rows = _safe_query(db, MONEY_PROCUREMENT_SQL, [name])
 
+    # Fuzzy enhancement for name variants
+    fuzzy_fec = []
+    try:
+        from entity import fuzzy_money_search_sql
+        fec_sql = fuzzy_money_search_sql(name=name,
+            table="lake.federal.fec_contributions", name_col="contributor_name",
+            extra_cols="committee_id, contribution_receipt_amount, contribution_receipt_date",
+            min_score=75, limit=15)
+        _, fuzzy_fec = _execute(db, fec_sql)
+    except Exception:
+        pass
+
     total_sections = sum(1 for r in [nys_rows, fec_rows, nyc_rows, contract_rows, procurement_rows] if r)
     if total_sections == 0:
         raise ToolError(f"No political money records found for '{name}'.")
@@ -6999,6 +7131,11 @@ def money_trail(
         for r in procurement_rows[:5]:
             vendor, amount, agency, desc = r
             lines.append(f"  {vendor}: ${float(amount or 0):,.0f} — {agency or '?'}")
+
+    if fuzzy_fec and not fec_rows:
+        lines.append(f"\nFUZZY FEC MATCHES ({len(fuzzy_fec)} — name variants):")
+        for r in fuzzy_fec[:5]:
+            lines.append(f"  {r[0]} — ${float(r[2] or 0):,.0f} (score: {r[-1]:.0f})")
 
     elapsed = round((time.time() - t0) * 1000)
     lines.append(f"\n({elapsed}ms)")
@@ -10309,6 +10446,22 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
     search_last = surname.strip().upper()
     search_first = first_name.strip().upper() if first_name else ""
 
+    # Phonetic search for spelling variants
+    phonetic_results = []
+    try:
+        from entity import phonetic_vital_search_sql
+        ph_sql = phonetic_vital_search_sql(
+            first_name=search_first or None, last_name=search_last,
+            table="lake.city_government.marriage_licenses_1950_2017",
+            first_col="groom_first_name", last_col="groom_surname",
+            extra_cols="bride_first_name, bride_surname, LICENSE_BOROUGH_ID, LICENSE_YEAR",
+            limit=30)
+        _, ph_rows = _execute(db, ph_sql)
+        if ph_rows:
+            phonetic_results = list(ph_rows)
+    except Exception:
+        pass
+
     # Source 1: Marriage index parquet (1950-2017)
     if search_first:
         cols, rows = _execute(db, """
@@ -10377,6 +10530,12 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
             lines.append(f"  {r[7] or '?'} | {r[6] or '?'} | {groom}  ×  {bride}")
         else:
             lines.append(f"  {r[7] or '?'} | {r[6] or '?'} | {groom} (certificate)")
+
+    if phonetic_results:
+        lines.append(f"\nPHONETIC MATCHES ({len(phonetic_results)} — spelling variants):")
+        for r in phonetic_results[:10]:
+            lines.append(f"  {' | '.join(str(v) for v in r[:6] if v)}")
+
     lines.append(f"\n({elapsed}ms)")
 
     all_matches = [dict(zip(cols, r)) for r in rows]
