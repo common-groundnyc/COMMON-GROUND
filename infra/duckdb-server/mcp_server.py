@@ -3034,14 +3034,29 @@ def describe_table(schema: Annotated[str, Field(description="Schema name")], tab
 
 
 @mcp.tool(annotations=READONLY, tags={"building", "housing"})
-def building_profile(bbl: BBL, ctx: Context) -> ToolResult:
-    """Quick building dossier by BBL — address, units, stories, plus violation and complaint counts. Use this for a fast overview. For deeper investigation, follow up with: landlord_watchdog(bbl) for the owner's full portfolio and slumlord score, enforcement_web(bbl) for multi-agency enforcement actions, property_history(bbl) for ACRIS transaction chain since 1966, building_story(bbl) for historical narrative. BBL is 10 digits: borough(1) + block(5) + lot(4). Example: 1000670001"""
-    if not re.match(r"^\d{10}$", bbl):
-        raise ToolError(
-            "BBL must be exactly 10 digits. Format: borough(1) + block(5) + lot(4)"
-        )
-
+def building_profile(bbl: Annotated[str, Field(description="BBL (10 digits) OR street address. Examples: '1000670001', '350 5th Ave Manhattan'")], ctx: Context) -> ToolResult:
+    """Quick building dossier by BBL or address — address, units, stories, plus violation and complaint counts. Use this for a fast overview. Accepts a 10-digit BBL or a street address (auto-resolves via PLUTO). For deeper investigation, follow up with: landlord_watchdog(bbl) for the owner's full portfolio and slumlord score, enforcement_web(bbl) for multi-agency enforcement actions, property_history(bbl) for ACRIS transaction chain since 1966, building_story(bbl) for historical narrative. BBL is 10 digits: borough(1) + block(5) + lot(4). Example: 1000670001"""
     pool = ctx.lifespan_context["pool"]
+
+    bbl_input = bbl.strip()
+    if not re.match(r"^\d{10}$", bbl_input):
+        # Input looks like an address — resolve via PLUTO
+        search = bbl_input.upper()
+        try:
+            _cols, _rows = _execute(pool, """
+                SELECT bbl FROM lake.city_government.pluto
+                WHERE UPPER(address) LIKE ?
+                ORDER BY assesstot DESC NULLS LAST LIMIT 1
+            """, [f"%{search}%"])
+            if _rows:
+                bbl_input = str(_rows[0][0])
+            else:
+                raise ToolError(f"No building found for address '{bbl}'. Try address_lookup('{bbl}') for fuzzy search.")
+        except ToolError:
+            raise
+        except Exception:
+            raise ToolError(f"Could not resolve address '{bbl}'. Use address_lookup() first to find the BBL.")
+    bbl = bbl_input
     cols, rows = _execute(pool, BUILDING_PROFILE_SQL, [bbl, bbl, bbl, bbl])
 
     if not rows:
