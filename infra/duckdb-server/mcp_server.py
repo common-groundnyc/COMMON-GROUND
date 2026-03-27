@@ -2667,14 +2667,14 @@ async def app_lifespan(server):
     # Build percentile ranking tables
     percentiles_ready = False
     try:
-        build_percentile_tables(conn, lock=_db_lock)
+        build_percentile_tables(conn)
         print("Percentile tables built (owners + buildings)", flush=True)
         percentiles_ready = True
     except Exception as e:
         print(f"Warning: Percentile table build failed: {e}", flush=True)
 
     try:
-        build_lake_percentile_tables(conn, lock=_db_lock)
+        build_lake_percentile_tables(conn)
         print("Lake percentile tables built (restaurants + ZIPs + precincts)", flush=True)
     except Exception as e:
         print(f"Warning: Lake percentile tables failed: {e}", flush=True)

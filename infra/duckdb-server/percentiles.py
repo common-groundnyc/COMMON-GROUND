@@ -34,13 +34,11 @@ _ENTITY_LABEL_MAP = {
 }
 
 
-def build_percentile_tables(db, lock=None):
+def build_percentile_tables(db):
     """Create pctile_owners and pctile_buildings using PERCENT_RANK()."""
-    lk = _get_lock(lock)
-    with lk:
-        db.execute("DROP TABLE IF EXISTS main.pctile_owners")
-        db.execute("""
-            CREATE TABLE main.pctile_owners AS
+    db.execute("DROP TABLE IF EXISTS main.pctile_owners")
+    db.execute("""
+        CREATE TABLE main.pctile_owners AS
             WITH owner_stats AS (
                 SELECT
                     o.owner_id,
@@ -66,9 +64,9 @@ def build_percentile_tables(db, lock=None):
             FROM owner_stats
         """)
 
-        db.execute("DROP TABLE IF EXISTS main.pctile_buildings")
-        db.execute("""
-            CREATE TABLE main.pctile_buildings AS
+    db.execute("DROP TABLE IF EXISTS main.pctile_buildings")
+    db.execute("""
+        CREATE TABLE main.pctile_buildings AS
             WITH building_stats AS (
                 SELECT
                     b.bbl,
@@ -92,13 +90,11 @@ def build_percentile_tables(db, lock=None):
         """)
 
 
-def build_lake_percentile_tables(db, lock=None):
+def build_lake_percentile_tables(db):
     """Create percentile tables requiring lake (S3/MinIO) access."""
-    lk = _get_lock(lock)
-    with lk:
-        db.execute("DROP TABLE IF EXISTS main.pctile_restaurants")
-        db.execute("""
-            CREATE TABLE main.pctile_restaurants AS
+    db.execute("DROP TABLE IF EXISTS main.pctile_restaurants")
+    db.execute("""
+        CREATE TABLE main.pctile_restaurants AS
             WITH stats AS (
                 SELECT
                     camis,
@@ -116,8 +112,8 @@ def build_lake_percentile_tables(db, lock=None):
             FROM stats
         """)
 
-        db.execute("DROP TABLE IF EXISTS main.pctile_zips")
-        db.execute("""
+    db.execute("DROP TABLE IF EXISTS main.pctile_zips")
+    db.execute("""
             CREATE TABLE main.pctile_zips AS
             WITH stats AS (
                 SELECT
@@ -136,8 +132,8 @@ def build_lake_percentile_tables(db, lock=None):
             FROM stats
         """)
 
-        db.execute("DROP TABLE IF EXISTS main.pctile_precincts")
-        db.execute("""
+    db.execute("DROP TABLE IF EXISTS main.pctile_precincts")
+    db.execute("""
             CREATE TABLE main.pctile_precincts AS
             WITH all_complaints AS (
                 SELECT addr_pct_cd
