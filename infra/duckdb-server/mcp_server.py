@@ -773,7 +773,8 @@ async def app_lifespan(server):
     conn.execute("SET temp_directory = '/tmp/duckdb_temp'")
     conn.execute("SET max_temp_directory_size = '50GB'")
 
-    # HTTP/S3 resilience (curl backend in DuckDB 1.5)
+    # HTTP/S3 resilience — disable keep-alive to prevent stale 403s (known DuckDB bug)
+    conn.execute("SET http_keep_alive = false")
     conn.execute("SET enable_http_metadata_cache = true")
     conn.execute("SET http_retries = 5")
     conn.execute("SET http_retry_wait_ms = 200")
