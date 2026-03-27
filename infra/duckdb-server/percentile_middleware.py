@@ -19,19 +19,9 @@ DISCLAIMER = (
     "Consider context (age, size, borough) when interpreting."
 )
 
-_SKIP_TOOLS = {
-    "list_schemas",
-    "list_tables",
-    "describe_table",
-    "data_catalog",
-    "search_tools",
-    "call_tool",
-    "sql_query",
-    "sql_admin",
-    "suggest_explorations",
-    "export_csv",
-    "text_search",
-}
+from constants import MIDDLEWARE_SKIP_TOOLS
+
+_SKIP_TOOLS = MIDDLEWARE_SKIP_TOOLS | {"sql_query", "text_search", "export_data"}
 
 
 def detect_entity(structured_content, tool_name) -> tuple[str | None, str | None]:
