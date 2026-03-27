@@ -57,6 +57,7 @@ _SAFE_DDL = re.compile(
 )
 
 _db_lock = threading.Lock()
+LANCE_DIR = "/data/common-ground/lance"
 
 # ---------------------------------------------------------------------------
 # SQL constants — domain tools
@@ -1009,64 +1010,24 @@ async def app_lifespan(server):
             conn.execute(f"COPY main.{t} TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
         (cache / "_built_at.txt").write_text(str(time.time()))
 
-    # --- Persistent embeddings on volume (incremental — only embed new rows) ---
-    # Embeddings persist as Parquet on /data/common-ground/embeddings/ (Docker volume).
-    # On startup: load from Parquet → main.*, diff against source, embed only new rows,
-    # write back to Parquet. First run is expensive; subsequent deploys are near-instant.
-    EMB_DIR = "/data/common-ground/embeddings"
+    # --- Persistent embeddings on volume (Lance format) ---
+    # Embeddings persist as Lance datasets on /data/common-ground/lance/ (Docker volume).
+    # Lance supports incremental append, ANN indexes, and direct SQL querying.
 
-    def _load_persisted_embeddings(conn, dims):
-        """Load embedding Parquet files from volume into main.* tables."""
-        import pathlib
-        emb_dir = pathlib.Path(EMB_DIR)
-        if not emb_dir.exists():
-            emb_dir.mkdir(parents=True, exist_ok=True)
-            return
-        tables = {
-            "catalog_embeddings": f"schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}]",
-            "description_embeddings": f"source VARCHAR, description VARCHAR, embedding FLOAT[{dims}]",
-            "entity_name_embeddings": f"source VARCHAR, name VARCHAR, embedding FLOAT[{dims}]",
-            "building_vectors": "bbl VARCHAR, borough VARCHAR, features FLOAT[6]",
-        }
-        for name, schema in tables.items():
-            path = emb_dir / f"{name}.parquet"
-            if path.exists():
-                try:
-                    conn.execute(f"CREATE OR REPLACE TABLE main.{name} AS SELECT * FROM read_parquet('{path}')")
-                    count = conn.execute(f"SELECT COUNT(*) FROM main.{name}").fetchone()[0]
-                    print(f"  Loaded {count:,} rows → main.{name}", flush=True)
-                except Exception as e:
-                    print(f"  Warning: loading {name}.parquet failed: {e}", flush=True)
+    def _lance_path(name):
+        return f"{LANCE_DIR}/{name}.lance"
 
-    def _save_embedding_table(conn, table_name):
-        """Save a single main.* embedding table to Parquet on volume."""
+    def _lance_exists(name):
         import pathlib
-        emb_dir = pathlib.Path(EMB_DIR)
-        emb_dir.mkdir(parents=True, exist_ok=True)
+        return pathlib.Path(_lance_path(name)).exists()
+
+    def _lance_count(conn, name):
         try:
-            conn.execute(f"COPY main.{table_name} TO '{emb_dir}/{table_name}.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)")
-        except Exception as e:
-            print(f"  Warning: saving {table_name}.parquet failed: {e}", flush=True)
+            return conn.execute(f"SELECT COUNT(*) FROM '{_lance_path(name)}'").fetchone()[0]
+        except Exception:
+            return 0
 
-    def _create_hnsw_indexes(conn):
-        """Create HNSW indexes on main.* tables (if extension available)."""
-        indexes = [
-            ("catalog_emb_idx", "catalog_embeddings", "embedding", "cosine"),
-            ("desc_emb_idx", "description_embeddings", "embedding", "cosine"),
-            ("name_emb_idx", "entity_name_embeddings", "embedding", "cosine"),
-            ("building_vec_idx", "building_vectors", "features", "l2sq"),
-        ]
-        for idx_name, table, col, metric in indexes:
-            try:
-                conn.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {idx_name}
-                    ON main.{table} USING HNSW ({col})
-                    WITH (metric = '{metric}')
-                """)
-            except Exception as e:
-                print(f"  Warning: {idx_name} HNSW index failed: {e}", flush=True)
-
-    def _incremental_catalog_embeddings(conn, embed_batch, dims):
+    def _build_catalog_embeddings(conn, embed_batch, dims):
         """Embed schema descriptions — always rebuilt (tiny, ~12 rows)."""
         rows = []
         for schema_name, description in SCHEMA_DESCRIPTIONS.items():
@@ -1075,14 +1036,15 @@ async def app_lifespan(server):
             return
         texts = [r[2] for r in rows]
         vecs = embed_batch(texts)
-        conn.execute(f"CREATE OR REPLACE TABLE main.catalog_embeddings (schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}])")
+        conn.execute(f"CREATE OR REPLACE TEMP TABLE _tmp_catalog (schema_name VARCHAR, table_name VARCHAR, description VARCHAR, embedding FLOAT[{dims}])")
         for (s, t, d), vec in zip(rows, vecs):
-            conn.execute(f"INSERT INTO main.catalog_embeddings VALUES (?, ?, ?, ?::FLOAT[{dims}])", [s, t, d, vec.tolist()])
-        _save_embedding_table(conn, "catalog_embeddings")
-        print(f"  Catalog embeddings: {len(rows)} rows (rebuilt)", flush=True)
+            conn.execute(f"INSERT INTO _tmp_catalog VALUES (?, ?, ?, ?::FLOAT[{dims}])", [s, t, d, vec.tolist()])
+        conn.execute(f"COPY _tmp_catalog TO '{_lance_path('catalog_embeddings')}' (FORMAT lance, mode 'overwrite')")
+        conn.execute("DROP TABLE _tmp_catalog")
+        print(f"  Catalog embeddings: {len(rows)} rows (rebuilt → Lance)", flush=True)
 
-    def _incremental_description_embeddings(conn, embed_batch, dims):
-        """Embed complaint/violation descriptions — only new ones."""
+    def _build_description_embeddings(conn, embed_batch, dims):
+        """Embed complaint/violation descriptions — incremental append."""
         sources = [
             ("311", """
                 SELECT DISTINCT (complaint_type || ': ' || COALESCE(descriptor, '')) AS description
@@ -1105,135 +1067,127 @@ async def app_lifespan(server):
                 WHERE charge_1_code_description IS NOT NULL LIMIT 500
             """),
         ]
-        # Ensure table exists in main
-        try:
-            conn.execute("SELECT 1 FROM main.description_embeddings LIMIT 1")
-        except Exception:
-            conn.execute(f"CREATE TABLE main.description_embeddings (source VARCHAR, description VARCHAR, embedding FLOAT[{dims}])")
-
         total_new = 0
         for source_name, sql in sources:
             try:
                 all_descs = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
-                try:
-                    existing = {r[0] for r in conn.execute(
-                        "SELECT description FROM main.description_embeddings WHERE source = ?",
-                        [source_name]
-                    ).fetchall()}
-                except Exception:
-                    existing = set()
+                existing = set()
+                if _lance_exists("description_embeddings"):
+                    try:
+                        existing = {r[0] for r in conn.execute(
+                            f"SELECT description FROM '{_lance_path('description_embeddings')}' WHERE source = '{source_name}'"
+                        ).fetchall()}
+                    except Exception:
+                        pass
                 new_descs = sorted(all_descs - existing)
                 if not new_descs:
                     print(f"  Descriptions [{source_name}]: {len(existing)} existing, 0 new", flush=True)
                     continue
                 print(f"  Descriptions [{source_name}]: {len(existing)} existing, {len(new_descs)} new — embedding...", flush=True)
                 vecs = embed_batch(new_descs)
-                # Bulk insert via Parquet (row-by-row INSERT is too slow for 768-dim vectors)
-                import pyarrow as pa, pyarrow.parquet as pq
+                import pyarrow as pa
                 tbl = pa.table({
                     "source": [source_name] * len(new_descs),
                     "description": new_descs,
                     "embedding": [v.tolist() for v in vecs],
                 })
-                tmp = "/tmp/_desc_embeddings.parquet"
-                pq.write_table(tbl, tmp)
-                conn.execute(f"INSERT INTO main.description_embeddings SELECT source, description, embedding::FLOAT[{dims}] AS embedding FROM read_parquet('{tmp}')")
-                import os; os.unlink(tmp)
+                conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_desc AS SELECT * FROM tbl")
+                mode = "append" if _lance_exists("description_embeddings") else "overwrite"
+                conn.execute(f"COPY _tmp_desc TO '{_lance_path('description_embeddings')}' (FORMAT lance, mode '{mode}')")
+                conn.execute("DROP TABLE _tmp_desc")
                 total_new += len(new_descs)
             except Exception as e:
                 print(f"  Warning: descriptions [{source_name}] failed: {e}", flush=True)
-        if total_new > 0:
-            _save_embedding_table(conn, "description_embeddings")
-        print(f"  Description embeddings: {total_new} new rows", flush=True)
+        print(f"  Description embeddings: {total_new} new rows → Lance", flush=True)
 
-    def _incremental_entity_name_embeddings(conn, embed_batch, dims):
-        """Embed entity names from graph tables — only new ones."""
+    def _build_entity_name_embeddings(conn, embed_batch, dims):
+        """Embed entity names from graph tables — incremental append."""
         name_sources = [
             ("owner", "SELECT DISTINCT owner_name AS name FROM main.graph_owners WHERE owner_name IS NOT NULL AND LENGTH(owner_name) > 2"),
             ("corp_officer", "SELECT DISTINCT person_name AS name FROM main.graph_corp_people WHERE person_name IS NOT NULL AND LENGTH(person_name) > 2"),
             ("donor", "SELECT DISTINCT donor_name AS name FROM main.graph_campaign_donors WHERE donor_name IS NOT NULL AND LENGTH(donor_name) > 2"),
             ("tx_party", "SELECT DISTINCT entity_name AS name FROM main.graph_tx_entities WHERE entity_name IS NOT NULL AND LENGTH(entity_name) > 2"),
         ]
-        # Ensure table exists in main
-        try:
-            conn.execute("SELECT 1 FROM main.entity_name_embeddings LIMIT 1")
-        except Exception:
-            conn.execute(f"CREATE TABLE main.entity_name_embeddings (source VARCHAR, name VARCHAR, embedding FLOAT[{dims}])")
-
         total_new = 0
         for source_name, sql in name_sources:
             try:
                 all_names = {r[0] for r in conn.execute(sql).fetchall() if r[0]}
-                try:
-                    existing = {r[0] for r in conn.execute(
-                        "SELECT name FROM main.entity_name_embeddings WHERE source = ?",
-                        [source_name]
-                    ).fetchall()}
-                except Exception:
-                    existing = set()
+                existing = set()
+                if _lance_exists("entity_name_embeddings"):
+                    try:
+                        existing = {r[0] for r in conn.execute(
+                            f"SELECT name FROM '{_lance_path('entity_name_embeddings')}' WHERE source = '{source_name}'"
+                        ).fetchall()}
+                    except Exception:
+                        pass
                 new_names = sorted(all_names - existing)
                 if not new_names:
                     print(f"  Names [{source_name}]: {len(existing):,} existing, 0 new", flush=True)
                     continue
                 print(f"  Names [{source_name}]: {len(existing):,} existing, {len(new_names):,} new — embedding...", flush=True)
                 vecs = embed_batch(new_names)
-                # Bulk insert via Parquet for large batches
-                if len(new_names) > 1000:
-                    import pyarrow as pa, pyarrow.parquet as pq, os
-                    tbl = pa.table({"source": [source_name] * len(new_names), "name": new_names, "embedding": [v.tolist() for v in vecs]})
-                    tmp = "/tmp/_new_name_embeddings.parquet"
-                    pq.write_table(tbl, tmp)
-                    conn.execute(f"INSERT INTO main.entity_name_embeddings SELECT source, name, embedding::FLOAT[{dims}] AS embedding FROM read_parquet('{tmp}')")
-                    os.unlink(tmp)
-                else:
-                    for name, vec in zip(new_names, vecs):
-                        conn.execute(f"INSERT INTO main.entity_name_embeddings VALUES (?, ?, ?::FLOAT[{dims}])", [source_name, name, vec.tolist()])
+                import pyarrow as pa
+                tbl = pa.table({"source": [source_name] * len(new_names), "name": new_names, "embedding": [v.tolist() for v in vecs]})
+                conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_names AS SELECT * FROM tbl")
+                mode = "append" if _lance_exists("entity_name_embeddings") else "overwrite"
+                conn.execute(f"COPY _tmp_names TO '{_lance_path('entity_name_embeddings')}' (FORMAT lance, mode '{mode}')")
+                conn.execute("DROP TABLE _tmp_names")
                 total_new += len(new_names)
-                # Save after each source to checkpoint progress
-                _save_embedding_table(conn, "entity_name_embeddings")
-                print(f"  Names [{source_name}]: {len(new_names):,} embedded and saved", flush=True)
+                print(f"  Names [{source_name}]: {len(new_names):,} embedded → Lance", flush=True)
             except Exception as e:
                 print(f"  Warning: names [{source_name}] failed: {e}", flush=True)
-        print(f"  Entity name embeddings: {total_new:,} new rows total", flush=True)
+        print(f"  Entity name embeddings: {total_new:,} new rows total → Lance", flush=True)
 
     def _build_building_vectors(conn):
         """Build numeric feature vectors for building similarity (no embeddings needed)."""
         try:
-            conn.execute("""
-                CREATE OR REPLACE TABLE main.building_vectors AS
-                WITH base AS (
-                    SELECT
-                        b.bbl, b.borough,
-                        COALESCE(TRY_CAST(b.stories AS DOUBLE), 0) AS stories,
-                        COALESCE(TRY_CAST(b.units AS DOUBLE), 0) AS units,
-                        COALESCE(TRY_CAST(b.year_built AS DOUBLE), 0) AS year_built,
-                        COUNT(v.violation_id) AS viol_count,
-                        COUNT(CASE WHEN v.currentstatus = 'Open' THEN 1 END) AS open_viol_count
-                    FROM main.graph_buildings b
-                    LEFT JOIN main.graph_violations v ON b.bbl = v.bbl
-                    GROUP BY b.bbl, b.borough, b.stories, b.units, b.year_built
-                ),
-                normed AS (
+            conn.execute(f"""
+                COPY (
+                    WITH base AS (
+                        SELECT
+                            b.bbl, b.borough,
+                            COALESCE(TRY_CAST(b.stories AS DOUBLE), 0) AS stories,
+                            COALESCE(TRY_CAST(b.units AS DOUBLE), 0) AS units,
+                            COALESCE(TRY_CAST(b.year_built AS DOUBLE), 0) AS year_built,
+                            COUNT(v.violation_id) AS viol_count,
+                            COUNT(CASE WHEN v.currentstatus = 'Open' THEN 1 END) AS open_viol_count
+                        FROM main.graph_buildings b
+                        LEFT JOIN main.graph_violations v ON b.bbl = v.bbl
+                        GROUP BY b.bbl, b.borough, b.stories, b.units, b.year_built
+                    ),
+                    normed AS (
+                        SELECT bbl, borough,
+                            stories / NULLIF(MAX(stories) OVER (), 0) AS n1,
+                            units / NULLIF(MAX(units) OVER (), 0) AS n2,
+                            year_built / NULLIF(MAX(year_built) OVER (), 0) AS n3,
+                            viol_count / NULLIF(MAX(viol_count) OVER (), 0) AS n4,
+                            open_viol_count / NULLIF(MAX(open_viol_count) OVER (), 0) AS n5,
+                            CASE WHEN units > 0 THEN viol_count::DOUBLE / units ELSE 0 END /
+                                NULLIF(MAX(CASE WHEN units > 0 THEN viol_count::DOUBLE / units ELSE 0 END) OVER (), 0) AS n6
+                        FROM base
+                    )
                     SELECT bbl, borough,
-                        stories / NULLIF(MAX(stories) OVER (), 0) AS n1,
-                        units / NULLIF(MAX(units) OVER (), 0) AS n2,
-                        year_built / NULLIF(MAX(year_built) OVER (), 0) AS n3,
-                        viol_count / NULLIF(MAX(viol_count) OVER (), 0) AS n4,
-                        open_viol_count / NULLIF(MAX(open_viol_count) OVER (), 0) AS n5,
-                        CASE WHEN units > 0 THEN viol_count::DOUBLE / units ELSE 0 END /
-                            NULLIF(MAX(CASE WHEN units > 0 THEN viol_count::DOUBLE / units ELSE 0 END) OVER (), 0) AS n6
-                    FROM base
-                )
-                SELECT bbl, borough,
-                    [COALESCE(n1,0), COALESCE(n2,0), COALESCE(n3,0),
-                     COALESCE(n4,0), COALESCE(n5,0), COALESCE(n6,0)]::FLOAT[6] AS features
-                FROM normed
+                        [COALESCE(n1,0), COALESCE(n2,0), COALESCE(n3,0),
+                         COALESCE(n4,0), COALESCE(n5,0), COALESCE(n6,0)]::FLOAT[] AS features
+                    FROM normed
+                ) TO '{_lance_path('building_vectors')}' (FORMAT lance, mode 'overwrite')
             """)
-            count = conn.execute("SELECT COUNT(*) FROM main.building_vectors").fetchone()[0]
-            print(f"  Building vectors: {count:,} rows (rebuilt from graph tables)", flush=True)
+            count = _lance_count(conn, "building_vectors")
+            print(f"  Building vectors: {count:,} rows (rebuilt → Lance)", flush=True)
         except Exception as e:
             print(f"  Warning: building vectors failed: {e}", flush=True)
-            conn.execute("CREATE OR REPLACE TABLE main.building_vectors (bbl VARCHAR, borough VARCHAR, features FLOAT[6])")
+
+    def _create_lance_indexes(conn):
+        try:
+            if _lance_count(conn, "entity_name_embeddings") > 10000:
+                conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS name_emb_idx
+                    ON '{_lance_path("entity_name_embeddings")}' (embedding)
+                    USING IVF_FLAT WITH (num_partitions=32, metric_type='cosine')
+                """)
+                print("  ANN index created on entity_name_embeddings", flush=True)
+        except Exception as e:
+            print(f"  Warning: Lance ANN index failed: {e}", flush=True)
 
     try:
         if _graph_cache_fresh():
@@ -2674,27 +2628,25 @@ async def app_lifespan(server):
         print(f"Warning: embedding model unavailable: {e}", flush=True)
 
     if embed_fn is not None:
-        # Load cached embeddings immediately (fast, no API calls)
-        _load_persisted_embeddings(conn, embed_dims)
-
-        # Run incremental embedding in background thread so server starts NOW
         def _background_embed():
             try:
-                print("Background: checking for new data to embed...", flush=True)
-                _incremental_catalog_embeddings(conn, embed_batch_fn, embed_dims)
-                _incremental_description_embeddings(conn, embed_batch_fn, embed_dims)
+                import pathlib
+                pathlib.Path(LANCE_DIR).mkdir(parents=True, exist_ok=True)
+                print("Background: building Lance embeddings...", flush=True)
+                _build_catalog_embeddings(conn, embed_batch_fn, embed_dims)
+                _build_description_embeddings(conn, embed_batch_fn, embed_dims)
                 if graph_ready:
-                    _incremental_entity_name_embeddings(conn, embed_batch_fn, embed_dims)
+                    _build_entity_name_embeddings(conn, embed_batch_fn, embed_dims)
                     _build_building_vectors(conn)
-                _create_hnsw_indexes(conn)
-                print("Background: embedding pipeline complete", flush=True)
+                _create_lance_indexes(conn)
+                print("Background: Lance embedding pipeline complete", flush=True)
             except Exception as e:
-                print(f"Background: embedding pipeline error: {e}", flush=True)
+                print(f"Background: embedding error: {e}", flush=True)
 
         import threading
         embed_thread = threading.Thread(target=_background_embed, daemon=True)
         embed_thread.start()
-        print("Embedding pipeline started in background — server starting now", flush=True)
+        print("Embedding pipeline started in background", flush=True)
 
     # Pre-compute resource category embeddings for semantic matching in resource_finder
     resource_category_vecs = {}
@@ -3155,12 +3107,10 @@ def data_catalog(ctx: Context, keyword: Annotated[str, Field(description="Search
             query_vec = embed_fn(kw)
             vec_literal = vec_to_sql(query_vec)
             sem_sql = f"""
-                SELECT schema_name, table_name, description,
-                       array_cosine_distance(embedding, {vec_literal}) AS distance
-                FROM main.catalog_embeddings
+                SELECT schema_name, table_name, description, _distance AS distance
+                FROM lance_vector_search('{LANCE_DIR}/catalog_embeddings.lance', 'embedding', {vec_literal}, k=5)
                 WHERE table_name != '__schema__'
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sem_rows = db.execute(sem_sql).fetchall()
@@ -3346,17 +3296,15 @@ def text_search(query: Annotated[str, Field(description="Search keywords. Exampl
             elif corpus == "restaurants":
                 source_filter = "WHERE source = 'restaurant'"
             sem_sql = f"""
-                SELECT source, description,
-                       array_cosine_distance(embedding, {vec_literal}) AS distance
-                FROM main.description_embeddings
+                SELECT source, description, _distance AS distance
+                FROM lance_vector_search('{LANCE_DIR}/description_embeddings.lance', 'embedding', {vec_literal}, k=5)
                 {source_filter}
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sem_rows = db.execute(sem_sql).fetchall()
             semantic_suggestions = [
-                (src, desc, round((1 - dist) * 100))
+                (src, desc, round(max(0, 1.0 / (1.0 + dist)) * 100))
                 for src, desc, dist in sem_rows
                 if dist < 0.7
             ]
@@ -3429,11 +3377,10 @@ def semantic_search(
 
     sql = f"""
         SELECT source, description,
-               1.0 - array_cosine_distance(embedding, {vec_literal}) AS similarity
-        FROM main.description_embeddings
+               max(0, 1.0 / (1.0 + _distance)) AS similarity
+        FROM lance_vector_search('{LANCE_DIR}/description_embeddings.lance', 'embedding', {vec_literal}, k={limit})
         {source_filter}
-        ORDER BY array_cosine_distance(embedding, {vec_literal})
-        LIMIT {limit}
+        ORDER BY _distance ASC
     """
 
     with _db_lock:
@@ -6637,10 +6584,9 @@ def due_diligence(
             query_vec = embed_fn(name.strip().upper())
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -6888,10 +6834,9 @@ def cop_sheet(
             query_vec = embed_fn(name.strip().upper())
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -7218,10 +7163,9 @@ def money_trail(
             query_vec = embed_fn(name.strip().upper())
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -8077,14 +8021,14 @@ def similar_buildings(
 
     with _db_lock:
         target_rows = db.execute(
-            "SELECT features FROM main.building_vectors WHERE bbl = ?", [bbl]
+            f"SELECT features FROM '{LANCE_DIR}/building_vectors.lance' WHERE bbl = '{bbl}'"
         ).fetchall()
 
     if not target_rows:
         raise ToolError(f"No feature vector found for BBL {bbl}. Building may not be in the vector index.")
 
     target_vec = target_rows[0][0]
-    vec_literal = "[" + ",".join(f"{v:.6g}" for v in target_vec) + "]::FLOAT[6]"
+    vec_literal = "[" + ",".join(f"{v:.6g}" for v in target_vec) + "]::FLOAT[]"
 
     knn_sql = f"""
 SELECT
@@ -8096,11 +8040,11 @@ SELECT
     gb.units,
     gb.year_built,
     gb.borough,
-    array_distance(bv.features, {vec_literal}) AS distance
-FROM main.building_vectors bv
+    bv._distance AS distance
+FROM lance_vector_search('{LANCE_DIR}/building_vectors.lance', 'features', {vec_literal}, k={limit+1}) bv
 LEFT JOIN main.graph_buildings gb ON gb.bbl = bv.bbl
 WHERE bv.bbl != '{bbl}'
-ORDER BY array_distance(bv.features, {vec_literal})
+ORDER BY bv._distance ASC
 LIMIT {limit}
 """
 
@@ -9614,10 +9558,9 @@ def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
             query_vec = embed_fn(search_term)
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -9808,10 +9751,9 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
             query_vec = embed_fn(search)
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -10626,11 +10568,10 @@ def fuzzy_entity_search(
 
     sql = f"""
         SELECT source, name,
-               1.0 - array_cosine_distance(embedding, {vec_literal}) AS similarity
-        FROM main.entity_name_embeddings
+               max(0, 1.0 / (1.0 + _distance)) AS similarity
+        FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k={limit})
         {source_filter}
-        ORDER BY array_cosine_distance(embedding, {vec_literal})
-        LIMIT {limit}
+        ORDER BY _distance ASC
     """
 
     with _db_lock:
@@ -10691,10 +10632,9 @@ def marriage_search(surname: Annotated[str, Field(description="Last name to sear
             query_vec = embed_fn(embed_input)
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -11427,10 +11367,9 @@ def transaction_network(name: NAME, ctx: Context) -> ToolResult:
             query_vec = embed_fn(search)
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -11569,10 +11508,9 @@ def corporate_web(entity_name: NAME, ctx: Context) -> ToolResult:
             query_vec = embed_fn(search)
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -11739,10 +11677,9 @@ def pay_to_play(entity_name: NAME, ctx: Context) -> ToolResult:
             query_vec = embed_fn(search)
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -11964,10 +11901,9 @@ def contractor_network(name_or_license: Annotated[str, Field(description="Contra
             query_vec = embed_fn(search)
             vec_literal = vec_to_sql(query_vec)
             sim_sql = f"""
-                SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                FROM main.entity_name_embeddings
-                ORDER BY array_cosine_distance(embedding, {vec_literal})
-                LIMIT 5
+                SELECT name, _distance AS dist
+                FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=5)
+                ORDER BY _distance ASC
             """
             with _db_lock:
                 sim_rows = db.execute(sim_sql).fetchall()
@@ -12259,10 +12195,9 @@ def person_crossref(name: NAME, ctx: Context) -> ToolResult:
                     query_vec = embed_fn(search)
                     vec_literal = vec_to_sql(query_vec)
                     sim_sql = f"""
-                        SELECT name, array_cosine_distance(embedding, {vec_literal}) AS dist
-                        FROM main.entity_name_embeddings
-                        ORDER BY array_cosine_distance(embedding, {vec_literal})
-                        LIMIT 3
+                        SELECT name, _distance AS dist
+                        FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k=3)
+                        ORDER BY _distance ASC
                     """
                     with _db_lock:
                         sim_rows = db.execute(sim_sql).fetchall()
