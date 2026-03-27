@@ -2727,7 +2727,7 @@ async def app_lifespan(server):
         except Exception as e:
             print(f"Warning: resource category embeddings failed: {e}", flush=True)
 
-    pool = CursorPool(conn, size=8)
+    pool = CursorPool(conn, size=16)
     try:
         yield {
             "db": conn, "pool": pool, "catalog": catalog,
