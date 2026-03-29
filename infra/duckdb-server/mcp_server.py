@@ -6362,53 +6362,71 @@ def school_report(dbn: Annotated[str, Field(description="School DBN: district(2)
 # ---------------------------------------------------------------------------
 
 SCHOOL_SEARCH_BY_NAME_SQL = """
-SELECT DISTINCT
-    d.dbn,
-    d.school_name,
-    d.year,
-    TRY_CAST(d.total_enrollment AS INT) AS enrollment,
-    s.address,
-    s.borough_name AS borough,
-    s.postcode AS zipcode,
-    s.geographical_district_code AS district
-FROM lake.education.demographics_2020 d
-LEFT JOIN lake.education.school_safety s ON d.dbn = s.dbn
-WHERE d.school_name ILIKE '%' || ? || '%' ESCAPE '\\'
-ORDER BY TRY_CAST(d.total_enrollment AS INT) DESC NULLS LAST
+WITH latest AS (
+    SELECT dbn, school_name,
+           MAX(year) AS year,
+           MAX(TRY_CAST(total_enrollment AS INT)) AS enrollment
+    FROM lake.education.demographics_2020
+    WHERE school_name ILIKE '%' || ? || '%' ESCAPE '\\'
+    GROUP BY dbn, school_name
+),
+safety AS (
+    SELECT DISTINCT ON (dbn) dbn, address, borough_name, postcode, geographical_district_code
+    FROM lake.education.school_safety
+    ORDER BY dbn
+)
+SELECT l.dbn, l.school_name, l.year, l.enrollment,
+       s.address, s.borough_name AS borough, s.postcode AS zipcode,
+       s.geographical_district_code AS district
+FROM latest l
+LEFT JOIN safety s ON l.dbn = s.dbn
+ORDER BY l.enrollment DESC NULLS LAST
 LIMIT 20
 """
 
 SCHOOL_SEARCH_BY_ZIP_SQL = """
-SELECT DISTINCT
-    d.dbn,
-    d.school_name,
-    d.year,
-    TRY_CAST(d.total_enrollment AS INT) AS enrollment,
-    s.address,
-    s.borough_name AS borough,
-    s.postcode AS zipcode,
-    s.geographical_district_code AS district
-FROM lake.education.demographics_2020 d
-JOIN lake.education.school_safety s ON d.dbn = s.dbn
-WHERE s.postcode = ?
-ORDER BY TRY_CAST(d.total_enrollment AS INT) DESC NULLS LAST
+WITH latest AS (
+    SELECT dbn, school_name,
+           MAX(year) AS year,
+           MAX(TRY_CAST(total_enrollment AS INT)) AS enrollment
+    FROM lake.education.demographics_2020
+    GROUP BY dbn, school_name
+),
+safety AS (
+    SELECT DISTINCT ON (dbn) dbn, address, borough_name, postcode, geographical_district_code
+    FROM lake.education.school_safety
+    WHERE postcode = ?
+    ORDER BY dbn
+)
+SELECT l.dbn, l.school_name, l.year, l.enrollment,
+       s.address, s.borough_name AS borough, s.postcode AS zipcode,
+       s.geographical_district_code AS district
+FROM safety s
+JOIN latest l ON s.dbn = l.dbn
+ORDER BY l.enrollment DESC NULLS LAST
 LIMIT 30
 """
 
 SCHOOL_SEARCH_BY_DISTRICT_SQL = """
-SELECT DISTINCT
-    d.dbn,
-    d.school_name,
-    d.year,
-    TRY_CAST(d.total_enrollment AS INT) AS enrollment,
-    s.address,
-    s.borough_name AS borough,
-    s.postcode AS zipcode,
-    s.geographical_district_code AS district
-FROM lake.education.demographics_2020 d
-LEFT JOIN lake.education.school_safety s ON d.dbn = s.dbn
-WHERE LPAD(CAST(s.geographical_district_code AS VARCHAR), 2, '0') = LPAD(?, 2, '0')
-ORDER BY TRY_CAST(d.total_enrollment AS INT) DESC NULLS LAST
+WITH latest AS (
+    SELECT dbn, school_name,
+           MAX(year) AS year,
+           MAX(TRY_CAST(total_enrollment AS INT)) AS enrollment
+    FROM lake.education.demographics_2020
+    GROUP BY dbn, school_name
+),
+safety AS (
+    SELECT DISTINCT ON (dbn) dbn, address, borough_name, postcode, geographical_district_code
+    FROM lake.education.school_safety
+    WHERE LPAD(CAST(geographical_district_code AS VARCHAR), 2, '0') = LPAD(?, 2, '0')
+    ORDER BY dbn
+)
+SELECT l.dbn, l.school_name, l.year, l.enrollment,
+       s.address, s.borough_name AS borough, s.postcode AS zipcode,
+       s.geographical_district_code AS district
+FROM safety s
+JOIN latest l ON s.dbn = l.dbn
+ORDER BY l.enrollment DESC NULLS LAST
 LIMIT 40
 """
 
@@ -6520,9 +6538,17 @@ SELECT
     d.hispanic_1 AS hispanic_pct,
     d.white_1 AS white_pct,
     s.postcode AS zipcode
-FROM lake.education.demographics_2020 d
-LEFT JOIN lake.education.school_safety s ON d.dbn = s.dbn
-WHERE d.dbn IN ({placeholders})
+FROM (
+    SELECT DISTINCT ON (dbn) *
+    FROM lake.education.demographics_2020
+    WHERE dbn IN ({placeholders})
+    ORDER BY dbn, year DESC
+) d
+LEFT JOIN (
+    SELECT DISTINCT ON (dbn) *
+    FROM lake.education.school_safety
+    ORDER BY dbn, school_year DESC
+) s ON d.dbn = s.dbn
 ORDER BY d.dbn
 """
 
@@ -6678,11 +6704,11 @@ LIMIT 3
 
 @mcp.tool(annotations=READONLY, tags={"education"})
 def district_report(
-    district: Annotated[str, Field(description="NYC school district number (1-32, 75, 79). Example: '2' or '02'")],
+    district: Annotated[str | int, Field(description="NYC school district number (1-32, 75, 79). Example: '2' or '02'")],
     ctx: Context,
 ) -> ToolResult:
     """Aggregate education report for a NYC school district — school count, enrollment, demographics, average test scores, attendance, and safety across all schools in the district. Districts 1-32 are geographic, 75 is citywide special education, 79 is alternative schools. Example: district_report('2'). For individual school detail, use school_report(dbn). To find schools in a district, use school_search(district_number)."""
-    district = district.strip().lstrip('0') or '0'
+    district = str(district).strip().lstrip('0') or '0'
     if not district.isdigit() or int(district) < 1 or int(district) > 79:
         raise ToolError("District must be 1-32, 75, or 79.")
 
