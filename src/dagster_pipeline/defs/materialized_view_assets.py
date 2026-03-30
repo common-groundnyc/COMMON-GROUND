@@ -205,7 +205,7 @@ def mv_acris_deeds(context) -> dg.MaterializeResult:
         dg.AssetKey(["social_services", "n311_service_requests"]),
         dg.AssetKey(["housing", "hpd_complaints"]),
         dg.AssetKey(["health", "restaurant_inspections"]),
-        dg.AssetKey(["economics", "irs_soi_zip_income"]),
+        # IRS income data not yet ingested — add dep when available
     ],
 )
 def mv_zip_stats(context) -> dg.MaterializeResult:
@@ -243,16 +243,6 @@ def mv_zip_stats(context) -> dg.MaterializeResult:
                 FROM lake.health.restaurant_inspections
                 WHERE zipcode IS NOT NULL AND LENGTH(zipcode) = 5
                 GROUP BY zipcode
-            ),
-            income AS (
-                SELECT zipcode AS zip,
-                    ROUND(1000.0 * SUM(TRY_CAST(agi_amount AS DOUBLE))
-                        / NULLIF(SUM(TRY_CAST(num_returns AS DOUBLE)), 0), 0) AS avg_agi
-                FROM lake.economics.irs_soi_zip_income
-                WHERE TRY_CAST(tax_year AS INTEGER) = (
-                    SELECT MAX(TRY_CAST(tax_year AS INTEGER)) FROM lake.economics.irs_soi_zip_income
-                )
-                GROUP BY zipcode
             )
             SELECT
                 COALESCE(n.zip, h.zip, r.zip) AS zip,
@@ -264,12 +254,10 @@ def mv_zip_stats(context) -> dg.MaterializeResult:
                 COALESCE(r.restaurant_count, 0) AS restaurant_count,
                 COALESCE(r.grade_a_count, 0) AS grade_a_count,
                 COALESCE(r.graded_count, 0) AS graded_count,
-                ROUND(100.0 * r.grade_a_count / NULLIF(r.graded_count, 0), 1) AS pct_grade_a,
-                i.avg_agi
+                ROUND(100.0 * r.grade_a_count / NULLIF(r.graded_count, 0), 1) AS pct_grade_a
             FROM n311 n
             FULL OUTER JOIN hpd h ON n.zip = h.zip
             FULL OUTER JOIN rest r ON COALESCE(n.zip, h.zip) = r.zip
-            LEFT JOIN income i ON COALESCE(n.zip, h.zip, r.zip) = i.zip
         """)
         row_count = conn.execute(
             "SELECT COUNT(*) FROM lake.foundation.mv_zip_stats"
