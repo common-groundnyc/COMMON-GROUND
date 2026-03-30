@@ -1910,7 +1910,8 @@ async def app_lifespan(server):
                               )
                           )
                     )
-                    SELECT * FROM relevant_corps
+                    SELECT DISTINCT ON (dos_id) * FROM relevant_corps
+                    ORDER BY dos_id, initial_dos_filing_date DESC NULLS LAST
                 """)
                 corp_count = conn.execute("SELECT COUNT(*) FROM main.graph_corps").fetchone()[0]
                 print(f"Corps built: {corp_count:,} NYC-relevant corporations", flush=True)
@@ -2284,7 +2285,8 @@ async def app_lifespan(server):
                         FROM lake.public_safety.nypd_officer_profile
                         WHERE name IS NOT NULL
                     )
-                    SELECT c.tax_id AS officer_id,
+                    SELECT DISTINCT ON (c.tax_id)
+                           c.tax_id AS officer_id,
                            c.first_name, c.last_name,
                            c.first_name || ' ' || c.last_name AS full_name,
                            c.shield, c.current_rank, c.current_command,
@@ -2292,6 +2294,7 @@ async def app_lifespan(server):
                            p.profile_id
                     FROM ccrb c
                     LEFT JOIN profiles p ON c.shield = p.shield
+                    ORDER BY c.tax_id, c.total_complaints DESC NULLS LAST
                 """)
                 officer_count = conn.execute("SELECT COUNT(*) FROM main.graph_officers").fetchone()[0]
                 print(f"Officers built: {officer_count:,} (CCRB+profile merged)", flush=True)
@@ -10584,11 +10587,17 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
         lines.append("")
 
     if epa_rows:
-        total_penalties = sum(float(str(r[6] or 0).replace('$', '').replace(',', '') or 0) for r in epa_rows)
+        try:
+            total_penalties = sum(float(str(r[6] or 0).replace('$', '').replace(',', '') or 0) for r in epa_rows)
+        except (ValueError, TypeError):
+            total_penalties = 0
         lines.append(f"--- EPA ECHO FACILITIES ({len(epa_rows)} facilities, ${total_penalties:,.0f} total penalties) ---")
         for r in epa_rows:
             viol = "VIOLATION" if r[5] and r[5] == "Y" else "compliant"
-            pen_str = f"${float(str(r[9] or 0).replace('$', '').replace(',', '') or 0):,.0f}" if r[9] else "$0"
+            try:
+                pen_str = f"${float(str(r[9] or 0).replace('$', '').replace(',', '') or 0):,.0f}" if r[9] else "$0"
+            except (ValueError, TypeError):
+                pen_str = str(r[9] or "$0")
             lines.append(f"  {r[0] or '?'} | {r[1] or '?'}, {r[2] or ''} {r[3] or ''} | {viol} | {pen_str} last penalty | {r[7] or 0} inspections")
         lines.append("")
 
@@ -10616,7 +10625,10 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     if lobby_rows:
         lines.append(f"--- NYS LOBBYIST REGISTRATIONS ({len(lobby_rows)} records) ---")
         for r in lobby_rows:
-            comp = f"${float(str(r[3] or 0).replace('$', '').replace(',', '') or 0):,.0f}" if r[3] else "?"
+            try:
+                comp = f"${float(str(r[3] or 0).replace('$', '').replace(',', '') or 0):,.0f}" if r[3] else "?"
+            except (ValueError, TypeError):
+                comp = str(r[3] or "?")
             lines.append(f"  {r[0] or '?'} → {r[1] or '?'} | {r[2] or '?'} | {comp} | {r[4] or '?'} | {r[5] or ''}")
         lines.append("")
 
