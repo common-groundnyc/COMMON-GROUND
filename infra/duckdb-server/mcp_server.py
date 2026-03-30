@@ -2675,12 +2675,38 @@ async def app_lifespan(server):
                     main.graph_pol_lobbying
                         SOURCE KEY (lobbyist_name) REFERENCES main.graph_pol_entities (entity_name)
                         DESTINATION KEY (client_name) REFERENCES main.graph_pol_entities (entity_name)
-                        LABEL LobbiesFor
+                        LABEL LobbiesFor,
+                    main.graph_pol_contracts
+                        SOURCE KEY (vendor_name) REFERENCES main.graph_pol_entities (entity_name)
+                        DESTINATION KEY (agency_name) REFERENCES main.graph_pol_entities (entity_name)
+                        LABEL ContractedBy
                 )
             """)
-            print("Property graph nyc_influence_network created", flush=True)
-        except Exception as e:
-            print(f"Warning: nyc_influence_network graph definition failed: {e}", flush=True)
+            print("Property graph nyc_influence_network created (with contracts)", flush=True)
+        except Exception as e_expanded:
+            print(f"Warning: expanded nyc_influence_network failed ({e_expanded}), falling back to 2-edge definition", flush=True)
+            try:
+                conn.execute("""
+                    CREATE OR REPLACE PROPERTY GRAPH nyc_influence_network
+                    VERTEX TABLES (
+                        main.graph_pol_entities
+                            PROPERTIES (entity_name, roles, total_amount, total_transactions)
+                            LABEL PoliticalEntity
+                    )
+                    EDGE TABLES (
+                        main.graph_pol_donations
+                            SOURCE KEY (donor_name) REFERENCES main.graph_pol_entities (entity_name)
+                            DESTINATION KEY (candidate_name) REFERENCES main.graph_pol_entities (entity_name)
+                            LABEL DonatesTo,
+                        main.graph_pol_lobbying
+                            SOURCE KEY (lobbyist_name) REFERENCES main.graph_pol_entities (entity_name)
+                            DESTINATION KEY (client_name) REFERENCES main.graph_pol_entities (entity_name)
+                            LABEL LobbiesFor
+                    )
+                """)
+                print("Property graph nyc_influence_network created (original 2-edge)", flush=True)
+            except Exception as e:
+                print(f"Warning: nyc_influence_network graph definition failed: {e}", flush=True)
 
         # Contractor network graph: contractors connected through shared buildings
         try:
@@ -2742,6 +2768,29 @@ async def app_lifespan(server):
             print("Property graph nyc_tradewaste_network created", flush=True)
         except Exception as e:
             print(f"Warning: nyc_tradewaste_network graph definition failed: {e}", flush=True)
+
+        # COIB conflicts of interest network
+        try:
+            conn.execute("""
+                CREATE OR REPLACE PROPERTY GRAPH nyc_coib_network
+                VERTEX TABLES (
+                    main.graph_coib_donors
+                        PROPERTIES (donor_name, donation_types, total_donated, donation_count, city, state)
+                        LABEL COIBDonor,
+                    main.graph_coib_policymakers
+                        PROPERTIES (policymaker_name, agency, title, latest_year, years_active)
+                        LABEL Policymaker
+                )
+                EDGE TABLES (
+                    main.graph_coib_donor_edges
+                        SOURCE KEY (donor_name) REFERENCES main.graph_coib_donors (donor_name)
+                        DESTINATION KEY (recipient) REFERENCES main.graph_coib_policymakers (policymaker_name)
+                        LABEL DonatesTo
+                )
+            """)
+            print("Property graph nyc_coib_network created", flush=True)
+        except Exception as e:
+            print(f"Warning: nyc_coib_network graph definition failed: {e}", flush=True)
 
         graph_ready = True
     except Exception as e:
