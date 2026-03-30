@@ -10,12 +10,14 @@ from dagster_pipeline.defs.federal_direct_assets import all_federal_direct_asset
 from dagster_pipeline.defs.name_index_asset import name_index
 from dagster_pipeline.defs.resolved_entities_asset import resolved_entities
 from dagster_pipeline.defs.flush_sensor import flush_ducklake_sensor
+from dagster_pipeline.defs.freshness_sensor import data_freshness_sensor
 from dagster_pipeline.defs.foundation_assets import h3_index, phonetic_index, row_fingerprints
+from dagster_pipeline.defs.entity_embeddings_asset import entity_name_embeddings
 from dagster_pipeline.defs.quality_assets import data_health
 from dagster_pipeline.resources.ducklake import DuckLakeResource
 
 all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, name_index, resolved_entities,
-              h3_index, phonetic_index, row_fingerprints, data_health]
+              h3_index, phonetic_index, row_fingerprints, data_health, entity_name_embeddings]
 
 from dagster_pipeline.sources.datasets import (
     STATIC_DATASETS, MONTHLY_DATASETS, SOCRATA_DATASETS,
@@ -76,24 +78,38 @@ foundation_job = dg.define_asset_job(
     selection=dg.AssetSelection.groups("foundation"),
 )
 
+# Entity embeddings: rebuild Lance vector index
+entity_embeddings_job = dg.define_asset_job(
+    name="entity_embeddings",
+    selection=dg.AssetSelection.assets(
+        dg.AssetKey(["foundation", "entity_name_embeddings"]),
+    ),
+)
+
 # --- Schedules ---
 daily_schedule = dg.ScheduleDefinition(
     job=daily_live_job,
     cron_schedule="0 6 * * *",  # 6 AM daily
-    default_status=dg.DefaultScheduleStatus.STOPPED,
+    default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 
 monthly_schedule = dg.ScheduleDefinition(
     job=monthly_refresh_job,
     cron_schedule="0 3 1 * *",  # 3 AM, 1st of month
-    default_status=dg.DefaultScheduleStatus.STOPPED,
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+)
+
+entity_embeddings_schedule = dg.ScheduleDefinition(
+    job=entity_embeddings_job,
+    cron_schedule="0 12 1 * *",  # noon on 1st of month
+    default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 
 defs = dg.Definitions(
     assets=all_assets,
-    jobs=[daily_live_job, monthly_refresh_job, all_assets_job, entity_resolution_job, foundation_job],
-    schedules=[daily_schedule, monthly_schedule],
-    sensors=[flush_ducklake_sensor],
+    jobs=[daily_live_job, monthly_refresh_job, all_assets_job, entity_resolution_job, foundation_job, entity_embeddings_job],
+    schedules=[daily_schedule, monthly_schedule, entity_embeddings_schedule],
+    sensors=[flush_ducklake_sensor, data_freshness_sensor],
     resources={
         "ducklake": DuckLakeResource(
             catalog_url=os.environ.get(
@@ -112,7 +128,7 @@ defs = dg.Definitions(
         ),
     },
     executor=dg.multiprocess_executor.configured({
-        "max_concurrent": 8,
+        "max_concurrent": 4,
         "start_method": {"forkserver": {}},
         "tag_concurrency_limits": [
             {
