@@ -4,52 +4,50 @@ Replaces raw UPPER() = UPPER() matching in entity_xray, person_crossref,
 money_trail, marriage_search, vital_records, due_diligence.
 """
 
+from sql_utils import validate_identifier as _validate_identifier
+
 
 def phonetic_search_sql(
     first_name: str | None,
     last_name: str,
     min_score: float = 0.75,
     limit: int = 50,
-) -> str:
-    """SQL to find person matches using phonetic blocking + fuzzy scoring.
-
-    Strategy:
-    1. Block on double_metaphone(last_name) — reduces candidates by ~100x
-    2. Score with jaro_winkler_similarity — handles typos, nicknames
-    """
-    escaped_last = last_name.replace("'", "''")
-
+) -> tuple[str, list]:
+    """SQL + params for phonetic person search. Returns (sql, params) tuple."""
     if first_name:
-        escaped_first = first_name.replace("'", "''")
-        return f"""
+        sql = """
             SELECT
                 unique_id, last_name, first_name, source_table,
-                jaro_winkler_similarity(UPPER(last_name), UPPER('{escaped_last}')) AS last_score,
-                jaro_winkler_similarity(UPPER(first_name), UPPER('{escaped_first}')) AS first_score,
-                (jaro_winkler_similarity(UPPER(last_name), UPPER('{escaped_last}')) * 0.6
-                 + jaro_winkler_similarity(UPPER(first_name), UPPER('{escaped_first}')) * 0.4
+                jaro_winkler_similarity(UPPER(last_name), UPPER(?)) AS last_score,
+                jaro_winkler_similarity(UPPER(first_name), UPPER(?)) AS first_score,
+                (jaro_winkler_similarity(UPPER(last_name), UPPER(?)) * 0.6
+                 + jaro_winkler_similarity(UPPER(first_name), UPPER(?)) * 0.4
                 ) AS combined_score
             FROM lake.foundation.phonetic_index
-            WHERE dm_last = double_metaphone(UPPER('{escaped_last}'))
-              AND (jaro_winkler_similarity(UPPER(last_name), UPPER('{escaped_last}')) * 0.6
-                   + jaro_winkler_similarity(UPPER(first_name), UPPER('{escaped_first}')) * 0.4
-                  ) >= {min_score}
+            WHERE dm_last = double_metaphone(UPPER(?))
+              AND (jaro_winkler_similarity(UPPER(last_name), UPPER(?)) * 0.6
+                   + jaro_winkler_similarity(UPPER(first_name), UPPER(?)) * 0.4
+                  ) >= ?
             ORDER BY combined_score DESC
-            LIMIT {limit}
+            LIMIT ?
         """
+        params = [last_name, first_name, last_name, first_name, last_name, last_name, first_name, min_score, limit]
+        return sql, params
     else:
-        return f"""
+        sql = """
             SELECT
                 unique_id, last_name, first_name, source_table,
-                jaro_winkler_similarity(UPPER(last_name), UPPER('{escaped_last}')) AS last_score,
+                jaro_winkler_similarity(UPPER(last_name), UPPER(?)) AS last_score,
                 1.0 AS first_score,
-                jaro_winkler_similarity(UPPER(last_name), UPPER('{escaped_last}')) AS combined_score
+                jaro_winkler_similarity(UPPER(last_name), UPPER(?)) AS combined_score
             FROM lake.foundation.phonetic_index
-            WHERE dm_last = double_metaphone(UPPER('{escaped_last}'))
-              AND jaro_winkler_similarity(UPPER(last_name), UPPER('{escaped_last}')) >= {min_score}
+            WHERE dm_last = double_metaphone(UPPER(?))
+              AND jaro_winkler_similarity(UPPER(last_name), UPPER(?)) >= ?
             ORDER BY combined_score DESC
-            LIMIT {limit}
+            LIMIT ?
         """
+        params = [last_name, last_name, last_name, last_name, min_score, limit]
+        return sql, params
 
 
 def fuzzy_name_sql(
@@ -58,17 +56,19 @@ def fuzzy_name_sql(
     name_col: str = "last_name",
     min_score: int = 70,
     limit: int = 30,
-) -> str:
-    """SQL for fuzzy entity/company name matching using rapidfuzz token_sort_ratio."""
-    escaped = name.replace("'", "''")
-    return f"""
+) -> tuple[str, list]:
+    """SQL + params for fuzzy entity/company name matching."""
+    _validate_identifier(table)
+    _validate_identifier(name_col)
+    sql = f"""
         SELECT *,
-            rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER('{escaped}')) AS match_score
+            rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER(?)) AS match_score
         FROM {table}
-        WHERE rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER('{escaped}')) >= {min_score}
+        WHERE rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER(?)) >= ?
         ORDER BY match_score DESC
-        LIMIT {limit}
+        LIMIT ?
     """
+    return sql, [name, name, min_score, limit]
 
 
 def phonetic_vital_search_sql(
@@ -79,31 +79,37 @@ def phonetic_vital_search_sql(
     last_col: str,
     extra_cols: str = "",
     limit: int = 30,
-) -> str:
-    """Phonetic search for historical records where spelling was inconsistent."""
-    escaped_last = last_name.replace("'", "''")
+) -> tuple[str, list]:
+    """Phonetic search for historical records. Returns (sql, params) tuple."""
+    _validate_identifier(table)
+    _validate_identifier(first_col)
+    _validate_identifier(last_col)
+    if extra_cols:
+        for col in extra_cols.split(","):
+            _validate_identifier(col.strip())
     extra = f", {extra_cols}" if extra_cols else ""
 
     if first_name:
-        escaped_first = first_name.replace("'", "''")
-        return f"""
+        sql = f"""
             SELECT {first_col}, {last_col}{extra},
-                jaro_winkler_similarity(UPPER({last_col}), UPPER('{escaped_last}')) AS last_score,
-                jaro_winkler_similarity(UPPER({first_col}), UPPER('{escaped_first}')) AS first_score
+                jaro_winkler_similarity(UPPER({last_col}), UPPER(?)) AS last_score,
+                jaro_winkler_similarity(UPPER({first_col}), UPPER(?)) AS first_score
             FROM {table}
-            WHERE soundex(UPPER({last_col})) = soundex(UPPER('{escaped_last}'))
+            WHERE soundex(UPPER({last_col})) = soundex(UPPER(?))
             ORDER BY last_score DESC, first_score DESC
-            LIMIT {limit}
+            LIMIT ?
         """
+        return sql, [last_name, first_name, last_name, limit]
     else:
-        return f"""
+        sql = f"""
             SELECT {first_col}, {last_col}{extra},
-                jaro_winkler_similarity(UPPER({last_col}), UPPER('{escaped_last}')) AS last_score
+                jaro_winkler_similarity(UPPER({last_col}), UPPER(?)) AS last_score
             FROM {table}
-            WHERE soundex(UPPER({last_col})) = soundex(UPPER('{escaped_last}'))
+            WHERE soundex(UPPER({last_col})) = soundex(UPPER(?))
             ORDER BY last_score DESC
-            LIMIT {limit}
+            LIMIT ?
         """
+        return sql, [last_name, last_name, limit]
 
 
 def fuzzy_money_search_sql(
@@ -113,15 +119,20 @@ def fuzzy_money_search_sql(
     extra_cols: str = "",
     min_score: int = 70,
     limit: int = 30,
-) -> str:
-    """Fuzzy name matching for campaign finance / money trail."""
-    escaped = name.replace("'", "''")
+) -> tuple[str, list]:
+    """Fuzzy name matching for campaign finance. Returns (sql, params) tuple."""
+    _validate_identifier(table)
+    _validate_identifier(name_col)
+    if extra_cols:
+        for col in extra_cols.split(","):
+            _validate_identifier(col.strip())
     extra = f", {extra_cols}" if extra_cols else ""
-    return f"""
+    sql = f"""
         SELECT {name_col}{extra},
-            rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER('{escaped}')) AS match_score
+            rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER(?)) AS match_score
         FROM {table}
-        WHERE rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER('{escaped}')) >= {min_score}
+        WHERE rapidfuzz_token_sort_ratio(UPPER({name_col}), UPPER(?)) >= ?
         ORDER BY match_score DESC
-        LIMIT {limit}
+        LIMIT ?
     """
+    return sql, [name, name, min_score, limit]
