@@ -987,7 +987,7 @@ async def app_lifespan(server):
         ("transportation", "pothole_orders", "the_geom", "geojson_first_coord"),
 
         # URL/link objects → url, link_description
-        ("city_government", "contract_awards", "document_links", "url_object"),
+        # ("city_government", "contract_awards", "document_links", "url_object"),  # column removed from source
         ("city_government", "nys_coelig_enforcement", "status", "url_object"),
         ("environment", "oer_cleanup", "project_specific_document", "url_object"),
         ("financial", "nys_tax_warrants", "url", "url_object"),
@@ -3236,6 +3236,32 @@ def building_profile(bbl: Annotated[str, Field(description="BBL (10 digits) OR s
 
     row = dict(zip(cols, rows[0]))
 
+    # Backfill address/zip/owner from PLUTO when MV returns NULLs
+    if not row.get("address") or not row.get("zip"):
+        try:
+            _, pluto_rows = _execute(pool, """
+                SELECT address, zipcode, ownername, yearbuilt, bldgclass, zonedist1
+                FROM lake.city_government.pluto
+                WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+                LIMIT 1
+            """, [bbl])
+            if pluto_rows:
+                pr = pluto_rows[0]
+                if not row.get("address") and pr[0]:
+                    row["address"] = pr[0]
+                if not row.get("zip") and pr[1]:
+                    row["zip"] = pr[1]
+                if not row.get("ownername") and pr[2]:
+                    row["ownername"] = pr[2]
+                if not row.get("yearbuilt") and pr[3]:
+                    row["yearbuilt"] = pr[3]
+                if not row.get("bldgclass") and pr[4]:
+                    row["bldgclass"] = pr[4]
+                if not row.get("zoning") and pr[5]:
+                    row["zoning"] = pr[5]
+        except Exception:
+            pass
+
     # City-wide violation percentile context
     try:
         _, pct_rows = _execute(pool, """
@@ -3375,6 +3401,27 @@ def address_lookup(
     pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     search = address.strip().upper()
+
+    # Normalize street names to match PLUTO format:
+    # "5TH" → "5", "FIFTH" → "5", "AVE" → "AVENUE", "ST" → "STREET", etc.
+    import re as _re
+    _ordinal_map = {
+        "FIRST": "1", "SECOND": "2", "THIRD": "3", "FOURTH": "4", "FIFTH": "5",
+        "SIXTH": "6", "SEVENTH": "7", "EIGHTH": "8", "NINTH": "9", "TENTH": "10",
+        "ELEVENTH": "11", "TWELFTH": "12",
+    }
+    _abbrev_map = {
+        "AVE": "AVENUE", "ST": "STREET", "BLVD": "BOULEVARD", "DR": "DRIVE",
+        "PL": "PLACE", "RD": "ROAD", "CT": "COURT", "LN": "LANE", "PKY": "PARKWAY",
+    }
+    # Strip ordinal suffixes: "5TH" → "5", "3RD" → "3", "1ST" → "1", "2ND" → "2"
+    search = _re.sub(r'\b(\d+)(?:ST|ND|RD|TH)\b', r'\1', search)
+    # Replace word ordinals: "FIFTH" → "5"
+    for word, num in _ordinal_map.items():
+        search = _re.sub(rf'\b{word}\b', num, search)
+    # Expand abbreviations: "AVE" → "AVENUE"  (only at word boundary, not mid-word)
+    for abbr, full in _abbrev_map.items():
+        search = _re.sub(rf'\b{abbr}\b', full, search)
 
     # Parse out house number if present
     parts = search.split(None, 1)
@@ -3838,7 +3885,7 @@ def semantic_search(
 
     sql = f"""
         SELECT source, description,
-               max(0, 1.0 / (1.0 + _distance)) AS similarity
+               GREATEST(0, 1.0 / (1.0 + CAST(_distance AS FLOAT))) AS similarity
         FROM lance_vector_search('{LANCE_DIR}/description_embeddings.lance', 'embedding', {vec_literal}, k={limit})
         {source_filter}
         ORDER BY _distance ASC
@@ -4967,8 +5014,8 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
     avg_cols, avg_rows = _execute(pool, SAFETY_CITY_AVERAGES_SQL, [])
 
     # Parse crime data
-    crime_years = [(r[1], r[2], r[3], r[4], r[5]) for r in crime_rows if r[0] == "crime_by_year"]
-    top_crimes = [(r[6], r[2]) for r in crime_rows if r[0] == "top_crimes"]
+    crime_years = [(r[1], int(r[2] or 0), int(r[3] or 0), int(r[4] or 0), int(r[5] or 0)) for r in crime_rows if r[0] == "crime_by_year"]
+    top_crimes = [(r[6], int(r[2] or 0)) for r in crime_rows if r[0] == "top_crimes"]
 
     # Parse arrest data (all values are VARCHAR from UNION ALL)
     arrest_years = [(r[1], int(r[2]) if r[2] else 0, int(r[3]) if r[3] else 0,
@@ -4987,6 +5034,9 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
     lines.append("\nCRIME (3-year trend):")
     for yr, total, fel, misd, viol in crime_years:
         yr_int = int(yr) if yr else 0
+        total = int(total) if total else 0
+        fel = int(fel) if fel else 0
+        misd = int(misd) if misd else 0
         lines.append(f"  {yr_int}: {total:,} total ({fel:,} felony, {misd:,} misdemeanor)")
     if top_crimes:
         lines.append("  Top offenses (recent):")
@@ -5263,7 +5313,7 @@ WATCHDOG_EVICTIONS_SQL = """
 SELECT COUNT(*) AS eviction_count
 FROM lake.housing.evictions
 WHERE bbl IN ({placeholders})
-  AND "residential/commercial" = 'Residential'
+  AND "residential_commercial_ind" = 'Residential'
 """
 
 WATCHDOG_DOB_SQL = """
@@ -11090,7 +11140,7 @@ def fuzzy_entity_search(
 
     sql = f"""
         SELECT source, name,
-               max(0, 1.0 / (1.0 + _distance)) AS similarity
+               GREATEST(0, 1.0 / (1.0 + CAST(_distance AS FLOAT))) AS similarity
         FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k={limit})
         {source_filter}
         ORDER BY _distance ASC

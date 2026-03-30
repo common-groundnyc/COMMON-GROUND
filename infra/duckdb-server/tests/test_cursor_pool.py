@@ -93,3 +93,35 @@ def test_cursor_reusable_after_error(pool):
     with pool.cursor() as cur:
         rows = cur.execute("SELECT COUNT(*) FROM test_t").fetchone()
         assert rows[0] == 3
+
+
+def test_cursor_timeout():
+    """Pool should raise TimeoutError when all cursors are busy."""
+    conn = duckdb.connect()
+    p = CursorPool(conn, size=1, timeout=0.1)
+    with p.cursor() as _:
+        with pytest.raises(TimeoutError, match="cursor"):
+            with p.cursor() as _:
+                pass
+    conn.close()
+
+
+def test_cursor_replaced_after_fatal_error(pool):
+    """A cursor that fails should be replaced, not returned broken."""
+    with pool.cursor() as cur:
+        with pytest.raises(Exception):
+            cur.execute("SELECT * FROM nonexistent_table_xyz")
+    # Next cursor should work fine
+    with pool.cursor() as cur:
+        rows = cur.execute("SELECT COUNT(*) FROM test_t").fetchone()
+        assert rows[0] == 3
+
+
+def test_pool_close():
+    conn = duckdb.connect()
+    p = CursorPool(conn, size=2)
+    p.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        with p.cursor() as _:
+            pass
+    conn.close()

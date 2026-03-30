@@ -29,7 +29,7 @@ def get_row_count(domain: str, dataset_id: str, token: str,
     if where:
         params["$where"] = where
     resp = httpx.get(f"https://{domain}/resource/{dataset_id}.json",
-                     params=params, timeout=60)
+                     params=params, timeout=120, follow_redirects=True)
     resp.raise_for_status()
     data = resp.json()
     return int(data[0]["count"]) if data else 0

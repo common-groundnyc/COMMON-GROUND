@@ -1,7 +1,4 @@
-"""ACS 5-Year ZCTA demographics for NYC ZIP codes."""
-
-import dlt
-import requests
+"""ACS 5-Year ZCTA demographics — variable definitions for NYC ZIP codes."""
 
 ACS_YEAR = 2023
 ACS_BASE = f"https://api.census.gov/data/{ACS_YEAR}/acs/acs5"
@@ -29,49 +26,3 @@ VARIABLES = {
     "B08303_013E": "commute_60_plus_min",
     "B25077_001E": "median_home_value",
 }
-
-
-@dlt.source(name="acs_zcta_demographics")
-def acs_zcta_source():
-    @dlt.resource(
-        name="acs_zcta_demographics",
-        write_disposition="replace",
-        columns={"zcta": {"data_type": "text", "nullable": False}},
-    )
-    def acs_zcta_demographics():
-        var_codes = ",".join(VARIABLES.keys())
-        url = f"{ACS_BASE}?get=NAME,{var_codes}&for=zip%20code%20tabulation%20area:*"
-        resp = requests.get(url, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        headers = data[0]
-
-        for row in data[1:]:
-            record = dict(zip(headers, row))
-            zcta = record.get("zip code tabulation area", "")
-            if zcta[:3] not in NYC_ZIP_PREFIXES:
-                continue
-
-            out = {"zcta": zcta, "acs_year": ACS_YEAR, "name": record.get("NAME", "")}
-            for code, col_name in VARIABLES.items():
-                val = record.get(code)
-                if val and val not in ("-666666666", "-999999999", "null", "None"):
-                    try:
-                        out[col_name] = float(val)
-                    except (ValueError, TypeError):
-                        out[col_name] = None
-                else:
-                    out[col_name] = None
-            yield out
-
-    return acs_zcta_demographics
-
-
-if __name__ == "__main__":
-    pipeline = dlt.pipeline(
-        pipeline_name="acs_zcta",
-        destination="duckdb",
-        dataset_name="federal",
-    )
-    load_info = pipeline.run(acs_zcta_source())
-    print(load_info)

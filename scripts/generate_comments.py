@@ -102,15 +102,15 @@ def fetch_all_socrata_metadata(
         for table_name, dataset_id, domain_key in tables:
             domain = DOMAINS.get(domain_key, domain_key)
             done += 1
-            print(f"  [{done}/{total}] {schema}.{table_name} ({dataset_id})...", end=" ")
+            print(f"  [{done}/{total}] {schema}.{table_name} ({dataset_id})...", end=" ", file=sys.stderr)
             try:
                 meta = fetch_socrata_metadata(domain, dataset_id)
                 result[schema][table_name] = meta
-                print(f"OK — {len(meta['columns'])} columns")
+                print(f"OK — {len(meta['columns'])} columns", file=sys.stderr)
             except httpx.HTTPStatusError as e:
-                print(f"SKIP ({e.response.status_code})")
+                print(f"SKIP ({e.response.status_code})", file=sys.stderr)
             except Exception as e:
-                print(f"ERROR ({e})")
+                print(f"ERROR ({e})", file=sys.stderr)
             time.sleep(RATE_LIMIT_DELAY)
 
     return result
@@ -129,13 +129,11 @@ def profile_table_columns(
     """Profile columns in a DuckLake table — cardinality, null %, top values."""
     fqn = f"{database}.{schema}.{table}"
 
-    # Get column names and types
+    # Get column names and types via DESCRIBE (information_schema is broken in DuckLake)
     try:
-        cols_result = conn.execute(
-            f"SELECT column_name, data_type FROM information_schema.columns "
-            f"WHERE table_catalog = ? AND table_schema = ? AND table_name = ?",
-            [database, schema, table],
-        ).fetchall()
+        cols_result = conn.execute(f"DESCRIBE {fqn}").fetchall()
+        # DESCRIBE returns (column_name, column_type, null, key, default, extra)
+        cols_result = [(row[0], row[1]) for row in cols_result]
     except Exception:
         return []
 
@@ -358,16 +356,18 @@ def main():
         datasets = {args.schema: datasets[args.schema]}
 
     # Step 1: Fetch Socrata metadata
-    print("Fetching Socrata metadata...")
+    print("Fetching Socrata metadata...", file=sys.stderr)
     all_meta = fetch_all_socrata_metadata(datasets)
 
     if args.fetch_only:
         output = json.dumps(all_meta, indent=2, default=str)
-        print(output)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(output)
+        print(f"Raw metadata written to {args.output}", file=sys.stderr)
         return
 
     # Step 2: Connect to DuckLake
-    from dagster_pipeline.sources.socrata_direct import get_ducklake_connection
+    import duckdb
 
     catalog_url = os.environ.get("DUCKLAKE_CATALOG_URL", "")
     s3_endpoint = os.environ.get("S3_ENDPOINT", "")
@@ -378,12 +378,20 @@ def main():
         print("ERROR: DUCKLAKE_CATALOG_URL not set")
         sys.exit(1)
 
-    conn = get_ducklake_connection(catalog_url, {
-        "endpoint": s3_endpoint,
-        "access_key": minio_user,
-        "secret_key": minio_pass,
-        "use_ssl": False,
-    })
+    conn = duckdb.connect(":memory:", config={"allow_unsigned_extensions": "true"})
+    conn.execute("INSTALL curl_httpfs FROM community")
+    conn.execute("LOAD curl_httpfs")
+    conn.execute("LOAD ducklake")
+    conn.execute("LOAD postgres")
+    conn.execute(f"SET s3_endpoint='{s3_endpoint}'")
+    conn.execute(f"SET s3_access_key_id='{minio_user}'")
+    conn.execute(f"SET s3_secret_access_key='{minio_pass}'")
+    conn.execute("SET s3_use_ssl=false")
+    conn.execute("SET s3_url_style='path'")
+    conn.execute("SET http_timeout=300000")
+    conn.execute("SET memory_limit='2GB'")
+    conn.execute("SET threads=4")
+    conn.execute(f"ATTACH '{catalog_url}' AS lake (METADATA_SCHEMA 'lake')")
 
     # Step 3: Profile + rewrite each table
     import anthropic

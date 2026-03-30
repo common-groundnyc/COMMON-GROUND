@@ -24,12 +24,6 @@ LANCE_TABLE_NAME = "entity_name_embeddings"
 LANCE_PATH = os.path.join(LANCE_LOCAL_DIR, f"{LANCE_TABLE_NAME}.lance")
 CHUNK_SIZE = 100_000
 
-# Add embedder directory to path so we can import it
-_EMBEDDER_DIR = str(Path(__file__).resolve().parents[4] / "infra" / "duckdb-server")
-if _EMBEDDER_DIR not in sys.path:
-    sys.path.insert(0, _EMBEDDER_DIR)
-
-
 @asset(
     key=AssetKey(["foundation", "entity_name_embeddings"]),
     group_name="foundation",
@@ -41,6 +35,16 @@ def entity_name_embeddings(context) -> MaterializeResult:
     """Embed distinct names from name_index into a Lance vector index."""
     import lancedb
 
+    # Import embedder — try relative path first, fall back to known location
+    embedder_candidates = [
+        str(Path(__file__).resolve().parent.parent.parent.parent / "infra" / "duckdb-server"),
+        os.path.expanduser("~/Desktop/dagster-pipeline/infra/duckdb-server"),
+        "/opt/common-ground/duckdb-server",  # Docker/Hetzner path
+    ]
+    for edir in embedder_candidates:
+        if Path(edir, "embedder.py").exists() and edir not in sys.path:
+            sys.path.insert(0, edir)
+            break
     from embedder import create_embedder
 
     t_start = time.time()

@@ -16,7 +16,6 @@ def apply_manifest_to_db(conn, manifest: dict, database: str = "lake", dry_run: 
 
     # Build set of existing (schema, table) pairs — skip in dry-run
     existing_tables = set()
-    existing_columns: dict[tuple[str, str], set[str]] = {}
     if not dry_run:
         rows = conn.execute(
             "SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = ?",
@@ -24,15 +23,23 @@ def apply_manifest_to_db(conn, manifest: dict, database: str = "lake", dry_run: 
         ).fetchall()
         existing_tables = {(r[0], r[1]) for r in rows}
 
-        col_rows = conn.execute(
-            "SELECT schema_name, table_name, column_name FROM duckdb_columns() WHERE database_name = ?",
-            [database],
-        ).fetchall()
-        for r in col_rows:
-            key = (r[0], r[1])
-            existing_columns.setdefault(key, set()).add(r[2])
+    # Cache for per-table column names (fetched lazily via DESCRIBE)
+    _col_cache: dict[tuple[str, str], set[str]] = {}
 
-    for entry in manifest.get("tables", []):
+    def _get_columns(schema: str, table: str) -> set[str]:
+        key = (schema, table)
+        if key not in _col_cache:
+            try:
+                desc = conn.execute(f"DESCRIBE {database}.{schema}.{table}").fetchall()
+                _col_cache[key] = {r[0] for r in desc}
+            except Exception:
+                _col_cache[key] = set()
+        return _col_cache[key]
+
+    # Manifest can be a list of entries or a dict with "tables" key
+    entries = manifest if isinstance(manifest, list) else manifest.get("tables", [])
+
+    for entry in entries:
         schema = entry["schema"]
         table = entry["table"]
 
@@ -58,7 +65,7 @@ def apply_manifest_to_db(conn, manifest: dict, database: str = "lake", dry_run: 
         # Column comments
         for col_name, col_comment in entry.get("columns", {}).items():
             if not dry_run:
-                table_cols = existing_columns.get((schema, table), set())
+                table_cols = _get_columns(schema, table)
                 if col_name not in table_cols:
                     continue
 
@@ -93,26 +100,28 @@ def main():
     if args.dry_run:
         stats = apply_manifest_to_db(conn=None, manifest=manifest, dry_run=True)
     else:
-        # Late import — only needed for live mode
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-        from dagster_pipeline.sources.socrata_direct import get_ducklake_connection
+        import duckdb
 
-        pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "")
-        if not pg_pass:
-            print("DAGSTER_PG_PASSWORD not set", file=sys.stderr)
+        catalog_url = os.environ.get("DUCKLAKE_CATALOG_URL", "")
+        if not catalog_url:
+            print("DUCKLAKE_CATALOG_URL not set", file=sys.stderr)
             sys.exit(1)
 
-        catalog_url = (
-            f"ducklake:postgres:dbname=ducklake user=dagster "
-            f"password={pg_pass} host={os.environ.get('DUCKLAKE_HOST', 'postgres')} port=5432"
-        )
-        s3_config = {
-            "endpoint": os.environ.get("S3_ENDPOINT", "minio:9000"),
-            "access_key": os.environ.get("MINIO_ROOT_USER", "minioadmin"),
-            "secret_key": os.environ.get("MINIO_ROOT_PASSWORD", ""),
-            "use_ssl": False,
-        }
-        conn = get_ducklake_connection(catalog_url, s3_config)
+        conn = duckdb.connect(":memory:", config={"allow_unsigned_extensions": "true"})
+        conn.execute("INSTALL curl_httpfs FROM community")
+        conn.execute("LOAD curl_httpfs")
+        conn.execute("LOAD ducklake")
+        conn.execute("LOAD postgres")
+        s3_endpoint = os.environ.get("S3_ENDPOINT", "178.156.228.119:9000")
+        minio_user = os.environ.get("MINIO_ROOT_USER", "")
+        minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "")
+        conn.execute(f"SET s3_endpoint='{s3_endpoint}'")
+        conn.execute(f"SET s3_access_key_id='{minio_user}'")
+        conn.execute(f"SET s3_secret_access_key='{minio_pass}'")
+        conn.execute("SET s3_use_ssl=false")
+        conn.execute("SET s3_url_style='path'")
+        conn.execute("SET http_timeout=300000")
+        conn.execute(f"ATTACH '{catalog_url}' AS lake (METADATA_SCHEMA 'lake')")
         stats = apply_manifest_to_db(conn, manifest)
         conn.close()
 

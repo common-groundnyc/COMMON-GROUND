@@ -45,7 +45,7 @@ def mv_building_hub(context) -> dg.MaterializeResult:
             CREATE TABLE lake.foundation.mv_building_hub AS
             WITH buildings AS (
                 SELECT
-                    bbl,
+                    LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') AS bbl,
                     FIRST(address) AS address,
                     FIRST(ownername) AS ownername,
                     FIRST(zipcode) AS zipcode,
@@ -57,7 +57,7 @@ def mv_building_hub(context) -> dg.MaterializeResult:
                     FIRST(TRY_CAST(assesstot AS DOUBLE)) AS assessed_total
                 FROM lake.city_government.pluto
                 WHERE bbl IS NOT NULL
-                GROUP BY bbl
+                GROUP BY 1
             ),
             viol AS (
                 SELECT bbl,
@@ -374,17 +374,21 @@ def mv_corp_network(context) -> dg.MaterializeResult:
         conn.execute("DROP TABLE IF EXISTS lake.foundation.mv_corp_network")
         conn.execute("""
             CREATE TABLE lake.foundation.mv_corp_network AS
-            WITH nyc_corps AS (
+            WITH property_owners AS (
+                SELECT DISTINCT UPPER(ownername) AS name
+                FROM lake.city_government.pluto
+                WHERE ownername IS NOT NULL AND LENGTH(ownername) > 5
+                  AND (UPPER(ownername) LIKE '%LLC%' OR UPPER(ownername) LIKE '%CORP%'
+                       OR UPPER(ownername) LIKE '%INC%' OR UPPER(ownername) LIKE '%LP%')
+            ),
+            nyc_corps AS (
                 SELECT dos_id, current_entity_name, entity_type,
                        initial_dos_filing_date, county,
                        dos_process_name, dos_process_address_1, dos_process_city,
                        registered_agent_name, chairman_name
                 FROM lake.business.nys_corporations
                 WHERE current_entity_name IS NOT NULL
-                  AND (county IN ('NEW YORK', 'KINGS', 'QUEENS', 'BRONX', 'RICHMOND')
-                       OR dos_process_city IN ('NEW YORK', 'BROOKLYN', 'BRONX', 'QUEENS',
-                                               'STATEN ISLAND', 'MANHATTAN', 'FLUSHING',
-                                               'ASTORIA', 'JAMAICA', 'LONG ISLAND CITY'))
+                  AND UPPER(current_entity_name) IN (SELECT name FROM property_owners)
             ),
             people AS (
                 SELECT

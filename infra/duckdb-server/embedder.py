@@ -11,8 +11,8 @@ _DEFAULT_MODEL_DIR = Path(__file__).parent / "model"
 
 _GEMINI_MODEL = "gemini-embedding-001"
 _GEMINI_DIMS = 768
-_GEMINI_BATCH_SIZE = 100  # max texts per embed_content call
-_MAX_RPS = 40             # stay under 3,000 RPM with headroom
+_GEMINI_BATCH_SIZE = 100  # 100 texts/call — proven stable, no 400s
+_MAX_RPS = 100            # ~6000 RPM — well above free tier, let 429 retries throttle
 
 
 def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = None):

@@ -17,11 +17,13 @@ from dagster_pipeline.defs.quality_assets import data_health
 from dagster_pipeline.defs.materialized_view_assets import (
     mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
 )
+from dagster_pipeline.defs.spatial_views_asset import spatial_views
 from dagster_pipeline.resources.ducklake import DuckLakeResource
 
 all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, name_index, resolved_entities,
               h3_index, phonetic_index, row_fingerprints, data_health, entity_name_embeddings,
-              mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network]
+              mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
+              spatial_views]
 
 from dagster_pipeline.sources.datasets import (
     STATIC_DATASETS, MONTHLY_DATASETS, SOCRATA_DATASETS,
