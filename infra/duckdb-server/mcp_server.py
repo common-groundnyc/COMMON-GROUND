@@ -28,6 +28,7 @@ from pydantic import Field
 from entity import phonetic_search_sql, fuzzy_name_sql
 from spatial import h3_kring_sql, h3_aggregate_sql, h3_heatmap_sql
 from cursor_pool import CursorPool
+from sql_utils import sanitize_error
 
 # ---------------------------------------------------------------------------
 # Reusable annotated types
@@ -55,7 +56,9 @@ _UNSAFE_SQL = re.compile(
 )
 
 _RECONNECT_ERRORS = ("HTTP 403", "HTTP 400", "HTTP 301", "Bad Request", "s3://ducklake")
+_reconnect_lock = threading.Lock()
 _last_reconnect = 0
+_shared_pool = None
 
 _SAFE_DDL = re.compile(
     r"^\s*CREATE\s+OR\s+REPLACE\s+VIEW\b",
@@ -655,28 +658,30 @@ def _execute(pool, sql, params=None):
             err = str(e)
 
             # S3/DuckLake stale connection — auto-reconnect (max once per 60s)
-            if any(sig in err for sig in _RECONNECT_ERRORS) and time.time() - _last_reconnect > 60:
-                _last_reconnect = time.time()
-                try:
-                    print(f"Auto-reconnect: DuckLake S3 error, re-attaching catalog...", flush=True)
-                    with pool.cursor() as rc:
-                        rc.execute("DETACH lake")
-                        # S3 credentials are already set from startup (config is locked)
-                        # Just re-attach DuckLake to refresh the catalog metadata
-                        pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
-                        rc.execute(f"""
-                            ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-                            AS lake (METADATA_SCHEMA 'lake')
-                        """)
-                    print("Auto-reconnect: DuckLake re-attached successfully", flush=True)
-                    # Retry the original query
-                    with pool.cursor() as retry_cur:
-                        result = retry_cur.execute(sql, params or [])
-                        cols = [d[0] for d in result.description] if result.description else []
-                        rows = result.fetchmany(MAX_QUERY_ROWS)
-                        return cols, rows
-                except Exception as reconnect_err:
-                    print(f"Auto-reconnect failed: {reconnect_err}", flush=True)
+            if any(sig in err for sig in _RECONNECT_ERRORS):
+                with _reconnect_lock:
+                    if time.time() - _last_reconnect > 60:
+                        _last_reconnect = time.time()
+                        try:
+                            print(f"Auto-reconnect: DuckLake S3 error, re-attaching catalog...", flush=True)
+                            with pool.cursor() as rc:
+                                rc.execute("DETACH lake")
+                                # S3 credentials are already set from startup (config is locked)
+                                # Just re-attach DuckLake to refresh the catalog metadata
+                                pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
+                                rc.execute(f"""
+                                    ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
+                                    AS lake (METADATA_SCHEMA 'lake')
+                                """)
+                            print("Auto-reconnect: DuckLake re-attached successfully", flush=True)
+                            # Retry the original query
+                            with pool.cursor() as retry_cur:
+                                result = retry_cur.execute(sql, params or [])
+                                cols = [d[0] for d in result.description] if result.description else []
+                                rows = result.fetchmany(MAX_QUERY_ROWS)
+                                return cols, rows
+                        except Exception as reconnect_err:
+                            print(f"Auto-reconnect failed: {reconnect_err}", flush=True)
 
             # Improved error hints
             hint = ""
@@ -706,7 +711,7 @@ def _execute(pool, sql, params=None):
                 hint = " Only SELECT queries are allowed. Use sql_query() for reads."
             elif any(sig in err for sig in _RECONNECT_ERRORS):
                 hint = " Data temporarily unavailable — try again in a moment."
-            raise ToolError(f"SQL error: {e}{hint}")
+            raise ToolError(f"SQL error: {sanitize_error(str(e))}{hint}")
 
 
 def _build_catalog(conn):
@@ -815,6 +820,7 @@ async def app_lifespan(server):
     conn.execute("SET threads = 8")
     conn.execute("SET temp_directory = '/tmp/duckdb_temp'")
     conn.execute("SET max_temp_directory_size = '50GB'")
+    conn.execute("SET preserve_insertion_order = false")
 
     # HTTP/S3 resilience — disable keep-alive to prevent stale 403s (known DuckDB bug)
     conn.execute("SET http_keep_alive = false")
@@ -2931,6 +2937,8 @@ async def app_lifespan(server):
             print(f"Warning: resource category embeddings failed: {e}", flush=True)
 
     pool = CursorPool(conn, size=16)
+    global _shared_pool
+    _shared_pool = pool
     try:
         # Build catalog_json for CitationMiddleware (flat list of {schema, table, rows})
         catalog_json = {"tables": [
@@ -2959,23 +2967,34 @@ async def app_lifespan(server):
         except Exception:
             pass  # _pipeline_state may not exist yet
 
-        yield {
-            "db": conn, "pool": pool, "catalog": catalog,
-            "catalog_json": catalog_json,
-            "pipeline_state": pipeline_state,
-            "graph_ready": graph_ready,
-            "marriage_parquet": MARRIAGE_PARQUET if marriage_available else None,
-            "posthog_enabled": bool(ph_key),
-            "explorations": explorations,
-            "embed_fn": embed_fn,
-            "percentiles_ready": percentiles_ready,
-            "resource_category_vecs": resource_category_vecs,
-        }
+        try:
+            yield {
+                "db": conn, "pool": pool, "catalog": catalog,
+                "catalog_json": catalog_json,
+                "pipeline_state": pipeline_state,
+                "graph_ready": graph_ready,
+                "marriage_parquet": MARRIAGE_PARQUET if marriage_available else None,
+                "posthog_enabled": bool(ph_key),
+                "explorations": explorations,
+                "embed_fn": embed_fn,
+                "percentiles_ready": percentiles_ready,
+                "resource_category_vecs": resource_category_vecs,
+            }
+        finally:
+            print("Shutting down: cleaning up resources...", flush=True)
+            try:
+                pool.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            print("Shutdown complete", flush=True)
     finally:
         if ph_key:
             posthog.flush()
             posthog.shutdown()
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -13223,31 +13242,6 @@ import json as _json
 import datetime as _dt
 
 
-def _catalog_connect():
-    """Open a fresh read-only DuckDB connection attached to DuckLake."""
-    conn = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-    conn.execute("PRAGMA disable_checkpoint_on_shutdown")
-
-    from extensions import load_extensions
-    load_extensions(conn)
-
-    minio_user = os.environ.get("MINIO_ROOT_USER", "").replace("'", "''")
-    minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
-    conn.execute(f"""
-        CREATE OR REPLACE SECRET minio_s3 (
-            TYPE s3, KEY_ID '{minio_user}', SECRET '{minio_pass}',
-            ENDPOINT 'minio:9000', USE_SSL false, URL_STYLE 'path'
-        )
-    """)
-
-    pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
-    conn.execute(f"""
-        ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-        AS lake (METADATA_SCHEMA 'lake')
-    """)
-    return conn
-
-
 _ALLOWED_ORIGINS = frozenset({
     "https://common-ground.nyc",
     "https://www.common-ground.nyc",
@@ -13265,7 +13259,6 @@ def _cors_origin(request):
 async def catalog_json(request: Request) -> JSONResponse:
     """Return table catalog as JSON for the data health page."""
 
-    # Handle CORS preflight
     if request.method == "OPTIONS":
         return JSONResponse(
             {},
@@ -13278,13 +13271,11 @@ async def catalog_json(request: Request) -> JSONResponse:
             },
         )
 
-    db = None
-    pool = None
-    try:
-        db = _catalog_connect()
-        pool = CursorPool(db, size=1)
+    pool = _shared_pool
+    if pool is None:
+        return JSONResponse({"error": "Server starting up"}, status_code=503)
 
-        # Query table stats from DuckDB metadata
+    try:
         cols, rows = _execute(pool, """
             SELECT
                 t.schema_name,
@@ -13304,17 +13295,14 @@ async def catalog_json(request: Request) -> JSONResponse:
             ORDER BY t.schema_name, t.estimated_size DESC
         """)
 
-        # Try to get DuckLake file metadata separately (may fail if schema differs)
         ducklake_info = {}
         try:
             _, dl_rows = _execute(pool, "SELECT table_name, file_count, file_size_bytes, table_uuid FROM ducklake_table_info('lake')")
             for dlr in dl_rows:
                 ducklake_info[dlr[0]] = {"file_count": dlr[1], "file_size_bytes": dlr[2], "table_uuid": str(dlr[3]) if dlr[3] else None}
         except Exception:
-            pass  # DuckLake metadata unavailable — continue without it
+            pass
 
-        # Get pipeline cursor state — last_run_at and row_count per dataset
-        # Try with source columns first (added by freshness sensor), fall back to base columns
         pipeline_state = {}
         try:
             try:
@@ -13333,7 +13321,6 @@ async def catalog_json(request: Request) -> JSONResponse:
                         "source_checked_at": str(psr[6]) if psr[6] else None,
                     }
             except Exception:
-                # Fallback: source columns don't exist yet (sensor hasn't run)
                 _, ps_rows = _execute(pool, """
                     SELECT dataset_name, last_updated_at, row_count, last_run_at
                     FROM lake._pipeline_state
@@ -13343,12 +13330,10 @@ async def catalog_json(request: Request) -> JSONResponse:
                         "cursor": str(psr[1]) if psr[1] else None,
                         "rows_written": psr[2],
                         "last_run_at": str(psr[3]) if psr[3] else None,
-                        "source_rows": None,
-                        "sync_status": None,
-                        "source_checked_at": None,
+                        "source_rows": None, "sync_status": None, "source_checked_at": None,
                     }
         except Exception:
-            pass  # _pipeline_state may not exist yet
+            pass
 
         tables = []
         schema_stats = {}
@@ -13364,28 +13349,23 @@ async def catalog_json(request: Request) -> JSONResponse:
             file_size = dl.get("file_size_bytes", 0)
             table_uuid = dl.get("table_uuid")
 
-            # Extract creation timestamp from UUIDv7 (first 48 bits = epoch ms)
             created_at = None
             if table_uuid:
                 try:
                     hex_str = table_uuid.replace('-', '')
-                    if len(hex_str) >= 13 and hex_str[12] == '7':  # UUIDv7 version check
+                    if len(hex_str) >= 13 and hex_str[12] == '7':
                         epoch_ms = int(hex_str[:12], 16)
                         created_at = _dt.datetime.fromtimestamp(epoch_ms / 1000, tz=_dt.timezone.utc).isoformat()
                 except (ValueError, OSError):
                     pass
 
-            # Pipeline cursor state
             ps_key = f"{schema}.{table}"
             ps = pipeline_state.get(ps_key, {})
 
             tables.append({
-                "schema": schema,
-                "table": table,
-                "rows": est_size or 0,
-                "columns": col_count or 0,
-                "files": file_count or 0,
-                "size_bytes": file_size or 0,
+                "schema": schema, "table": table,
+                "rows": est_size or 0, "columns": col_count or 0,
+                "files": file_count or 0, "size_bytes": file_size or 0,
                 "created_at": created_at,
                 "last_run_at": ps.get("last_run_at"),
                 "cursor": ps.get("cursor"),
@@ -13402,11 +13382,7 @@ async def catalog_json(request: Request) -> JSONResponse:
 
         result = {
             "as_of": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            "summary": {
-                "schemas": len(schema_stats),
-                "tables": len(tables),
-                "total_rows": total_rows,
-            },
+            "summary": {"schemas": len(schema_stats), "tables": len(tables), "total_rows": total_rows},
             "schemas": schema_stats,
             "tables": tables,
         }
@@ -13422,9 +13398,6 @@ async def catalog_json(request: Request) -> JSONResponse:
     except Exception as e:
         print(f"[catalog] Error: {e}", flush=True)
         return JSONResponse({"error": "Internal server error"}, status_code=500)
-    finally:
-        if db:
-            db.close()
 
 
 _well_known_routes = [
