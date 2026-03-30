@@ -5,6 +5,7 @@ Reads (last_name, first_name) pairs from lake.federal.name_index,
 embeds via Gemini API, writes to /data/common-ground/lance/entity_name_embeddings.lance.
 """
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -17,7 +18,10 @@ from dagster_pipeline.defs.name_index_asset import _connect_ducklake
 
 logger = logging.getLogger(__name__)
 
-LANCE_PATH = "/data/common-ground/lance/entity_name_embeddings.lance"
+# Write locally, then rsync to Hetzner. The MCP server reads from the Hetzner path.
+LANCE_LOCAL_DIR = os.environ.get("LANCE_LOCAL_DIR", os.path.expanduser("~/Desktop/dagster-pipeline/data/lance"))
+LANCE_TABLE_NAME = "entity_name_embeddings"
+LANCE_PATH = os.path.join(LANCE_LOCAL_DIR, f"{LANCE_TABLE_NAME}.lance")
 CHUNK_SIZE = 100_000
 
 # Add embedder directory to path so we can import it
@@ -63,8 +67,8 @@ def entity_name_embeddings(context) -> MaterializeResult:
         lance_path = Path(LANCE_PATH)
         if lance_path.exists():
             try:
-                db = lancedb.connect(str(lance_path.parent))
-                tbl = db.open_table(lance_path.stem)
+                db = lancedb.connect(LANCE_LOCAL_DIR)
+                tbl = db.open_table(LANCE_TABLE_NAME)
                 # Only read name column — loading embeddings would OOM
                 existing_names = set(
                     tbl.to_lance().scanner(columns=["name"]).to_table()["name"].to_pylist()
@@ -85,7 +89,7 @@ def entity_name_embeddings(context) -> MaterializeResult:
         lance_initialized = lance_path.exists() and bool(existing_names)
 
         lance_path.parent.mkdir(parents=True, exist_ok=True)
-        lance_db = lancedb.connect(str(lance_path.parent))
+        lance_db = lancedb.connect(LANCE_LOCAL_DIR)
 
         while offset < total:
             chunk = conn.execute(f"""
@@ -116,10 +120,10 @@ def entity_name_embeddings(context) -> MaterializeResult:
                 })
 
                 if lance_initialized:
-                    lance_tbl = lance_db.open_table(lance_path.stem)
+                    lance_tbl = lance_db.open_table(LANCE_TABLE_NAME)
                     lance_tbl.add(chunk_table)
                 else:
-                    lance_db.create_table(lance_path.stem, data=chunk_table, mode="overwrite")
+                    lance_db.create_table(LANCE_TABLE_NAME, data=chunk_table, mode="overwrite")
                     lance_initialized = True
 
                 embedded_count += len(names)
@@ -149,7 +153,10 @@ def entity_name_embeddings(context) -> MaterializeResult:
                 "newly_embedded": MetadataValue.int(embedded_count),
                 "skipped_existing": MetadataValue.int(skipped_count),
                 "total_in_lance": MetadataValue.int(total_in_lance),
-                "lance_path": MetadataValue.text(LANCE_PATH),
+                "lance_local_path": MetadataValue.text(LANCE_PATH),
+                "rsync_command": MetadataValue.text(
+                    f"rsync -avz -e 'ssh -i ~/.ssh/id_ed25519_hetzner' {LANCE_LOCAL_DIR}/ fattie@178.156.228.119:/mnt/data/common-ground/lance/"
+                ),
                 "duration_seconds": MetadataValue.float(elapsed),
             }
         )
