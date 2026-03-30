@@ -14,10 +14,14 @@ from dagster_pipeline.defs.freshness_sensor import data_freshness_sensor
 from dagster_pipeline.defs.foundation_assets import h3_index, phonetic_index, row_fingerprints
 from dagster_pipeline.defs.entity_embeddings_asset import entity_name_embeddings
 from dagster_pipeline.defs.quality_assets import data_health
+from dagster_pipeline.defs.materialized_view_assets import (
+    mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
+)
 from dagster_pipeline.resources.ducklake import DuckLakeResource
 
 all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, name_index, resolved_entities,
-              h3_index, phonetic_index, row_fingerprints, data_health, entity_name_embeddings]
+              h3_index, phonetic_index, row_fingerprints, data_health, entity_name_embeddings,
+              mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network]
 
 from dagster_pipeline.sources.datasets import (
     STATIC_DATASETS, MONTHLY_DATASETS, SOCRATA_DATASETS,
@@ -78,6 +82,18 @@ foundation_job = dg.define_asset_job(
     selection=dg.AssetSelection.groups("foundation"),
 )
 
+# Materialized views: rebuild pre-joined analytical views
+materialized_views_job = dg.define_asset_job(
+    name="materialized_views_rebuild",
+    selection=dg.AssetSelection.assets(
+        dg.AssetKey(["foundation", "mv_building_hub"]),
+        dg.AssetKey(["foundation", "mv_acris_deeds"]),
+        dg.AssetKey(["foundation", "mv_zip_stats"]),
+        dg.AssetKey(["foundation", "mv_crime_precinct"]),
+        dg.AssetKey(["foundation", "mv_corp_network"]),
+    ),
+)
+
 # Entity embeddings: rebuild Lance vector index
 entity_embeddings_job = dg.define_asset_job(
     name="entity_embeddings",
@@ -107,7 +123,7 @@ entity_embeddings_schedule = dg.ScheduleDefinition(
 
 defs = dg.Definitions(
     assets=all_assets,
-    jobs=[daily_live_job, monthly_refresh_job, all_assets_job, entity_resolution_job, foundation_job, entity_embeddings_job],
+    jobs=[daily_live_job, monthly_refresh_job, all_assets_job, entity_resolution_job, foundation_job, materialized_views_job, entity_embeddings_job],
     schedules=[daily_schedule, monthly_schedule, entity_embeddings_schedule],
     sensors=[flush_ducklake_sensor, data_freshness_sensor],
     resources={
