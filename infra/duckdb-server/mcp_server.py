@@ -12723,6 +12723,149 @@ def lake_health(
 
 
 # ---------------------------------------------------------------------------
+# Graph tools — Officer + Trade Waste networks
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=READONLY, tags={"graph", "safety"})
+def officer_network(
+    name: NAME,
+    ctx: Context,
+) -> str:
+    """Find officers connected through shared commands — discovers units with misconduct patterns. Uses DuckPGQ graph on CCRB + NYPD data. For an individual officer dossier, use cop_sheet(name)."""
+    _require_graph(ctx)
+    pool = ctx.lifespan_context["pool"]
+
+    parts = name.strip().split()
+    if len(parts) >= 2:
+        first, last = parts[0], parts[-1]
+        cols, rows = _execute(pool, """
+            SELECT officer_id, full_name, current_rank, current_command, total_complaints, substantiated
+            FROM main.graph_officers
+            WHERE UPPER(last_name) = UPPER(?) AND UPPER(first_name) LIKE UPPER(?) || '%'
+            LIMIT 5
+        """, [last, first])
+    else:
+        cols, rows = _execute(pool, """
+            SELECT officer_id, full_name, current_rank, current_command, total_complaints, substantiated
+            FROM main.graph_officers
+            WHERE UPPER(last_name) = UPPER(?) OR UPPER(full_name) ILIKE '%' || ? || '%'
+            LIMIT 5
+        """, [name, name])
+
+    if not rows:
+        raise ToolError(f"No officer found matching '{name}'. Try cop_sheet(name) for broader search.")
+
+    target = dict(zip(cols, rows[0]))
+    officer_id = target["officer_id"]
+
+    try:
+        net_cols, net_rows = _execute(pool, """
+            SELECT o2.full_name, o2.current_rank, o2.current_command,
+                   o2.total_complaints, o2.substantiated, e.combined_complaints
+            FROM main.graph_officer_shared_command e
+            JOIN main.graph_officers o2 ON e.officer2 = o2.officer_id
+            WHERE e.officer1 = ?
+            ORDER BY e.combined_complaints DESC
+            LIMIT 20
+        """, [officer_id])
+    except Exception:
+        net_rows = []
+
+    lines = [
+        f"OFFICER NETWORK — {target['full_name']}",
+        f"  Rank: {target.get('current_rank', '?')} | Command: {target.get('current_command', '?')}",
+        f"  CCRB complaints: {target.get('total_complaints', 0)} ({target.get('substantiated', 0)} substantiated)",
+        "=" * 55,
+    ]
+
+    if net_rows:
+        lines.append(f"\nCONNECTED OFFICERS ({len(net_rows)} via shared command):")
+        for r in net_rows:
+            d = dict(zip(net_cols, r))
+            lines.append(f"  {d['full_name']} — {d.get('current_rank', '?')}, {d.get('current_command', '?')}")
+            lines.append(f"    Complaints: {d.get('total_complaints', 0)} ({d.get('substantiated', 0)} subst), combined: {d.get('combined_complaints', 0)}")
+    else:
+        lines.append("\nNo connected officers found via shared command.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=READONLY, tags={"graph", "business"})
+def tradewaste_network(
+    company: NAME,
+    ctx: Context,
+) -> str:
+    """Find trade waste haulers connected through shared properties — reveals hidden relationships between waste companies. Uses DuckPGQ graph on BIC licensing data."""
+    _require_graph(ctx)
+    pool = ctx.lifespan_context["pool"]
+
+    cols, rows = _execute(pool, """
+        SELECT bic_number, company_name, trade_name, address, record_count
+        FROM main.graph_bic_companies
+        WHERE UPPER(company_name) ILIKE '%' || UPPER(?) || '%'
+        LIMIT 5
+    """, [company])
+
+    if not rows:
+        raise ToolError(f"No trade waste company found matching '{company}'.")
+
+    target = dict(zip(cols, rows[0]))
+    bic = target["bic_number"]
+
+    try:
+        net_cols, net_rows = _execute(pool, """
+            SELECT c.company_name, c.trade_name, c.address, c.record_count, e.shared_properties
+            FROM main.graph_bic_shared_bbl e
+            JOIN main.graph_bic_companies c ON e.company2 = c.bic_number
+            WHERE e.company1 = ?
+            UNION ALL
+            SELECT c.company_name, c.trade_name, c.address, c.record_count, e.shared_properties
+            FROM main.graph_bic_shared_bbl e
+            JOIN main.graph_bic_companies c ON e.company1 = c.bic_number
+            WHERE e.company2 = ?
+            ORDER BY shared_properties DESC
+            LIMIT 20
+        """, [bic, bic])
+    except Exception:
+        net_rows = []
+
+    viol_cols, viol_rows = _execute(pool, """
+        SELECT type_of_violation, COUNT(*) AS cnt,
+               SUM(COALESCE(fine_amount, 0)) AS total_fines
+        FROM main.graph_bic_violation_edges
+        WHERE company_name = ?
+        GROUP BY type_of_violation
+        ORDER BY cnt DESC
+        LIMIT 10
+    """, [target["company_name"]])
+
+    lines = [
+        f"TRADE WASTE NETWORK — {target['company_name']}",
+        f"  BIC #: {bic} | Trade name: {target.get('trade_name', '?')}",
+        f"  Address: {target.get('address', '?')} | Records: {target.get('record_count', 0)}",
+        "=" * 55,
+    ]
+
+    if viol_rows:
+        lines.append(f"\nVIOLATIONS ({sum(r[1] for r in viol_rows)}):")
+        for r in viol_rows:
+            lines.append(f"  {r[0]}: {r[1]} violations, ${r[2]:,.0f} fines")
+
+    if net_rows:
+        lines.append(f"\nCONNECTED COMPANIES ({len(net_rows)} via shared properties):")
+        for r in net_rows:
+            d = dict(zip(net_cols, r))
+            lines.append(f"  {d['company_name']} — {d.get('shared_properties', 0)} shared properties")
+            if d.get('trade_name'):
+                lines.append(f"    Trade name: {d['trade_name']}")
+    else:
+        lines.append("\nNo connected companies found.")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Prompts — user-invocable investigation templates
 # ---------------------------------------------------------------------------
 
