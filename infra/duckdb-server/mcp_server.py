@@ -155,6 +155,19 @@ def _lance_route_entity(ctx, search_term: str, k: int = 30) -> dict:
 # SQL constants — domain tools
 # ---------------------------------------------------------------------------
 
+BUILDING_PROFILE_MV_SQL = """
+SELECT bbl, address, zipcode AS zip, stories, total_units,
+       mgmt_program AS managementprogram, ownername, yearbuilt, bldgclass, zoning,
+       total_violations, open_violations, class_c_violations,
+       latest_violation AS latest_violation_date,
+       total_complaints, open_complaints,
+       latest_complaint AS latest_complaint_date,
+       dob_violations AS total_dob_violations,
+       latest_dob AS latest_dob_date
+FROM lake.foundation.mv_building_hub
+WHERE bbl = ?
+"""
+
 BUILDING_PROFILE_SQL = """
 WITH building AS (
     SELECT boroid, block, lot, buildingid, bin, streetname, housenumber,
@@ -401,27 +414,12 @@ noise AS (
       AND TRY_CAST(created_date AS DATE) >= CURRENT_DATE - INTERVAL 365 DAY
     GROUP BY incident_zip
 ),
--- Dimension: IRS income (direct ZIP join)
+-- Dimension: ACS median income by ZCTA (direct ZIP join)
 income AS (
-    SELECT zipcode AS zip,
-           ROUND(1000.0 * SUM(TRY_CAST(agi_amount AS DOUBLE)) / NULLIF(SUM(TRY_CAST(num_returns AS DOUBLE)), 0), 0) AS avg_agi
-    FROM lake.economics.irs_soi_zip_income
-    WHERE zipcode IN (SELECT zip FROM input_zips)
-      AND TRY_CAST(tax_year AS INTEGER) = (
-          SELECT MAX(TRY_CAST(tax_year AS INTEGER)) FROM lake.economics.irs_soi_zip_income
-      )
-    GROUP BY zipcode
-),
--- Dimension: Community district profiles (via CD crosswalk)
-cd_profiles AS (
-    SELECT zc.zip,
-           TRY_CAST(cd.mean_commute AS DOUBLE) AS mean_commute_min,
-           TRY_CAST(cd.crime_per_1000 AS DOUBLE) AS crime_per_1000,
-           TRY_CAST(cd.poverty_rate AS DOUBLE) AS poverty_rate,
-           TRY_CAST(cd.pct_served_parks AS DOUBLE) AS pct_park_access,
-           TRY_CAST(cd.pct_bach_deg AS DOUBLE) AS pct_bachelors
-    FROM lake.city_government.cdprofiles_districts cd
-    JOIN zip_primary_cd zc ON cd.borocd = zc.borocd
+    SELECT zcta AS zip,
+           TRY_CAST(median_household_income AS DOUBLE) AS avg_agi
+    FROM lake.federal.acs_zcta_demographics
+    WHERE zcta IN (SELECT zip FROM input_zips)
 )
 SELECT z.zip,
        cr.felonies,
@@ -430,25 +428,19 @@ SELECT z.zip,
        r.total_restaurants AS restaurants,
        r.pct_grade_a,
        h.hpd_complaints_1yr AS housing_complaints,
-       i.avg_agi AS avg_income,
-       cp.mean_commute_min AS commute_min,
-       cp.poverty_rate,
-       cp.pct_park_access AS park_access_pct,
-       cp.pct_bachelors AS bachelors_pct
+       i.avg_agi AS avg_income
 FROM input_zips z
 LEFT JOIN crime cr ON z.zip = cr.zip
 LEFT JOIN restaurants r ON z.zip = r.zip
 LEFT JOIN housing h ON z.zip = h.zip
 LEFT JOIN noise n ON z.zip = n.zip
 LEFT JOIN income i ON z.zip = i.zip
-LEFT JOIN cd_profiles cp ON z.zip = cp.zip
 ORDER BY z.zip
 """
 
 SCHEMA_DESCRIPTIONS = {
     "business": "BLS employment stats, ACS census demographics, business licenses, M/WBE certs. 15 tables. Ask: which industries are growing? where are minority-owned businesses concentrated?",
     "city_government": "PLUTO lot data (every parcel in NYC), city payroll, OATH hearings, zoning, facilities. 25 tables, 3M+ rows. Ask: who owns this lot? what's the zoning? how much do city employees earn?",
-    "economics": "FRED metro economic indicators, IRS income by ZIP. 5 tables. Ask: how does income vary by neighborhood? what's the median household income in this ZIP?",
     "education": "DOE school surveys, test scores, enrollment, NYSED data, College Scorecard. 20 tables. Ask: how do schools compare? what's the graduation rate? which schools are overcrowded?",
     "environment": "Air quality, tree census (680k trees), energy benchmarking, FEMA flood zones, EPA enforcement. 18 tables. Ask: what's the air quality here? which buildings waste the most energy?",
     "financial": "CFPB consumer complaints with full narratives (searchable via text_search). 1 table, 1.2M rows. Ask: what financial companies get the most complaints? what are people complaining about?",
@@ -461,11 +453,7 @@ SCHEMA_DESCRIPTIONS = {
 }
 
 _HIDDEN_SCHEMAS = frozenset({
-    "business_staging", "city_government_staging", "education_staging",
-    "environment_staging", "federal_staging", "financial_staging",
-    "health_staging", "housing_staging", "public_safety_staging",
-    "recreation_staging", "social_services_staging", "transportation_staging",
-    "test_curl", "test_direct", "test_pure",
+    "pg_catalog", "information_schema", "ducklake", "public",
 })
 
 # ---------------------------------------------------------------------------
@@ -3238,7 +3226,10 @@ def building_profile(bbl: Annotated[str, Field(description="BBL (10 digits) OR s
         except Exception:
             raise ToolError(f"Could not resolve address '{bbl}'. Use address_lookup() first to find the BBL.")
     bbl = bbl_input
-    cols, rows = _execute(pool, BUILDING_PROFILE_SQL, [bbl, bbl, bbl, bbl])
+    try:
+        cols, rows = _execute(pool, BUILDING_PROFILE_MV_SQL, [bbl])
+    except Exception:
+        cols, rows = _execute(pool, BUILDING_PROFILE_SQL, [bbl, bbl, bbl, bbl])
 
     if not rows:
         raise ToolError(f"No building found for BBL {bbl}")
@@ -3459,6 +3450,38 @@ def complaints_by_zip(zip_code: ZIP, ctx: Context, days: Annotated[int, Field(de
         raise ToolError("ZIP code must be exactly 5 digits")
 
     pool = ctx.lifespan_context["pool"]
+
+    # Try pre-aggregated MV first
+    try:
+        _mv_cols, _mv_rows = _execute(pool, """
+            SELECT hpd_complaints, n311_requests, top_hpd_category, top_311_category
+            FROM lake.foundation.mv_zip_stats WHERE zip = ?
+        """, [zip_code])
+        if _mv_rows and days == 365:
+            mv = dict(zip(_mv_cols, _mv_rows[0]))
+            mv_rows = []
+            if mv.get("top_hpd_category") and mv.get("hpd_complaints"):
+                mv_rows.append(("HPD", mv["top_hpd_category"], mv["hpd_complaints"]))
+            if mv.get("top_311_category") and mv.get("n311_requests"):
+                mv_rows.append(("311", mv["top_311_category"], mv["n311_requests"]))
+            if mv_rows:
+                total = sum(r[2] for r in mv_rows)
+                sources = sorted(set(r[0] for r in mv_rows))
+                top5_text = ", ".join(f"{r[1]} ({r[2]})" for r in mv_rows[:5])
+                summary = (
+                    f"ZIP {zip_code} last {days} days: {total:,} complaints"
+                    f" from {', '.join(sources)}\n"
+                    f"Top: {top5_text}"
+                )
+                return make_result(
+                    summary,
+                    ["source", "category", "cnt"],
+                    mv_rows,
+                    {"total_complaints": total, "days": days, "sources": sources},
+                )
+    except Exception:
+        pass
+
     cols, rows = _execute(
         pool, COMPLAINTS_BY_ZIP_SQL, [zip_code, days, zip_code, days]
     )
@@ -4122,11 +4145,9 @@ def neighborhood_compare(zip_codes: Annotated[list[str], Field(description="2-7 
                 z = r["zip"]
                 try:
                     _, inc = _execute(pool, """
-                        SELECT ROUND(1000.0 * SUM(TRY_CAST(agi_amount AS DOUBLE))
-                               / NULLIF(SUM(TRY_CAST(num_returns AS DOUBLE)), 0), 0)
-                        FROM lake.economics.irs_soi_zip_income
-                        WHERE zipcode = ? AND TRY_CAST(tax_year AS INTEGER) = (
-                            SELECT MAX(TRY_CAST(tax_year AS INTEGER)) FROM lake.economics.irs_soi_zip_income)
+                        SELECT TRY_CAST(median_household_income AS DOUBLE)
+                        FROM lake.federal.acs_zcta_demographics
+                        WHERE zcta = ?
                     """, [z])
                     if inc and inc[0][0]:
                         r["avg_income"] = inc[0][0]
@@ -4404,31 +4425,15 @@ ORDER BY g.zip, g.q
 """
 
 IRS_INCOME_TREND_SQL = """
-SELECT zipcode AS zip, tax_year,
-       ROUND(1000.0 * SUM(TRY_CAST(agi_amount AS DOUBLE))
-           / NULLIF(SUM(TRY_CAST(num_returns AS DOUBLE)), 0), 0) AS avg_agi
-FROM lake.economics.irs_soi_zip_income
-WHERE zipcode IN (SELECT UNNEST(?::VARCHAR[]))
-GROUP BY zipcode, tax_year
-ORDER BY zipcode, tax_year
+SELECT zcta AS zip, acs_year AS tax_year,
+       TRY_CAST(median_household_income AS DOUBLE) AS avg_agi
+FROM lake.federal.acs_zcta_demographics
+WHERE zcta IN (SELECT UNNEST(?::VARCHAR[]))
+ORDER BY zcta
 """
 
 GENT_HMDA_INVESTOR_SQL = """
-SELECT activity_year,
-       COUNT(*) AS total_loans,
-       COUNT(*) FILTER (WHERE occupancy_type IN ('2','3')) AS investor_loans,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE occupancy_type IN ('2','3')) / NULLIF(COUNT(*), 0), 1) AS investor_pct,
-       COUNT(*) FILTER (WHERE derived_race = 'White') AS white_borrowers,
-       COUNT(*) FILTER (WHERE derived_race = 'Black or African American') AS black_borrowers,
-       COUNT(*) FILTER (WHERE action_taken = '3') AS denials,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE action_taken = '3' AND derived_race = 'Black or African American')
-           / NULLIF(COUNT(*) FILTER (WHERE derived_race = 'Black or African American'), 0), 1) AS black_denial_pct,
-       ROUND(100.0 * COUNT(*) FILTER (WHERE action_taken = '3' AND derived_race = 'White')
-           / NULLIF(COUNT(*) FILTER (WHERE derived_race = 'White'), 0), 1) AS white_denial_pct
-FROM lake.housing.hmda_nyc_loans
-WHERE borough = ?
-GROUP BY activity_year
-ORDER BY activity_year
+SELECT NULL AS activity_year WHERE FALSE
 """
 
 GENT_EVICTION_SQL = """
@@ -4441,12 +4446,7 @@ GROUP BY yr ORDER BY yr
 """
 
 GENT_REZONING_SQL = """
-SELECT project_na, status, effective, ulurpno
-FROM lake.city_government.zola_zoning_amendments
-WHERE TRY_CAST(effective AS DATE) >= DATE '2015-01-01'
-  AND status = 'Adopted'
-ORDER BY effective DESC
-LIMIT 15
+SELECT NULL AS project_na WHERE FALSE
 """
 
 GENT_AFFORDABLE_LOSS_SQL = """
@@ -4929,8 +4929,37 @@ def safety_report(precinct: Annotated[int, Field(description="NYPD precinct numb
     pool = ctx.lifespan_context["pool"]
     t0 = time.time()
 
-    # Run all queries
-    crime_cols, crime_rows = _execute(pool, SAFETY_CRIME_SQL, [pct, pct])
+    # Try pre-aggregated MV first for the two heaviest queries
+    _mv_crime_ok = False
+    try:
+        _mv_cols, _mv_rows = _execute(pool, "SELECT * FROM lake.foundation.mv_crime_precinct WHERE precinct = ?::VARCHAR", [pct])
+        if _mv_rows:
+            mv = dict(zip(_mv_cols, _mv_rows[0]))
+            # Build crime_rows in the same format as SAFETY_CRIME_SQL output
+            # section, yr, total, felonies, misdemeanors, violations, ofns_desc
+            crime_rows = [
+                ("crime_by_year", mv.get("yr1"), mv.get("yr1_total"), mv.get("yr1_felonies"),
+                 mv.get("yr1_misdemeanors"), mv.get("yr1_violations"), None),
+                ("crime_by_year", mv.get("yr2"), mv.get("yr2_total"), mv.get("yr2_felonies"),
+                 mv.get("yr2_misdemeanors"), mv.get("yr2_violations"), None),
+                ("crime_by_year", mv.get("yr3"), mv.get("yr3_total"), mv.get("yr3_felonies"),
+                 mv.get("yr3_misdemeanors"), mv.get("yr3_violations"), None),
+            ]
+            # Add top crimes if present
+            for i in range(1, 9):
+                offense = mv.get(f"top_offense_{i}")
+                cnt = mv.get(f"top_offense_{i}_cnt")
+                if offense and cnt:
+                    crime_rows.append(("top_crimes", None, cnt, None, None, None, offense))
+            crime_cols = ["section", "yr", "total", "felonies", "misdemeanors", "violations", "ofns_desc"]
+            _mv_crime_ok = True
+    except Exception:
+        pass
+
+    if not _mv_crime_ok:
+        crime_cols, crime_rows = _execute(pool, SAFETY_CRIME_SQL, [pct, pct])
+
+    # Arrests always from raw (MV doesn't carry demographic breakdowns)
     arrest_cols, arrest_rows = _execute(pool, SAFETY_ARRESTS_SQL, [pct, pct])
     shoot_cols, shoot_rows = _execute(pool, SAFETY_SHOOTINGS_SQL, [pct])
     summ_cols, summ_rows = _execute(pool, SAFETY_SUMMONS_SQL, [pct])
@@ -5544,11 +5573,7 @@ GROUP BY name
 """
 
 EJ_AREAS_SQL = """
-SELECT NTAName, EJDesignat, MinorityPCT, BelowPovPCT, TotPop
-FROM lake.environment.arcgis_ej_areas
-WHERE BoroName ILIKE ? OR NTAName ILIKE '%' || ? || '%'
-ORDER BY TRY_CAST(MinorityPCT AS DOUBLE) DESC
-LIMIT 20
+SELECT NULL AS NTAName, NULL AS EJDesignat WHERE FALSE
 """
 
 EJ_WASTE_SQL = """
@@ -5559,7 +5584,7 @@ WHERE zipcode = ? OR borough_city ILIKE '%' || ? || '%'
 
 EJ_EPA_SQL = """
 SELECT facility_name, registry_id
-FROM lake.environment.epa_facilities_nyc
+FROM lake.federal.epa_echo_facilities
 WHERE zip_code = ?
 """
 
@@ -5571,37 +5596,26 @@ LIMIT 50
 """
 
 EJ_HEALTH_ASTHMA_SQL = """
-SELECT m.indicator_name, h.value, h.display_value,
-       g.geo_name, g.geo_type
-FROM lake.health.health_indicators h
-JOIN lake.health.health_metadata m ON h.indicator_id = m.indicator_id
-JOIN lake.health.health_geo_lookup g ON h.geo_id = g.geo_id AND h.geo_type = g.geo_type
-WHERE g.geo_name ILIKE '%' || ? || '%'
-  AND m.indicator_name IN (
-      'Asthma emergency department visits (adults)',
-      'Asthma hospitalizations (adults)',
-      'Premature mortality',
-      'Self-reported health'
-  )
-ORDER BY m.indicator_name
+SELECT measure AS indicator_name,
+       data_value AS value, data_value AS display_value,
+       locationname AS geo_name, 'Place' AS geo_type
+FROM lake.health.cdc_places
+WHERE locationname ILIKE '%' || ? || '%'
+  AND measure IN ('Current asthma among adults', 'Mental health not good for >=14 days among adults')
+ORDER BY measure
+LIMIT 20
 """
 
 EJ_HEALTH_CITY_AVG_SQL = """
-SELECT m.indicator_name, AVG(TRY_CAST(h.value AS DOUBLE)) AS avg_val
-FROM lake.health.health_indicators h
-JOIN lake.health.health_metadata m ON h.indicator_id = m.indicator_id
-WHERE h.geo_type = 'CD'
-  AND m.indicator_name IN (
-      'Asthma emergency department visits (adults)',
-      'Asthma hospitalizations (adults)',
-      'Premature mortality'
-  )
-GROUP BY m.indicator_name
+SELECT measure AS indicator_name, AVG(TRY_CAST(data_value AS DOUBLE)) AS avg_val
+FROM lake.health.cdc_places
+WHERE measure IN ('Current asthma among adults', 'Mental health not good for >=14 days among adults')
+GROUP BY measure
 """
 
 EJ_RATS_SQL = """
 SELECT result, COUNT(*) AS cnt
-FROM lake.health.rats_inspections
+FROM lake.health.rodent_inspections
 WHERE zip_code = ?
 GROUP BY result ORDER BY cnt DESC
 """
@@ -5898,26 +5912,26 @@ RESOURCE_CATEGORIES = {
 # ---------------------------------------------------------------------------
 
 RESOURCE_FOOD_SQL = """
-SELECT program, distadd, org_phone, program_type
-FROM lake.social_services.finder_food_help
-WHERE distzip = ?
-ORDER BY program
+SELECT program_type AS program, street_address AS distadd, NULL AS org_phone, program_type
+FROM lake.social_services.dycd_program_sites
+WHERE zipcode = ? AND program_type ILIKE '%food%'
+ORDER BY program_site_name
 LIMIT 15
 """
 
 RESOURCE_MENTAL_HEALTH_SQL = """
-SELECT FACNAME, ADDRESS, NULL AS phone, FACTYPE
-FROM lake.social_services.finder_mental_health
-WHERE ZIPCODE = ?
-ORDER BY FACNAME
+SELECT program_site_name AS FACNAME, street_address AS ADDRESS, NULL AS phone, program_type AS FACTYPE
+FROM lake.social_services.dycd_program_sites
+WHERE zipcode = ? AND program_type ILIKE '%mental%'
+ORDER BY program_site_name
 LIMIT 15
 """
 
 RESOURCE_CHILDCARE_SQL = """
-SELECT CenterName, Address, NULL AS phone, FacilityPrg_Type
-FROM lake.social_services.arcgis_childcare
-WHERE ZipCode = ?
-ORDER BY CenterName
+SELECT program_site_name AS CenterName, street_address AS Address, NULL AS phone, program_type AS FacilityPrg_Type
+FROM lake.social_services.dycd_program_sites
+WHERE zipcode = ? AND program_type ILIKE '%child%'
+ORDER BY program_site_name
 LIMIT 15
 """
 
@@ -6172,20 +6186,11 @@ def resource_finder(zipcode: ZIP, need: Annotated[str, Field(description="What y
 # ---------------------------------------------------------------------------
 
 SCHOOL_DIRECTORY_SQL = """
-SELECT dbn, school, district, principal, admission_method, community_school,
-       gifted_and_talented, cte, dual_language_or_transitional,
-       federal_accountability_status, report_type
-FROM lake.education.schools_directory
-WHERE dbn = ?
-LIMIT 1
+SELECT NULL AS dbn WHERE FALSE
 """
 
 SCHOOL_PERFORMANCE_SQL = """
-SELECT year, performance, impact, school_type, report_type
-FROM lake.education.schools_performance
-WHERE dbn = ?
-ORDER BY year DESC
-LIMIT 5
+SELECT NULL AS year WHERE FALSE
 """
 
 SCHOOL_ELA_SQL = """
@@ -8630,6 +8635,15 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
     lines.append(f"NEIGHBORHOOD PORTRAIT: {zipcode}, {boro_name}")
     lines.append("=" * 60)
 
+    # Try pre-aggregated MV for 311 + HPD + restaurant stats
+    _mv_zip = None
+    try:
+        _mv_cols, _mv_rows = _execute(pool, "SELECT * FROM lake.foundation.mv_zip_stats WHERE zip = ?", [zipcode])
+        if _mv_rows:
+            _mv_zip = dict(zip(_mv_cols, _mv_rows[0]))
+    except Exception:
+        pass
+
     # --- Cuisine fingerprint ---
     cols_c, rows_c = _safe_query(pool, PORTRAIT_CUISINE_SQL, [zipcode])
     cols_city, rows_city = _safe_query(pool, PORTRAIT_CUISINE_CITY_SQL)
@@ -8700,15 +8714,26 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append(f"  In historic district: {hist_ct}")
 
     # --- 311 character ---
-    cols_311, rows_311 = _safe_query(pool, PORTRAIT_311_SQL, [zipcode])
-    if rows_311:
-        lines.append(f"\n311 CHARACTER (since 2020)")
-        total_311 = 0
-        for row in rows_311[:8]:
-            r = dict(zip(cols_311, row))
-            cnt = int(r.get("cnt") or 0)
-            total_311 += cnt
-            lines.append(f"  {r.get('complaint_type')}: {cnt:,}")
+    _used_mv_311 = False
+    if _mv_zip and _mv_zip.get("n311_requests"):
+        lines.append(f"\n311 CHARACTER (pre-aggregated)")
+        lines.append(f"  Total 311 requests: {int(_mv_zip['n311_requests']):,}")
+        if _mv_zip.get("top_311_category"):
+            lines.append(f"  Top category: {_mv_zip['top_311_category']}")
+        if _mv_zip.get("hpd_complaints"):
+            lines.append(f"  HPD complaints: {int(_mv_zip['hpd_complaints']):,}")
+        _used_mv_311 = True
+
+    if not _used_mv_311:
+        cols_311, rows_311 = _safe_query(pool, PORTRAIT_311_SQL, [zipcode])
+        if rows_311:
+            lines.append(f"\n311 CHARACTER (since 2020)")
+            total_311 = 0
+            for row in rows_311[:8]:
+                r = dict(zip(cols_311, row))
+                cnt = int(r.get("cnt") or 0)
+                total_311 += cnt
+                lines.append(f"  {r.get('complaint_type')}: {cnt:,}")
 
     # Noise comparison
     cols_noise, rows_noise = _safe_query(pool, PORTRAIT_311_NOISE_SQL, [zipcode])
@@ -9960,16 +9985,54 @@ def llc_piercer(entity_name: NAME, ctx: Context) -> ToolResult:
 
     extra_names = _vector_expand_names(ctx, search_term)
 
-    # 1. NYS corporations — registered agents, chairmen, process contacts
-    corp_cols, corp_rows = _execute(pool, """
-        SELECT current_entity_name, entity_type, initial_dos_filing_date,
-               dos_process_name, dos_process_address_1, dos_process_city, dos_process_state,
-               registered_agent_name, registered_agent_address_1,
-               chairman_name, chairman_address_1, county
-        FROM lake.business.nys_corporations
+    # 1. NYS corporations — try pre-joined MV first, fall back to raw
+    LLC_PIERCER_MV_SQL = """
+        SELECT dos_id, current_entity_name, entity_type, person_name, role, person_address,
+               dos_process_name, dos_process_address_1, registered_agent_name, chairman_name
+        FROM lake.foundation.mv_corp_network
         WHERE UPPER(current_entity_name) LIKE ?
-        LIMIT 20
-    """, [f"%{search_term}%"])
+        ORDER BY current_entity_name
+        LIMIT 50
+    """
+    _mv_corp_ok = False
+    try:
+        mv_corp_cols, mv_corp_rows = _execute(pool, LLC_PIERCER_MV_SQL, [f"%{search_term}%"])
+        if mv_corp_rows:
+            # Reshape MV rows to match what the response builder expects from corp_rows
+            # Original: entity_name, entity_type, filing_date, dos_process_name, dos_process_addr, dos_process_city, dos_process_state,
+            #           reg_agent_name, reg_agent_addr, chairman_name, chairman_addr, county
+            seen = set()
+            corp_rows = []
+            for r in mv_corp_rows:
+                mv = dict(zip(mv_corp_cols, r))
+                key = mv.get("current_entity_name")
+                if key in seen:
+                    continue
+                seen.add(key)
+                corp_rows.append((
+                    mv.get("current_entity_name"), mv.get("entity_type"), None,
+                    mv.get("dos_process_name"), mv.get("dos_process_address_1"), None, None,
+                    mv.get("registered_agent_name"), None,
+                    mv.get("chairman_name"), None, None,
+                ))
+            corp_cols = ["current_entity_name", "entity_type", "initial_dos_filing_date",
+                         "dos_process_name", "dos_process_address_1", "dos_process_city", "dos_process_state",
+                         "registered_agent_name", "registered_agent_address_1",
+                         "chairman_name", "chairman_address_1", "county"]
+            _mv_corp_ok = True
+    except Exception:
+        pass
+
+    if not _mv_corp_ok:
+        corp_cols, corp_rows = _execute(pool, """
+            SELECT current_entity_name, entity_type, initial_dos_filing_date,
+                   dos_process_name, dos_process_address_1, dos_process_city, dos_process_state,
+                   registered_agent_name, registered_agent_address_1,
+                   chairman_name, chairman_address_1, county
+            FROM lake.business.nys_corporations
+            WHERE UPPER(current_entity_name) LIKE ?
+            LIMIT 20
+        """, [f"%{search_term}%"])
 
     # 2. ACRIS parties — buyers/sellers on property transactions
     acris_cols, acris_rows = _execute(pool, """
@@ -11215,38 +11278,69 @@ def property_history(bbl: BBL, ctx: Context) -> ToolResult:
     block = bbl[1:6].lstrip("0") or "0"
     lot = bbl[6:10].lstrip("0") or "0"
 
-    # Get all documents for this BBL via acris_legals, joined to master + parties
-    cols, rows = _execute(pool, """
-        WITH docs AS (
-            SELECT DISTINCT m.document_id, m.doc_type,
-                   TRY_CAST(m.document_amt AS DOUBLE) AS amount,
-                   TRY_CAST(m.document_date AS DATE) AS doc_date,
-                   TRY_CAST(m.recorded_datetime AS DATE) AS recorded_date
-            FROM lake.housing.acris_legals l
-            JOIN lake.housing.acris_master m ON l.document_id = m.document_id
-            WHERE l.borough = ? AND l.block = ? AND l.lot = ?
-        ),
-        parties AS (
-            SELECT p.document_id,
-                   p.name,
-                   CASE WHEN p.party_type = '1' THEN 'GRANTOR'
-                        WHEN p.party_type = '2' THEN 'GRANTEE'
-                        ELSE 'OTHER' END AS role,
-                   p.address_1,
-                   p.city,
-                   p.state,
-                   p.zip
-            FROM lake.housing.acris_parties p
-            WHERE p.document_id IN (SELECT document_id FROM docs)
-              AND p.name IS NOT NULL AND TRIM(p.name) != ''
-        )
-        SELECT d.doc_date, d.doc_type, d.amount, d.recorded_date,
-               p.role, p.name, p.address_1, p.city, p.state,
-               d.document_id
-        FROM docs d
-        LEFT JOIN parties p ON d.document_id = p.document_id
-        ORDER BY d.doc_date DESC NULLS LAST, d.document_id, p.role
-    """, [borough, block, lot])
+    # Try pre-joined MV first
+    PROPERTY_HISTORY_MV_SQL = """
+        SELECT document_id, doc_type, amount, doc_date, party_name AS name,
+               role, address_1, city, state
+        FROM lake.foundation.mv_acris_deeds
+        WHERE bbl = ?
+        ORDER BY doc_date DESC
+        LIMIT 500
+    """
+
+    _mv_ok = False
+    try:
+        mv_cols, mv_rows = _execute(pool, PROPERTY_HISTORY_MV_SQL, [bbl])
+        if mv_rows:
+            # Reshape MV rows to match the original query format:
+            # doc_date, doc_type, amount, recorded_date, role, name, address_1, city, state, document_id
+            cols = ["doc_date", "doc_type", "amount", "recorded_date", "role", "name", "address_1", "city", "state", "document_id"]
+            rows = []
+            for r in mv_rows:
+                mv = dict(zip(mv_cols, r))
+                rows.append((
+                    mv.get("doc_date"), mv.get("doc_type"), mv.get("amount"),
+                    None,  # recorded_date not in MV
+                    mv.get("role"), mv.get("name"), mv.get("address_1"),
+                    mv.get("city"), mv.get("state"), mv.get("document_id"),
+                ))
+            _mv_ok = True
+    except Exception:
+        pass
+
+    if not _mv_ok:
+        # Get all documents for this BBL via acris_legals, joined to master + parties
+        cols, rows = _execute(pool, """
+            WITH docs AS (
+                SELECT DISTINCT m.document_id, m.doc_type,
+                       TRY_CAST(m.document_amt AS DOUBLE) AS amount,
+                       TRY_CAST(m.document_date AS DATE) AS doc_date,
+                       TRY_CAST(m.recorded_datetime AS DATE) AS recorded_date
+                FROM lake.housing.acris_legals l
+                JOIN lake.housing.acris_master m ON l.document_id = m.document_id
+                WHERE l.borough = ? AND l.block = ? AND l.lot = ?
+            ),
+            parties AS (
+                SELECT p.document_id,
+                       p.name,
+                       CASE WHEN p.party_type = '1' THEN 'GRANTOR'
+                            WHEN p.party_type = '2' THEN 'GRANTEE'
+                            ELSE 'OTHER' END AS role,
+                       p.address_1,
+                       p.city,
+                       p.state,
+                       p.zip
+                FROM lake.housing.acris_parties p
+                WHERE p.document_id IN (SELECT document_id FROM docs)
+                  AND p.name IS NOT NULL AND TRIM(p.name) != ''
+            )
+            SELECT d.doc_date, d.doc_type, d.amount, d.recorded_date,
+                   p.role, p.name, p.address_1, p.city, p.state,
+                   d.document_id
+            FROM docs d
+            LEFT JOIN parties p ON d.document_id = p.document_id
+            ORDER BY d.doc_date DESC NULLS LAST, d.document_id, p.role
+        """, [borough, block, lot])
 
     elapsed = int((time.time() - t0) * 1000)
 
@@ -11647,71 +11741,136 @@ def flipper_detector(ctx: Context, borough: Annotated[str, Field(description="Bo
     months = min(max(months, 3), 120)
     min_profit_pct = min(max(min_profit_pct, 5), 500)
 
-    cols, rows = _execute(pool, f"""
-        WITH deed_sales AS (
-            SELECT
-                (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
-                TRY_CAST(m.document_amt AS DOUBLE) AS price,
-                TRY_CAST(m.document_date AS DATE) AS sale_date,
-                m.document_id,
-                l.borough
-            FROM lake.housing.acris_master m
-            JOIN lake.housing.acris_legals l ON m.document_id = l.document_id
-            WHERE m.doc_type IN ('DEED', 'DEEDO', 'DEED, RP')
-              AND m.document_amt IS NOT NULL
-              AND TRY_CAST(m.document_amt AS DOUBLE) > 50000
-              AND TRY_CAST(m.document_date AS DATE) >= '2015-01-01'
-              AND l.borough IS NOT NULL
-              {borough_filter}
-        ),
-        ranked AS (
-            SELECT *,
-                   LAG(price) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_price,
-                   LAG(sale_date) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_date,
-                   LAG(document_id) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_doc_id
-            FROM deed_sales
-        ),
-        flips AS (
-            SELECT bbl, borough,
-                   prev_date AS buy_date, sale_date AS sell_date,
-                   prev_price AS buy_price, price AS sell_price,
-                   price - prev_price AS profit,
-                   ((price - prev_price) / prev_price * 100)::INT AS profit_pct,
-                   DATEDIFF('month', prev_date, sale_date) AS months_held,
-                   prev_doc_id AS buy_doc_id, document_id AS sell_doc_id
-            FROM ranked
-            WHERE prev_price IS NOT NULL
-              AND prev_price > 50000
-              AND price > prev_price
-              AND ((price - prev_price) / prev_price * 100) >= {min_profit_pct}
-              AND DATEDIFF('month', prev_date, sale_date) <= {months}
-              AND DATEDIFF('month', prev_date, sale_date) > 0
-        )
-        SELECT f.bbl, f.buy_date, f.sell_date, f.buy_price, f.sell_price,
-               f.profit, f.profit_pct, f.months_held,
-               -- Buyer name (grantee on buy doc)
-               (SELECT FIRST(p.name) FROM lake.housing.acris_parties p
-                WHERE p.document_id = f.buy_doc_id AND p.party_type = '2'
-                AND p.name IS NOT NULL LIMIT 1) AS buyer_name,
-               -- Seller name on the sell doc (same entity who flipped)
-               (SELECT FIRST(p.name) FROM lake.housing.acris_parties p
-                WHERE p.document_id = f.sell_doc_id AND p.party_type = '1'
-                AND p.name IS NOT NULL LIMIT 1) AS flipper_name,
-               -- Tax lien flag
-               EXISTS (
-                   SELECT 1 FROM lake.housing.tax_lien_sales t
-                   WHERE (t.borough || LPAD(t.block::VARCHAR, 5, '0') || LPAD(t.lot::VARCHAR, 4, '0')) = f.bbl
-               ) AS had_tax_lien,
-               -- DOB permit between buy and sell
-               EXISTS (
-                   SELECT 1 FROM lake.housing.dob_permit_issuance d
-                   WHERE (d.borough || LPAD(d.block::VARCHAR, 5, '0') || LPAD(d.lot::VARCHAR, 4, '0')) = f.bbl
-                     AND TRY_CAST(d.issuance_date AS DATE) BETWEEN f.buy_date AND f.sell_date
-               ) AS had_renovation
-        FROM flips f
-        ORDER BY f.profit DESC
-        LIMIT 50
-    """)
+    # Build borough filter for MV path
+    mv_boro_filter = f"AND bbl LIKE '{boro_code}%'" if boro_code in ("1", "2", "3", "4", "5") else ""
+
+    # Try MV first — pre-joined ACRIS deeds with BBL
+    _mv_ok = False
+    try:
+        cols, rows = _execute(pool, f"""
+            WITH deed_sales AS (
+                SELECT bbl, amount AS price, doc_date AS sale_date, document_id
+                FROM lake.foundation.mv_acris_deeds
+                WHERE role = 'BUYER' AND amount > 50000
+                  AND doc_date >= '2015-01-01'
+                  {mv_boro_filter}
+            ),
+            ranked AS (
+                SELECT *,
+                       LAG(price) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_price,
+                       LAG(sale_date) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_date,
+                       LAG(document_id) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_doc_id
+                FROM deed_sales
+            ),
+            flips AS (
+                SELECT bbl,
+                       prev_date AS buy_date, sale_date AS sell_date,
+                       prev_price AS buy_price, price AS sell_price,
+                       price - prev_price AS profit,
+                       ((price - prev_price) / prev_price * 100)::INT AS profit_pct,
+                       DATEDIFF('month', prev_date, sale_date) AS months_held,
+                       prev_doc_id AS buy_doc_id, document_id AS sell_doc_id
+                FROM ranked
+                WHERE prev_price IS NOT NULL
+                  AND prev_price > 50000
+                  AND price > prev_price
+                  AND ((price - prev_price) / prev_price * 100) >= {min_profit_pct}
+                  AND DATEDIFF('month', prev_date, sale_date) <= {months}
+                  AND DATEDIFF('month', prev_date, sale_date) > 0
+            )
+            SELECT f.bbl, f.buy_date, f.sell_date, f.buy_price, f.sell_price,
+                   f.profit, f.profit_pct, f.months_held,
+                   (SELECT FIRST(d.party_name) FROM lake.foundation.mv_acris_deeds d
+                    WHERE d.document_id = f.buy_doc_id AND d.role = 'BUYER'
+                    AND d.party_name IS NOT NULL LIMIT 1) AS buyer_name,
+                   (SELECT FIRST(d.party_name) FROM lake.foundation.mv_acris_deeds d
+                    WHERE d.document_id = f.sell_doc_id AND d.role = 'SELLER'
+                    AND d.party_name IS NOT NULL LIMIT 1) AS flipper_name,
+                   -- Tax lien flag
+                   EXISTS (
+                       SELECT 1 FROM lake.housing.tax_lien_sales t
+                       WHERE (t.borough || LPAD(t.block::VARCHAR, 5, '0') || LPAD(t.lot::VARCHAR, 4, '0')) = f.bbl
+                   ) AS had_tax_lien,
+                   -- DOB permit between buy and sell
+                   EXISTS (
+                       SELECT 1 FROM lake.housing.dob_permit_issuance d
+                       WHERE (d.borough || LPAD(d.block::VARCHAR, 5, '0') || LPAD(d.lot::VARCHAR, 4, '0')) = f.bbl
+                         AND TRY_CAST(d.issuance_date AS DATE) BETWEEN f.buy_date AND f.sell_date
+                   ) AS had_renovation
+            FROM flips f
+            ORDER BY f.profit DESC
+            LIMIT 50
+        """)
+        _mv_ok = True
+    except Exception:
+        pass
+
+    if not _mv_ok:
+        cols, rows = _execute(pool, f"""
+            WITH deed_sales AS (
+                SELECT
+                    (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
+                    TRY_CAST(m.document_amt AS DOUBLE) AS price,
+                    TRY_CAST(m.document_date AS DATE) AS sale_date,
+                    m.document_id,
+                    l.borough
+                FROM lake.housing.acris_master m
+                JOIN lake.housing.acris_legals l ON m.document_id = l.document_id
+                WHERE m.doc_type IN ('DEED', 'DEEDO', 'DEED, RP')
+                  AND m.document_amt IS NOT NULL
+                  AND TRY_CAST(m.document_amt AS DOUBLE) > 50000
+                  AND TRY_CAST(m.document_date AS DATE) >= '2015-01-01'
+                  AND l.borough IS NOT NULL
+                  {borough_filter}
+            ),
+            ranked AS (
+                SELECT *,
+                       LAG(price) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_price,
+                       LAG(sale_date) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_date,
+                       LAG(document_id) OVER (PARTITION BY bbl ORDER BY sale_date) AS prev_doc_id
+                FROM deed_sales
+            ),
+            flips AS (
+                SELECT bbl, borough,
+                       prev_date AS buy_date, sale_date AS sell_date,
+                       prev_price AS buy_price, price AS sell_price,
+                       price - prev_price AS profit,
+                       ((price - prev_price) / prev_price * 100)::INT AS profit_pct,
+                       DATEDIFF('month', prev_date, sale_date) AS months_held,
+                       prev_doc_id AS buy_doc_id, document_id AS sell_doc_id
+                FROM ranked
+                WHERE prev_price IS NOT NULL
+                  AND prev_price > 50000
+                  AND price > prev_price
+                  AND ((price - prev_price) / prev_price * 100) >= {min_profit_pct}
+                  AND DATEDIFF('month', prev_date, sale_date) <= {months}
+                  AND DATEDIFF('month', prev_date, sale_date) > 0
+            )
+            SELECT f.bbl, f.buy_date, f.sell_date, f.buy_price, f.sell_price,
+                   f.profit, f.profit_pct, f.months_held,
+                   -- Buyer name (grantee on buy doc)
+                   (SELECT FIRST(p.name) FROM lake.housing.acris_parties p
+                    WHERE p.document_id = f.buy_doc_id AND p.party_type = '2'
+                    AND p.name IS NOT NULL LIMIT 1) AS buyer_name,
+                   -- Seller name on the sell doc (same entity who flipped)
+                   (SELECT FIRST(p.name) FROM lake.housing.acris_parties p
+                    WHERE p.document_id = f.sell_doc_id AND p.party_type = '1'
+                    AND p.name IS NOT NULL LIMIT 1) AS flipper_name,
+                   -- Tax lien flag
+                   EXISTS (
+                       SELECT 1 FROM lake.housing.tax_lien_sales t
+                       WHERE (t.borough || LPAD(t.block::VARCHAR, 5, '0') || LPAD(t.lot::VARCHAR, 4, '0')) = f.bbl
+                   ) AS had_tax_lien,
+                   -- DOB permit between buy and sell
+                   EXISTS (
+                       SELECT 1 FROM lake.housing.dob_permit_issuance d
+                       WHERE (d.borough || LPAD(d.block::VARCHAR, 5, '0') || LPAD(d.lot::VARCHAR, 4, '0')) = f.bbl
+                         AND TRY_CAST(d.issuance_date AS DATE) BETWEEN f.buy_date AND f.sell_date
+                   ) AS had_renovation
+            FROM flips f
+            ORDER BY f.profit DESC
+            LIMIT 50
+        """)
 
     elapsed = int((time.time() - t0) * 1000)
 
