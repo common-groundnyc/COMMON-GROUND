@@ -1070,6 +1070,7 @@ async def app_lifespan(server):
         "graph_pol_entities", "graph_pol_donations", "graph_pol_contracts", "graph_pol_lobbying",
         # Contractor network
         "graph_contractors", "graph_permit_edges", "graph_contractor_shared",
+        "graph_contractor_building_shared",
         # FEC + litigation
         "graph_fec_contributions", "graph_litigation_respondents",
         # Officer misconduct network
@@ -2239,11 +2240,25 @@ async def app_lifespan(server):
                 contractor_shared_count = conn.execute("SELECT COUNT(*) FROM main.graph_contractor_shared").fetchone()[0]
                 print(f"Contractor shared edges built: {contractor_shared_count:,} "
                       f"(3+ shared buildings)", flush=True)
+
+                # Building-to-building edges via shared contractor
+                conn.execute("""
+                    CREATE OR REPLACE TABLE main.graph_contractor_building_shared AS
+                    SELECT a.bbl AS bbl1, b.bbl AS bbl2,
+                           COUNT(DISTINCT a.license) AS shared_contractors
+                    FROM main.graph_permit_edges a
+                    JOIN main.graph_permit_edges b ON a.license = b.license AND a.bbl < b.bbl
+                    GROUP BY a.bbl, b.bbl
+                    HAVING COUNT(DISTINCT a.license) >= 2
+                """)
+                cb_count = conn.execute("SELECT COUNT(*) FROM main.graph_contractor_building_shared").fetchone()[0]
+                print(f"Contractor building edges: {cb_count:,} building pairs sharing 2+ contractors", flush=True)
             except Exception as e:
                 print(f"Warning: Contractor network build failed: {e}", flush=True)
                 conn.execute("CREATE OR REPLACE TABLE main.graph_contractors AS SELECT NULL AS license WHERE FALSE")
                 conn.execute("CREATE OR REPLACE TABLE main.graph_permit_edges AS SELECT NULL AS license, NULL AS bbl WHERE FALSE")
                 conn.execute("CREATE OR REPLACE TABLE main.graph_contractor_shared AS SELECT NULL AS license1, NULL AS license2 WHERE FALSE")
+                conn.execute("CREATE OR REPLACE TABLE main.graph_contractor_building_shared AS SELECT NULL::VARCHAR AS bbl1, NULL::VARCHAR AS bbl2, 0::BIGINT AS shared_contractors WHERE FALSE")
 
             # =================================================================
             # GRAPH 5: Officer Misconduct Network (CCRB + NYPD profiles)
@@ -2464,15 +2479,16 @@ async def app_lifespan(server):
                 conn.execute("""
                     CREATE OR REPLACE TABLE main.graph_bic_shared_bbl AS
                     WITH company_bbls AS (
-                        SELECT DISTINCT UPPER(TRIM(account_name)) AS company_name, bbl
+                        SELECT DISTINCT bic_number, bbl
                         FROM lake.business.bic_trade_waste
                         WHERE bbl IS NOT NULL AND LENGTH(bbl) >= 10
+                          AND bic_number IS NOT NULL
                     )
-                    SELECT a.company_name AS company1, b.company_name AS company2,
+                    SELECT a.bic_number AS company1, b.bic_number AS company2,
                            COUNT(DISTINCT a.bbl) AS shared_properties
                     FROM company_bbls a
-                    JOIN company_bbls b ON a.bbl = b.bbl AND a.company_name < b.company_name
-                    GROUP BY a.company_name, b.company_name
+                    JOIN company_bbls b ON a.bbl = b.bbl AND a.bic_number < b.bic_number
+                    GROUP BY a.bic_number, b.bic_number
                 """)
                 bic_shared_count = conn.execute("SELECT COUNT(*) FROM main.graph_bic_shared_bbl").fetchone()[0]
                 print(f"BIC network built: {bic_count:,} companies, {bic_viol_count:,} violations, "
@@ -2481,7 +2497,7 @@ async def app_lifespan(server):
                 print(f"Warning: BIC trade waste network build failed: {e}", flush=True)
                 conn.execute("CREATE OR REPLACE TABLE main.graph_bic_companies AS SELECT NULL::VARCHAR AS bic_number WHERE FALSE")
                 conn.execute("CREATE OR REPLACE TABLE main.graph_bic_violation_edges AS SELECT NULL::VARCHAR AS violation_number WHERE FALSE")
-                conn.execute("CREATE OR REPLACE TABLE main.graph_bic_shared_bbl AS SELECT NULL::VARCHAR AS company1, NULL::VARCHAR AS company2 WHERE FALSE")
+                conn.execute("CREATE OR REPLACE TABLE main.graph_bic_shared_bbl AS SELECT NULL::VARCHAR AS company1, NULL::VARCHAR AS company2, NULL::BIGINT AS shared_properties WHERE FALSE")
 
             # =================================================================
             # GRAPH 8: DOB Violation Respondents (named individuals/entities)
@@ -2533,24 +2549,54 @@ async def app_lifespan(server):
                   f"{shared_count:,} shared-owner edges", flush=True)
 
         # Create property graph definitions (lightweight — just metadata pointers)
-        conn.execute("""
-            CREATE OR REPLACE PROPERTY GRAPH nyc_housing
-            VERTEX TABLES (
-                main.graph_owners PROPERTIES (owner_id, registrationid, owner_name) LABEL Owner,
-                main.graph_buildings PROPERTIES (bbl, housenumber, streetname, zip, boroid, total_units, stories) LABEL Building,
-                main.graph_violations PROPERTIES (violation_id, bbl, severity, status, issued_date) LABEL Violation
-            )
-            EDGE TABLES (
-                main.graph_owns
-                    SOURCE KEY (owner_id) REFERENCES main.graph_owners (owner_id)
-                    DESTINATION KEY (bbl) REFERENCES main.graph_buildings (bbl)
-                    LABEL Owns,
-                main.graph_has_violation
-                    SOURCE KEY (bbl) REFERENCES main.graph_buildings (bbl)
-                    DESTINATION KEY (violation_id) REFERENCES main.graph_violations (violation_id)
-                    LABEL HasViolation
-            )
-        """)
+        # Try expanded nyc_housing with DOB respondents first, fall back to original 3-vertex
+        try:
+            conn.execute("""
+                CREATE OR REPLACE PROPERTY GRAPH nyc_housing
+                VERTEX TABLES (
+                    main.graph_owners PROPERTIES (owner_id, registrationid, owner_name) LABEL Owner,
+                    main.graph_buildings PROPERTIES (bbl, housenumber, streetname, zip, boroid, total_units, stories) LABEL Building,
+                    main.graph_violations PROPERTIES (violation_id, bbl, severity, status, issued_date) LABEL Violation,
+                    main.graph_dob_respondents
+                        PROPERTIES (respondent_name, violation_count, total_penalties, building_count, hazardous_count)
+                        LABEL DOBRespondent
+                )
+                EDGE TABLES (
+                    main.graph_owns
+                        SOURCE KEY (owner_id) REFERENCES main.graph_owners (owner_id)
+                        DESTINATION KEY (bbl) REFERENCES main.graph_buildings (bbl)
+                        LABEL Owns,
+                    main.graph_has_violation
+                        SOURCE KEY (bbl) REFERENCES main.graph_buildings (bbl)
+                        DESTINATION KEY (violation_id) REFERENCES main.graph_violations (violation_id)
+                        LABEL HasViolation,
+                    main.graph_dob_respondent_bbl
+                        SOURCE KEY (respondent_name) REFERENCES main.graph_dob_respondents (respondent_name)
+                        DESTINATION KEY (bbl) REFERENCES main.graph_buildings (bbl)
+                        LABEL DOBRespondentAt
+                )
+            """)
+            print("Property graph nyc_housing created (with DOB respondents)", flush=True)
+        except Exception as e:
+            print(f"Warning: expanded nyc_housing failed ({e}), falling back to 3-vertex definition", flush=True)
+            conn.execute("""
+                CREATE OR REPLACE PROPERTY GRAPH nyc_housing
+                VERTEX TABLES (
+                    main.graph_owners PROPERTIES (owner_id, registrationid, owner_name) LABEL Owner,
+                    main.graph_buildings PROPERTIES (bbl, housenumber, streetname, zip, boroid, total_units, stories) LABEL Building,
+                    main.graph_violations PROPERTIES (violation_id, bbl, severity, status, issued_date) LABEL Violation
+                )
+                EDGE TABLES (
+                    main.graph_owns
+                        SOURCE KEY (owner_id) REFERENCES main.graph_owners (owner_id)
+                        DESTINATION KEY (bbl) REFERENCES main.graph_buildings (bbl)
+                        LABEL Owns,
+                    main.graph_has_violation
+                        SOURCE KEY (bbl) REFERENCES main.graph_buildings (bbl)
+                        DESTINATION KEY (violation_id) REFERENCES main.graph_violations (violation_id)
+                        LABEL HasViolation
+                )
+            """)
         conn.execute("""
             CREATE OR REPLACE PROPERTY GRAPH nyc_building_network
             VERTEX TABLES (
@@ -2688,8 +2734,8 @@ async def app_lifespan(server):
                 )
                 EDGE TABLES (
                     main.graph_bic_shared_bbl
-                        SOURCE KEY (company1) REFERENCES main.graph_bic_companies (company_name)
-                        DESTINATION KEY (company2) REFERENCES main.graph_bic_companies (company_name)
+                        SOURCE KEY (company1) REFERENCES main.graph_bic_companies (bic_number)
+                        DESTINATION KEY (company2) REFERENCES main.graph_bic_companies (bic_number)
                         LABEL SharedProperty
                 )
             """)
