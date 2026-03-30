@@ -4,15 +4,7 @@ Provides SQL builders for approximate analytics (HLL distinct counts,
 KLL quantiles, frequent items) and anomaly flagging (IQR).
 """
 
-import re
-
-_VALID_IDENTIFIERS = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_.]*$')
-
-
-def _validate_identifier(name: str) -> str:
-    if not _VALID_IDENTIFIERS.match(name):
-        raise ValueError(f"Invalid SQL identifier: {name}")
-    return name
+from sql_utils import validate_identifier as _validate_identifier
 
 
 def approx_distinct_sql(table: str, column: str) -> str:
