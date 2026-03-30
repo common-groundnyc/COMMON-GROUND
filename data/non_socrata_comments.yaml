@@ -1,0 +1,793 @@
+# Non-Socrata table descriptions for DuckLake COMMENT ON statements.
+# Generated from source file analysis. Used by the comment-applier asset.
+
+# ── CourtListener ────────────────────────────────────────────────────────────
+- schema: federal
+  table: cl_judges
+  comment: "Federal and state judges from CourtListener. One row per judge with biographical data."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/people/
+  columns:
+    name_full: "Full name of the judge"
+    date_dob: "Date of birth"
+    date_dod: "Date of death, if applicable"
+
+- schema: federal
+  table: cl_judges__aba_ratings
+  comment: "Child table of cl_judges. ABA (American Bar Association) qualification ratings for judicial nominees."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/people/
+
+- schema: federal
+  table: cl_judges__educations
+  comment: "Child table of cl_judges. Educational history including school name and degree."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/people/
+
+- schema: federal
+  table: cl_judges__political_affiliations
+  comment: "Child table of cl_judges. Political party affiliations of judges."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/people/
+
+- schema: federal
+  table: cl_judges__positions
+  comment: "Child table of cl_judges. Judicial appointments, courts served, and nomination details."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/people/
+
+- schema: federal
+  table: cl_judges__race
+  comment: "Child table of cl_judges. Race/ethnicity classifications of judges."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/people/
+
+- schema: federal
+  table: cl_judges__sources
+  comment: "Child table of cl_judges. Citation sources for judge biographical data."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/people/
+
+- schema: federal
+  table: cl_courts
+  comment: "Federal and state courts from CourtListener. One row per court with jurisdiction info."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/courts/
+
+- schema: federal
+  table: cl_courts__appeals_to
+  comment: "Child table of cl_courts. Maps each court to its appellate court(s)."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/courts/
+
+- schema: federal
+  table: cl_financial_disclosures
+  comment: "Federal judge financial disclosures from CourtListener. Annual filings with assets, income, liabilities."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/financial-disclosures/
+
+- schema: federal
+  table: cl_financial_disclosures__agreements
+  comment: "Child table of cl_financial_disclosures. Agreements or arrangements reported by judges."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/financial-disclosures/
+
+- schema: federal
+  table: cl_financial_disclosures__debts
+  comment: "Child table of cl_financial_disclosures. Debts owed by judges above reporting threshold."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/financial-disclosures/
+
+- schema: federal
+  table: cl_financial_disclosures__gifts
+  comment: "Child table of cl_financial_disclosures. Gifts received by judges above reporting threshold."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/financial-disclosures/
+
+- schema: federal
+  table: cl_financial_disclosures__investments
+  comment: "Child table of cl_financial_disclosures. Investment holdings and transactions reported by judges."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/financial-disclosures/
+
+- schema: federal
+  table: cl_financial_disclosures__non_investment_incomes
+  comment: "Child table of cl_financial_disclosures. Non-investment income (speaking fees, teaching, etc.)."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/financial-disclosures/
+
+- schema: federal
+  table: cl_financial_disclosures__positions
+  comment: "Child table of cl_financial_disclosures. Positions held outside judiciary (boards, trusts)."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/financial-disclosures/
+
+- schema: federal
+  table: cl_financial_disclosures__reimbursements
+  comment: "Child table of cl_financial_disclosures. Travel and expense reimbursements received by judges."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/financial-disclosures/
+
+- schema: federal
+  table: cl_financial_disclosures__spouse_incomes
+  comment: "Child table of cl_financial_disclosures. Spousal income reported on judge financial disclosures."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/financial-disclosures/
+
+- schema: federal
+  table: cl_fjc_cases
+  comment: "FJC Integrated Database cases from CourtListener. Federal civil cases with City of New York as defendant."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/fjc-integrated-database/
+  columns:
+    defendant: "Name of defendant party"
+    dataset_source: "FJC dataset source code (10 = civil)"
+
+- schema: federal
+  table: cl_nypd_cases_sdny
+  comment: "NYPD-related federal cases in Southern District of NY. RECAP search results for police litigation."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/search/
+
+- schema: federal
+  table: cl_nypd_cases_sdny__attorney
+  comment: "Child table of cl_nypd_cases_sdny. Attorneys of record in NYPD cases (SDNY)."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/search/
+
+- schema: federal
+  table: cl_nypd_cases_sdny__party
+  comment: "Child table of cl_nypd_cases_sdny. Parties (plaintiffs, defendants) in NYPD cases (SDNY)."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/search/
+
+- schema: federal
+  table: cl_nypd_cases_sdny__recap_documents
+  comment: "Child table of cl_nypd_cases_sdny. PACER documents filed in NYPD cases (SDNY)."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/search/
+
+- schema: federal
+  table: cl_nypd_cases_edny
+  comment: "NYPD-related federal cases in Eastern District of NY. RECAP search results for police litigation."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/search/
+
+- schema: federal
+  table: cl_nypd_cases_edny__attorney
+  comment: "Child table of cl_nypd_cases_edny. Attorneys of record in NYPD cases (EDNY)."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/search/
+
+- schema: federal
+  table: cl_nypd_cases_edny__party
+  comment: "Child table of cl_nypd_cases_edny. Parties (plaintiffs, defendants) in NYPD cases (EDNY)."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/search/
+
+- schema: federal
+  table: cl_nypd_cases_edny__recap_documents
+  comment: "Child table of cl_nypd_cases_edny. PACER documents filed in NYPD cases (EDNY)."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/search/
+
+- schema: federal
+  table: cl_positions
+  comment: "Judicial positions from CourtListener. One row per appointment with court, dates, and nominator."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/positions/
+
+- schema: federal
+  table: cl_investments
+  comment: "Judge investment holdings from CourtListener financial disclosures."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/investments/
+
+- schema: federal
+  table: cl_debts
+  comment: "Judge debts from CourtListener financial disclosures. Liabilities above reporting threshold."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/debts/
+
+- schema: federal
+  table: cl_gifts
+  comment: "Gifts received by federal judges from CourtListener financial disclosures."
+  source: CourtListener API
+  source_url: https://www.courtlistener.com/api/rest/v4/gifts/
+
+# ── Census ACS 5-Year (tract-level, NYC) ────────────────────────────────────
+- schema: federal
+  table: acs_demographics
+  comment: "Census ACS 5-year estimates by NYC tract. Core demographics: population, median age, sex breakdown."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+  columns:
+    state_fips: "FIPS state code (36 = New York)"
+    county_fips: "FIPS county code (5 NYC boroughs)"
+    tract_fips: "Census tract identifier"
+    total_population: "Total population in tract"
+    median_age: "Median age of population in tract"
+
+- schema: federal
+  table: acs_age_sex
+  comment: "Census ACS 5-year estimates by NYC tract. Age and sex distribution in 5-year age bands."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_race
+  comment: "Census ACS 5-year estimates by NYC tract. Race breakdown: white, Black, Asian, multiracial, etc."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_hispanic_origin
+  comment: "Census ACS 5-year estimates by NYC tract. Hispanic/Latino origin detail: Mexican, Puerto Rican, Dominican, etc."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_education
+  comment: "Census ACS 5-year estimates by NYC tract. Educational attainment for population 25+."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+  columns:
+    total_25plus: "Universe: population 25 years and older"
+    bachelors: "Count with bachelor's degree"
+
+- schema: federal
+  table: acs_employment
+  comment: "Census ACS 5-year estimates by NYC tract. Labor force status: employed, unemployed, not in labor force."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_occupation
+  comment: "Census ACS 5-year estimates by NYC tract. Occupation by sector: management, service, sales, production."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_median_income
+  comment: "Census ACS 5-year estimates by NYC tract. Median household income in dollars."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+  columns:
+    median_household_income: "Median household income in past 12 months (inflation-adjusted)"
+
+- schema: federal
+  table: acs_income_distribution
+  comment: "Census ACS 5-year estimates by NYC tract. Household income distribution in 17 brackets ($0-$200K+)."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_poverty
+  comment: "Census ACS 5-year estimates by NYC tract. Poverty status: count below vs above poverty line."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+  columns:
+    total_poverty_determined: "Universe: population for whom poverty status is determined"
+    below_poverty: "Count of individuals below poverty level"
+
+- schema: federal
+  table: acs_public_assistance
+  comment: "Census ACS 5-year estimates by NYC tract. Households receiving public assistance or SNAP."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_gini_index
+  comment: "Census ACS 5-year estimates by NYC tract. Gini index of income inequality (0=equal, 1=unequal)."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+  columns:
+    gini_index: "Gini coefficient of income inequality for the tract"
+
+- schema: federal
+  table: acs_housing_tenure
+  comment: "Census ACS 5-year estimates by NYC tract. Owner-occupied vs renter-occupied units."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_housing_units
+  comment: "Census ACS 5-year estimates by NYC tract. Total housing unit count."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_median_home_value
+  comment: "Census ACS 5-year estimates by NYC tract. Median value of owner-occupied housing units."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_median_rent
+  comment: "Census ACS 5-year estimates by NYC tract. Median gross rent in dollars."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_rent_burden
+  comment: "Census ACS 5-year estimates by NYC tract. Rent as percentage of income (30%+ = burdened)."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+  columns:
+    rent_50_plus_pct: "Renters paying 50%+ of income on rent (severely burdened)"
+
+- schema: federal
+  table: acs_year_built
+  comment: "Census ACS 5-year estimates by NYC tract. Housing units by decade of construction (pre-1939 to 2020+)."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_rooms
+  comment: "Census ACS 5-year estimates by NYC tract. Median number of rooms by tenure (owner vs renter)."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_overcrowding
+  comment: "Census ACS 5-year estimates by NYC tract. Occupants per room by tenure (1.5+ = overcrowded)."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_vacancy
+  comment: "Census ACS 5-year estimates by NYC tract. Occupied vs vacant housing units."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_health_insurance
+  comment: "Census ACS 5-year estimates by NYC tract. Health insurance coverage by age and sex."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_disability
+  comment: "Census ACS 5-year estimates by NYC tract. Disability status by age and sex."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_commute_mode
+  comment: "Census ACS 5-year estimates by NYC tract. Commute mode: subway, bus, drove alone, walked, WFH."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_commute_time
+  comment: "Census ACS 5-year estimates by NYC tract. Travel time to work in 12 duration brackets."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_vehicles_available
+  comment: "Census ACS 5-year estimates by NYC tract. Vehicles available by tenure (no-car households)."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_computer_access
+  comment: "Census ACS 5-year estimates by NYC tract. Computer and device access: desktop, smartphone, none."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_internet_access
+  comment: "Census ACS 5-year estimates by NYC tract. Internet subscription: broadband, any, none."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_language_at_home
+  comment: "Census ACS 5-year estimates by NYC tract. Language spoken at home and English proficiency."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_nativity
+  comment: "Census ACS 5-year estimates by NYC tract. Native-born vs foreign-born, naturalization status."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_place_of_birth_foreign
+  comment: "Census ACS 5-year estimates by NYC tract. Foreign-born population by world region of birth."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_school_enrollment
+  comment: "Census ACS 5-year estimates by NYC tract. School enrollment by level: nursery through graduate."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_household_size
+  comment: "Census ACS 5-year estimates by NYC tract. Household size distribution by tenure (1-4+ persons)."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_household_type
+  comment: "Census ACS 5-year estimates by NYC tract. Household type: married, single parent, nonfamily, living alone."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2024/acs/acs5
+
+- schema: federal
+  table: acs_zcta_demographics
+  comment: "Census ACS 5-year estimates by NYC ZIP code (ZCTA). Summary demographics: population, income, rent, poverty."
+  source: Census Bureau ACS 5-Year API
+  source_url: https://api.census.gov/data/2023/acs/acs5
+  columns:
+    zcta: "ZIP Code Tabulation Area (5-digit)"
+    median_household_income: "Median household income"
+    median_gross_rent: "Median gross rent"
+    below_poverty: "Count below poverty level"
+
+# ── FEC ──────────────────────────────────────────────────────────────────────
+- schema: federal
+  table: fec_contributions
+  comment: "FEC individual campaign contributions filtered to NYC ZIP codes. Bulk download, 2020-2024 cycles."
+  source: FEC Bulk Data
+  source_url: https://www.fec.gov/data/browse-data/?tab=bulk-data
+  columns:
+    sub_id: "FEC submission ID (primary key)"
+    name: "Contributor name"
+    employer: "Contributor's employer"
+    occupation: "Contributor's occupation"
+    transaction_amt: "Contribution amount in dollars"
+    cmte_id: "Recipient committee ID"
+    election_cycle: "2-year election cycle (2020, 2022, 2024)"
+
+# ── College Scorecard ────────────────────────────────────────────────────────
+- schema: federal
+  table: college_scorecard_schools
+  comment: "US colleges and universities from Dept of Education. Tuition, enrollment, debt, earnings, completion rates."
+  source: College Scorecard API
+  source_url: https://api.data.gov/ed/collegescorecard/v1/schools
+  columns:
+    id: "Federal school ID"
+    school__name: "Institution name"
+    latest__cost__tuition__in_state: "In-state tuition"
+    latest__earnings__10_yrs_after_entry__median: "Median earnings 10 years after entry"
+    latest__admissions__admission_rate__overall: "Overall admission rate"
+
+# ── EPA ECHO ─────────────────────────────────────────────────────────────────
+- schema: federal
+  table: epa_echo_facilities_bronx
+  comment: "EPA-regulated facilities in Bronx. Environmental compliance under CAA, CWA, RCRA, SDWA."
+  source: EPA ECHO API
+  source_url: https://echo.epa.gov/tools/web-services
+  columns:
+    RegistryID: "EPA Facility Registry Service ID"
+
+- schema: federal
+  table: epa_echo_facilities_brooklyn
+  comment: "EPA-regulated facilities in Brooklyn. Environmental compliance under CAA, CWA, RCRA, SDWA."
+  source: EPA ECHO API
+  source_url: https://echo.epa.gov/tools/web-services
+
+- schema: federal
+  table: epa_echo_facilities_manhattan
+  comment: "EPA-regulated facilities in Manhattan. Environmental compliance under CAA, CWA, RCRA, SDWA."
+  source: EPA ECHO API
+  source_url: https://echo.epa.gov/tools/web-services
+
+- schema: federal
+  table: epa_echo_facilities_queens
+  comment: "EPA-regulated facilities in Queens. Environmental compliance under CAA, CWA, RCRA, SDWA."
+  source: EPA ECHO API
+  source_url: https://echo.epa.gov/tools/web-services
+
+- schema: federal
+  table: epa_echo_facilities_staten_island
+  comment: "EPA-regulated facilities in Staten Island. Environmental compliance under CAA, CWA, RCRA, SDWA."
+  source: EPA ECHO API
+  source_url: https://echo.epa.gov/tools/web-services
+
+# ── LittleSis ───────────────────────────────────────────────────────────────
+- schema: federal
+  table: littlesis_entities
+  comment: "NYC-connected power players from LittleSis. People and orgs: politicians, developers, lobbyists."
+  source: LittleSis API
+  source_url: https://littlesis.org/api
+  columns:
+    id: "LittleSis entity ID"
+    name: "Entity name"
+    primary_ext: "Entity type: Person or Org"
+    blurb: "Short description"
+
+- schema: federal
+  table: littlesis_relationships
+  comment: "Relationships between LittleSis entities. Board seats, donations, lobbying, ownership ties."
+  source: LittleSis API
+  source_url: https://littlesis.org/api
+  columns:
+    entity1_id: "Source entity ID"
+    entity2_id: "Target entity ID"
+    category: "Relationship type: position, donation, lobbying, ownership, etc."
+    amount: "Dollar amount if applicable (donations, transactions)"
+
+# ── ProPublica ───────────────────────────────────────────────────────────────
+- schema: federal
+  table: propublica_nonprofits
+  comment: "NY state nonprofits from ProPublica Nonprofit Explorer. IRS-registered orgs with EIN and basic financials."
+  source: ProPublica Nonprofit Explorer API
+  source_url: https://projects.propublica.org/nonprofits/api/v2/search.json
+  columns:
+    ein: "IRS Employer Identification Number (primary key)"
+    name: "Organization name"
+    state: "State (filtered to NY)"
+
+# ── USAspending ──────────────────────────────────────────────────────────────
+- schema: federal
+  table: usaspending_contracts
+  comment: "Federal contracts awarded to NYC entities from USAspending. 2019-present, sorted by amount."
+  source: USAspending API
+  source_url: https://api.usaspending.gov/api/v2/search/spending_by_award/
+  columns:
+    award_id: "Unique award identifier"
+    recipient_name: "Contractor name"
+    award_amount: "Total award amount in dollars"
+    awarding_agency: "Federal agency that awarded the contract"
+
+- schema: federal
+  table: usaspending_grants
+  comment: "Federal grants awarded to NYC entities from USAspending. 2019-present, sorted by amount."
+  source: USAspending API
+  source_url: https://api.usaspending.gov/api/v2/search/spending_by_award/
+  columns:
+    award_id: "Unique award identifier"
+    recipient_name: "Grantee name"
+    award_amount: "Total grant amount in dollars"
+    awarding_agency: "Federal agency that awarded the grant"
+
+# ── NYPD Misconduct ──────────────────────────────────────────────────────────
+- schema: federal
+  table: nypd_ccrb_complaints
+  comment: "NYPD CCRB misconduct complaints from NYCLU database. Officer names, ranks, complaint categories, penalties."
+  source: NYCLU NYPD Misconduct Complaint Database
+  source_url: https://github.com/new-york-civil-liberties-union/NYPD-Misconduct-Complaint-Database-Updated
+
+- schema: federal
+  table: nypd_ccrb_officers_current
+  comment: "NYPD officers with CCRB complaint summaries from NYCLU Airtable. 43K officers, current to July 2025."
+  source: NYCLU Airtable
+  source_url: https://github.com/new-york-civil-liberties-union/NYPD-Misconduct-Complaint-Database-Updated
+
+# ── NYS Death Index ──────────────────────────────────────────────────────────
+- schema: federal
+  table: nys_death_index
+  comment: "NYS death records 1880-1971 from Reclaim The Records. 10.5M records with name, residence, age, date."
+  source: Reclaim The Records (Internet Archive)
+  source_url: https://archive.org/details/reclaim-the-records-new-york-state-death-index-1880-1971
+  columns:
+    last_name: "Decedent's last name"
+    first_name: "Decedent's first name"
+    year: "Year of death"
+    age: "Age at death"
+    residence_code: "Coded residence location"
+
+# ── Police Settlements ───────────────────────────────────────────────────────
+- schema: federal
+  table: police_settlements_538
+  comment: "NYC police misconduct settlement payouts from FiveThirtyEight. Case-level with amounts and descriptions."
+  source: FiveThirtyEight (GitHub)
+  source_url: https://github.com/fivethirtyeight/police-settlements
+
+# ── Entity Resolution ────────────────────────────────────────────────────────
+- schema: federal
+  table: name_index
+  comment: "Unified person name index across 47 lake tables. Cross-references: names appearing in 2+ source tables."
+  source: Computed (DuckDB SQL)
+  source_url: ""
+  columns:
+    unique_id: "Row-level unique identifier"
+    last_name: "Standardized last name"
+    first_name: "Standardized first name"
+    source_table: "Original schema.table where this name was found"
+    dm_last: "Double metaphone encoding of last name (phonetic blocking)"
+    dm_first: "Double metaphone encoding of first name"
+
+- schema: federal
+  table: resolved_entities
+  comment: "Probabilistic entity resolution via Splink. Clusters matching person records across all lake tables."
+  source: Computed (Splink 4.0)
+  source_url: ""
+  columns:
+    cluster_id: "Entity cluster ID — records in same cluster are the same person"
+    unique_id: "Maps back to name_index.unique_id"
+    match_probability: "Splink match probability score (0.0-1.0)"
+
+# ── NREL ─────────────────────────────────────────────────────────────────────
+- schema: federal
+  table: nrel_alt_fuel_stations
+  comment: "Alternative fuel stations in NY state from NREL. EV chargers, CNG, biodiesel, hydrogen locations."
+  source: NREL Alternative Fuel Stations API
+  source_url: https://developer.nrel.gov/docs/transportation/alt-fuel-stations-v1/
+  columns:
+    id: "NREL station ID"
+    station_name: "Station name"
+    fuel_type_code: "Fuel type: ELEC, CNG, BD, HY, etc."
+    street_address: "Street address"
+    city: "City"
+    zip: "ZIP code"
+
+# ── HUD ──────────────────────────────────────────────────────────────────────
+- schema: federal
+  table: hud_housing_choice_vouchers
+  comment: "HUD Housing Choice Voucher (Section 8) data by census tract in NY state. Voucher counts and utilization."
+  source: HUD ArcGIS Feature Service
+  source_url: https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Housing_Choice_Vouchers_by_Tract
+
+- schema: federal
+  table: hud_public_housing_buildings
+  comment: "HUD public housing buildings in NY state. Individual building records with address, unit counts, condition."
+  source: HUD ArcGIS Feature Service
+  source_url: https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Public_Housing_Buildings
+
+- schema: federal
+  table: hud_public_housing_developments
+  comment: "HUD public housing developments in NY state. Development-level data with total units, occupancy, PHA info."
+  source: HUD ArcGIS Feature Service
+  source_url: https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Public_Housing_Developments
+
+# ── FDA ──────────────────────────────────────────────────────────────────────
+- schema: federal
+  table: fda_food_enforcement
+  comment: "FDA food enforcement actions in NY state. Recalls, seizures, and injunctions with classification and status."
+  source: OpenFDA API
+  source_url: https://api.fda.gov/food/enforcement.json
+  columns:
+    recall_number: "FDA recall number (primary key)"
+    product_description: "Description of recalled product"
+    classification: "Recall class: I (dangerous), II (may cause harm), III (unlikely harm)"
+
+# ── NYS Board of Elections ───────────────────────────────────────────────────
+- schema: federal
+  table: nys_campaign_finance
+  comment: "NYS Board of Elections campaign finance disclosures. Contributions, expenditures, all state-level candidates."
+  source: NYS Board of Elections
+  source_url: https://publicreporting.elections.ny.gov/DownloadCampaignFinanceData/
+  columns:
+    filer_name: "Name of the filing entity (candidate or committee)"
+    flng_ent_name: "Name of the contributing or receiving entity"
+    org_amt: "Transaction amount in dollars"
+    sched_date: "Transaction date"
+
+# ── BLS Unemployment ─────────────────────────────────────────────────────────
+- schema: federal
+  table: bls_unemployment_bronx
+  comment: "Monthly unemployment rate for Bronx County from BLS LAUS program."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+  columns:
+    year: "Data year"
+    period: "Month code (M01-M12)"
+    value: "Unemployment rate"
+
+- schema: federal
+  table: bls_unemployment_bronx__footnotes
+  comment: "Child table of bls_unemployment_bronx. Footnotes for unemployment data points."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+
+- schema: federal
+  table: bls_unemployment_brooklyn
+  comment: "Monthly unemployment rate for Kings County (Brooklyn) from BLS LAUS program."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+
+- schema: federal
+  table: bls_unemployment_brooklyn__footnotes
+  comment: "Child table of bls_unemployment_brooklyn. Footnotes for unemployment data points."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+
+- schema: federal
+  table: bls_unemployment_manhattan
+  comment: "Monthly unemployment rate for New York County (Manhattan) from BLS LAUS program."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+
+- schema: federal
+  table: bls_unemployment_manhattan__footnotes
+  comment: "Child table of bls_unemployment_manhattan. Footnotes for unemployment data points."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+
+- schema: federal
+  table: bls_unemployment_queens
+  comment: "Monthly unemployment rate for Queens County from BLS LAUS program."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+
+- schema: federal
+  table: bls_unemployment_queens__footnotes
+  comment: "Child table of bls_unemployment_queens. Footnotes for unemployment data points."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+
+- schema: federal
+  table: bls_unemployment_staten_island
+  comment: "Monthly unemployment rate for Richmond County (Staten Island) from BLS LAUS program."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+
+- schema: federal
+  table: bls_unemployment_staten_island__footnotes
+  comment: "Child table of bls_unemployment_staten_island. Footnotes for unemployment data points."
+  source: Bureau of Labor Statistics API
+  source_url: https://api.bls.gov/publicAPI/v1/timeseries/data/
+
+# ── NYC Marriage Index ───────────────────────────────────────────────────────
+- schema: federal
+  table: nyc_marriage_index
+  comment: "NYC marriage license records 1950-2017 from Reclaim The Records. 4.76M records with bride/groom names."
+  source: Reclaim The Records (Internet Archive)
+  source_url: https://archive.org/details/NewYorkCityMarriageIndex1950-1995
+  columns:
+    groom_surname: "Groom's last name"
+    bride_surname: "Bride's last name"
+    license_year: "Year license was issued"
+    license_borough: "Borough where license was filed"
+
+# ── OCA Housing Court ────────────────────────────────────────────────────────
+- schema: federal
+  table: oca_housing_court_cases
+  comment: "Landlord-tenant housing court cases from NYS OCA. Rolling 5 years, de-identified (no names/addresses)."
+  source: NYS Office of Court Administration
+  source_url: https://ww2.nycourts.gov/landlord-tenant-data-34621
+  columns:
+    IndexNumber: "Case index number (primary key)"
+    FiledDate: "Date case was filed"
+
+# ── Foundation Schema ────────────────────────────────────────────────────────
+- schema: foundation
+  table: data_health
+  comment: "Per-table health profile for all lake tables. Row counts, null rates, profiled after each ingestion run."
+  source: Computed (DuckDB SQL)
+  source_url: ""
+  columns:
+    schema_name: "Source schema name"
+    table_name: "Source table name"
+    row_count: "Total row count"
+    high_null_columns: "Number of columns with >50% null rate"
+    profiled_at: "Timestamp of last profiling run"
+
+- schema: foundation
+  table: h3_index
+  comment: "H3 hex cell spatial index (resolution 9, ~100m) for all lat/lng tables in the lake. NYC bounds only."
+  source: Computed (DuckDB H3 extension)
+  source_url: ""
+  columns:
+    source_table: "Original schema.table containing the lat/lng"
+    h3_res9: "H3 cell ID at resolution 9"
+    lat: "Latitude"
+    lng: "Longitude"
+
+- schema: foundation
+  table: phonetic_index
+  comment: "Double metaphone phonetic encodings for all names in name_index. Used for fuzzy name blocking in Splink."
+  source: Computed (DuckDB splink_udfs extension)
+  source_url: ""
+  columns:
+    dm_last: "Double metaphone encoding of last name"
+    dm_first: "Double metaphone encoding of first name"
+    sx_last: "Soundex encoding of last name"
+    sx_first: "Soundex encoding of first name"
+
+- schema: foundation
+  table: row_fingerprints
+  comment: "MurmurHash3 fingerprints of high-volume tables for dedup detection. Covers HPD, DOB, 311, NYPD, health."
+  source: Computed (DuckDB hashfuncs extension)
+  source_url: ""
+  columns:
+    source_table: "Original schema.table that was fingerprinted"
+    record_key: "Primary key value from the source table"
+    fingerprint: "128-bit MurmurHash3 of the record key"
