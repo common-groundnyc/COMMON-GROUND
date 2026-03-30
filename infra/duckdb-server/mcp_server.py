@@ -21,6 +21,7 @@ from fastmcp.tools.tool import ToolResult
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from fastmcp.server.transforms.search import BM25SearchTransform
+from fastmcp.experimental.transforms.code_mode import CodeMode
 
 from typing import Annotated
 from pydantic import Field
@@ -3061,10 +3062,8 @@ mcp = FastMCP(
     instructions=INSTRUCTIONS,
     lifespan=app_lifespan,
     transforms=[
-        BM25SearchTransform(
-            max_results=5,
-            always_visible=ALWAYS_VISIBLE,
-        ),
+        BM25SearchTransform(max_tools=25),
+        CodeMode(),
     ],
 )
 
@@ -3497,37 +3496,6 @@ def complaints_by_zip(zip_code: ZIP, ctx: Context, days: Annotated[int, Field(de
         raise ToolError("ZIP code must be exactly 5 digits")
 
     pool = ctx.lifespan_context["pool"]
-
-    # Try pre-aggregated MV first
-    try:
-        _mv_cols, _mv_rows = _execute(pool, """
-            SELECT hpd_complaints, n311_requests, top_hpd_category, top_311_category
-            FROM lake.foundation.mv_zip_stats WHERE zip = ?
-        """, [zip_code])
-        if _mv_rows and days == 365:
-            mv = dict(zip(_mv_cols, _mv_rows[0]))
-            mv_rows = []
-            if mv.get("top_hpd_category") and mv.get("hpd_complaints"):
-                mv_rows.append(("HPD", mv["top_hpd_category"], mv["hpd_complaints"]))
-            if mv.get("top_311_category") and mv.get("n311_requests"):
-                mv_rows.append(("311", mv["top_311_category"], mv["n311_requests"]))
-            if mv_rows:
-                total = sum(r[2] for r in mv_rows)
-                sources = sorted(set(r[0] for r in mv_rows))
-                top5_text = ", ".join(f"{r[1]} ({r[2]})" for r in mv_rows[:5])
-                summary = (
-                    f"ZIP {zip_code} last {days} days: {total:,} complaints"
-                    f" from {', '.join(sources)}\n"
-                    f"Top: {top5_text}"
-                )
-                return make_result(
-                    summary,
-                    ["source", "category", "cnt"],
-                    mv_rows,
-                    {"total_complaints": total, "days": days, "sources": sources},
-                )
-    except Exception:
-        pass
 
     cols, rows = _execute(
         pool, COMPLAINTS_BY_ZIP_SQL, [zip_code, days, zip_code, days]
@@ -8685,15 +8653,6 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
     lines.append(f"NEIGHBORHOOD PORTRAIT: {zipcode}, {boro_name}")
     lines.append("=" * 60)
 
-    # Try pre-aggregated MV for 311 + HPD + restaurant stats
-    _mv_zip = None
-    try:
-        _mv_cols, _mv_rows = _execute(pool, "SELECT * FROM lake.foundation.mv_zip_stats WHERE zip = ?", [zipcode])
-        if _mv_rows:
-            _mv_zip = dict(zip(_mv_cols, _mv_rows[0]))
-    except Exception:
-        pass
-
     # --- Cuisine fingerprint ---
     cols_c, rows_c = _safe_query(pool, PORTRAIT_CUISINE_SQL, [zipcode])
     cols_city, rows_city = _safe_query(pool, PORTRAIT_CUISINE_CITY_SQL)
@@ -8764,26 +8723,15 @@ def neighborhood_portrait(zipcode: ZIP, ctx: Context) -> ToolResult:
             lines.append(f"  In historic district: {hist_ct}")
 
     # --- 311 character ---
-    _used_mv_311 = False
-    if _mv_zip and _mv_zip.get("n311_requests"):
-        lines.append(f"\n311 CHARACTER (pre-aggregated)")
-        lines.append(f"  Total 311 requests: {int(_mv_zip['n311_requests']):,}")
-        if _mv_zip.get("top_311_category"):
-            lines.append(f"  Top category: {_mv_zip['top_311_category']}")
-        if _mv_zip.get("hpd_complaints"):
-            lines.append(f"  HPD complaints: {int(_mv_zip['hpd_complaints']):,}")
-        _used_mv_311 = True
-
-    if not _used_mv_311:
-        cols_311, rows_311 = _safe_query(pool, PORTRAIT_311_SQL, [zipcode])
-        if rows_311:
-            lines.append(f"\n311 CHARACTER (since 2020)")
-            total_311 = 0
-            for row in rows_311[:8]:
-                r = dict(zip(cols_311, row))
-                cnt = int(r.get("cnt") or 0)
-                total_311 += cnt
-                lines.append(f"  {r.get('complaint_type')}: {cnt:,}")
+    cols_311, rows_311 = _safe_query(pool, PORTRAIT_311_SQL, [zipcode])
+    if rows_311:
+        lines.append(f"\n311 CHARACTER (since 2020)")
+        total_311 = 0
+        for row in rows_311[:8]:
+            r = dict(zip(cols_311, row))
+            cnt = int(r.get("cnt") or 0)
+            total_311 += cnt
+            lines.append(f"  {r.get('complaint_type')}: {cnt:,}")
 
     # Noise comparison
     cols_noise, rows_noise = _safe_query(pool, PORTRAIT_311_NOISE_SQL, [zipcode])
