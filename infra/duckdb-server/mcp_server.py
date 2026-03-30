@@ -105,6 +105,49 @@ def _vector_expand_names(ctx, search_term: str, threshold: float = LANCE_NAME_DI
     except Exception:
         return set()
 
+
+def _lance_route_entity(ctx, search_term: str, k: int = 30) -> dict:
+    """Search Lance entity index to find which source tables contain matching names.
+
+    Returns dict with:
+      - 'sources': set of source_table names that have matches
+      - 'matched_names': list of matched name strings
+    Returns empty dict on failure (caller falls back to full scan).
+    """
+    embed_fn = ctx.lifespan_context.get("embed_fn")
+    if not embed_fn:
+        return {}
+    try:
+        from embedder import vec_to_sql
+        query_vec = embed_fn(search_term)
+        vec_literal = vec_to_sql(query_vec)
+        sql = f"""
+            SELECT name, sources, _distance AS dist
+            FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k={k})
+            WHERE _distance < {LANCE_NAME_DISTANCE}
+            ORDER BY _distance ASC
+        """
+        pool = ctx.lifespan_context["pool"]
+        with pool.cursor() as cur:
+            rows = cur.execute(sql).fetchall()
+
+        if not rows:
+            return {}
+
+        all_sources = set()
+        matched_names = []
+        for name, sources_csv, dist in rows:
+            matched_names.append(name)
+            for src in sources_csv.split(","):
+                s = src.strip()
+                if s:
+                    all_sources.add(s)
+
+        return {"sources": all_sources, "matched_names": matched_names}
+    except Exception:
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # SQL constants — domain tools
 # ---------------------------------------------------------------------------
@@ -10055,8 +10098,34 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     # Splink probabilistic name resolution — find all name variants in the same cluster
     name_variants = _resolve_name_variants(pool, name)
 
+    # Route via Lance — find which tables actually have this name
+    lance_route = _lance_route_entity(ctx, search)
+    routed_sources = lance_route.get("sources", set())
+    use_routing = len(routed_sources) > 0
+
+    # Add Lance-matched names to extra_names for display
+    lance_matched = set(lance_route.get("matched_names", []))
+    extra_names = extra_names | lance_matched
+
+    # These sources always run (business/entity names not in person name index)
+    _ALWAYS_QUERY = {
+        "nys_corporations", "issued_licenses", "restaurant_inspections",
+        "campaign_expenditures", "dcwp_charges",
+        "graph_dob_owners", "graph_doing_business", "graph_epa_facilities",
+        "marriage_licenses_1950_2017", "nys_lobbyist_registration",
+    }
+
+    def _should_query(source_table: str) -> bool:
+        if source_table in _ALWAYS_QUERY:
+            return True
+        if not use_routing:
+            return True  # fallback: query everything
+        return source_table in routed_sources
+
     # 1. NYS corps — find ALL entities this person/name is associated with
-    corp_cols, corp_rows = _execute(pool, """
+    corp_cols, corp_rows = [], []
+    if _should_query("nys_corporations"):
+        corp_cols, corp_rows = _execute(pool, """
         SELECT current_entity_name, entity_type, initial_dos_filing_date,
                dos_process_name, registered_agent_name, chairman_name, county
         FROM lake.business.nys_corporations
@@ -10068,390 +10137,432 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
     """, [f"%{search}%"] * 4)
 
     # 2. Business licenses
-    biz_cols, biz_rows = _execute(pool, """
-        SELECT business_name, dba_trade_name, business_category,
-               license_type, license_status, bbl,
-               address_building || ' ' || address_street_name AS address,
-               address_zip
-        FROM lake.business.issued_licenses
-        WHERE UPPER(business_name) LIKE ? OR UPPER(dba_trade_name) LIKE ?
-        LIMIT 20
-    """, [f"%{search}%"] * 2)
+    biz_cols, biz_rows = [], []
+    if _should_query("issued_licenses"):
+        biz_cols, biz_rows = _execute(pool, """
+            SELECT business_name, dba_trade_name, business_category,
+                   license_type, license_status, bbl,
+                   address_building || ' ' || address_street_name AS address,
+                   address_zip
+            FROM lake.business.issued_licenses
+            WHERE UPPER(business_name) LIKE ? OR UPPER(dba_trade_name) LIKE ?
+            LIMIT 20
+        """, [f"%{search}%"] * 2)
 
     # 3. Restaurant inspections
-    rest_cols, rest_rows = _execute(pool, """
-        SELECT DISTINCT dba, cuisine_description, building || ' ' || street AS address,
-               boro, zipcode, grade, bbl
-        FROM lake.health.restaurant_inspections
-        WHERE UPPER(dba) LIKE ?
-        LIMIT 20
-    """, [f"%{search}%"])
+    rest_cols, rest_rows = [], []
+    if _should_query("restaurant_inspections"):
+        rest_cols, rest_rows = _execute(pool, """
+            SELECT DISTINCT dba, cuisine_description, building || ' ' || street AS address,
+                   boro, zipcode, grade, bbl
+            FROM lake.health.restaurant_inspections
+            WHERE UPPER(dba) LIKE ?
+            LIMIT 20
+        """, [f"%{search}%"])
 
     # 4. Campaign contributions — search full string AND individual words
     #    to catch "Perlbinder, Barton M" when user searches "Barton Perlbinder"
-    if len(words) > 1:
-        word_clauses = " AND ".join(["UPPER(name) LIKE ?"] * len(words))
-        camp_sql = f"""
-            SELECT name, recipname, TRY_CAST(amnt AS DOUBLE) AS amount,
-                   date, occupation, empname, city, state
-            FROM lake.city_government.campaign_contributions
-            WHERE (UPPER(name) LIKE ? OR UPPER(empname) LIKE ?)
-               OR ({word_clauses})
-            ORDER BY TRY_CAST(amnt AS DOUBLE) DESC NULLS LAST
-            LIMIT 20
-        """
-        camp_params = [f"%{search}%", f"%{search}%"] + [f"%{w}%" for w in words]
-    else:
-        camp_sql = """
-            SELECT name, recipname, TRY_CAST(amnt AS DOUBLE) AS amount,
-                   date, occupation, empname, city, state
-            FROM lake.city_government.campaign_contributions
-            WHERE UPPER(name) LIKE ? OR UPPER(empname) LIKE ?
-            ORDER BY TRY_CAST(amnt AS DOUBLE) DESC NULLS LAST
-            LIMIT 20
-        """
-        camp_params = [f"%{search}%"] * 2
-    camp_cols, camp_rows = _execute(pool, camp_sql, camp_params)
+    camp_cols, camp_rows = [], []
+    if _should_query("campaign_contributions"):
+        if len(words) > 1:
+            word_clauses = " AND ".join(["UPPER(name) LIKE ?"] * len(words))
+            camp_sql = f"""
+                SELECT name, recipname, TRY_CAST(amnt AS DOUBLE) AS amount,
+                       date, occupation, empname, city, state
+                FROM lake.city_government.campaign_contributions
+                WHERE (UPPER(name) LIKE ? OR UPPER(empname) LIKE ?)
+                   OR ({word_clauses})
+                ORDER BY TRY_CAST(amnt AS DOUBLE) DESC NULLS LAST
+                LIMIT 20
+            """
+            camp_params = [f"%{search}%", f"%{search}%"] + [f"%{w}%" for w in words]
+        else:
+            camp_sql = """
+                SELECT name, recipname, TRY_CAST(amnt AS DOUBLE) AS amount,
+                       date, occupation, empname, city, state
+                FROM lake.city_government.campaign_contributions
+                WHERE UPPER(name) LIKE ? OR UPPER(empname) LIKE ?
+                ORDER BY TRY_CAST(amnt AS DOUBLE) DESC NULLS LAST
+                LIMIT 20
+            """
+            camp_params = [f"%{search}%"] * 2
+        camp_cols, camp_rows = _execute(pool, camp_sql, camp_params)
 
     # 5. OATH hearings — search both first and last name with word splitting
-    if len(words) > 1:
-        oath_word_clauses = " OR ".join(
-            [f"(UPPER(respondent_last_name) LIKE ? AND UPPER(respondent_first_name) LIKE ?)"
-             for _ in range(len(words))]
-        )
-        oath_sql = f"""
-            SELECT respondent_last_name,
-                   respondent_first_name,
-                   issuing_agency,
-                   charge_1_code_description,
-                   TRY_CAST(total_violation_amount AS DOUBLE) AS fine,
-                   hearing_result,
-                   violation_date,
-                   violation_location_house || ' ' || violation_location_street_name AS location
-            FROM lake.city_government.oath_hearings
-            WHERE UPPER(respondent_last_name) LIKE ?
-               OR UPPER(respondent_first_name || ' ' || respondent_last_name) LIKE ?
-               OR ({oath_word_clauses})
-            ORDER BY violation_date DESC
-            LIMIT 20
-        """
-        # Full-string match on last name, full-string match on concat, then
-        # each word tried as (last LIKE word AND first LIKE other_word)
-        oath_params = [f"%{search}%", f"%{search}%"]
-        for i, w in enumerate(words):
-            other = " ".join(words[:i] + words[i+1:])
-            oath_params.extend([f"%{w}%", f"%{other}%"])
-    else:
-        oath_sql = """
-            SELECT respondent_last_name,
-                   respondent_first_name,
-                   issuing_agency,
-                   charge_1_code_description,
-                   TRY_CAST(total_violation_amount AS DOUBLE) AS fine,
-                   hearing_result,
-                   violation_date,
-                   violation_location_house || ' ' || violation_location_street_name AS location
-            FROM lake.city_government.oath_hearings
-            WHERE UPPER(respondent_last_name) LIKE ?
-               OR UPPER(respondent_first_name) LIKE ?
-            ORDER BY violation_date DESC
-            LIMIT 20
-        """
-        oath_params = [f"%{search}%"] * 2
-    oath_cols, oath_rows = _execute(pool, oath_sql, oath_params)
+    oath_cols, oath_rows = [], []
+    if _should_query("oath_hearings"):
+        if len(words) > 1:
+            oath_word_clauses = " OR ".join(
+                [f"(UPPER(respondent_last_name) LIKE ? AND UPPER(respondent_first_name) LIKE ?)"
+                 for _ in range(len(words))]
+            )
+            oath_sql = f"""
+                SELECT respondent_last_name,
+                       respondent_first_name,
+                       issuing_agency,
+                       charge_1_code_description,
+                       TRY_CAST(total_violation_amount AS DOUBLE) AS fine,
+                       hearing_result,
+                       violation_date,
+                       violation_location_house || ' ' || violation_location_street_name AS location
+                FROM lake.city_government.oath_hearings
+                WHERE UPPER(respondent_last_name) LIKE ?
+                   OR UPPER(respondent_first_name || ' ' || respondent_last_name) LIKE ?
+                   OR ({oath_word_clauses})
+                ORDER BY violation_date DESC
+                LIMIT 20
+            """
+            # Full-string match on last name, full-string match on concat, then
+            # each word tried as (last LIKE word AND first LIKE other_word)
+            oath_params = [f"%{search}%", f"%{search}%"]
+            for i, w in enumerate(words):
+                other = " ".join(words[:i] + words[i+1:])
+                oath_params.extend([f"%{w}%", f"%{other}%"])
+        else:
+            oath_sql = """
+                SELECT respondent_last_name,
+                       respondent_first_name,
+                       issuing_agency,
+                       charge_1_code_description,
+                       TRY_CAST(total_violation_amount AS DOUBLE) AS fine,
+                       hearing_result,
+                       violation_date,
+                       violation_location_house || ' ' || violation_location_street_name AS location
+                FROM lake.city_government.oath_hearings
+                WHERE UPPER(respondent_last_name) LIKE ?
+                   OR UPPER(respondent_first_name) LIKE ?
+                ORDER BY violation_date DESC
+                LIMIT 20
+            """
+            oath_params = [f"%{search}%"] * 2
+        oath_cols, oath_rows = _execute(pool, oath_sql, oath_params)
 
     # 6. ACRIS property transactions — who's buying/selling real estate
-    acris_cols, acris_rows = _execute(pool, """
-        SELECT p.name AS party_name, p.party_type,
-               m.doc_type, TRY_CAST(m.document_amt AS DOUBLE) AS amount,
-               m.document_date,
-               (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
-               l.street_name, l.unit
-        FROM lake.housing.acris_parties p
-        JOIN lake.housing.acris_master m ON p.document_id = m.document_id
-        JOIN lake.housing.acris_legals l ON p.document_id = l.document_id
-        WHERE UPPER(p.name) LIKE ?
-        ORDER BY m.document_date DESC
-        LIMIT 20
-    """, [f"%{search}%"])
+    acris_cols, acris_rows = [], []
+    if _should_query("acris_parties"):
+        acris_cols, acris_rows = _execute(pool, """
+            SELECT p.name AS party_name, p.party_type,
+                   m.doc_type, TRY_CAST(m.document_amt AS DOUBLE) AS amount,
+                   m.document_date,
+                   (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
+                   l.street_name, l.unit
+            FROM lake.housing.acris_parties p
+            JOIN lake.housing.acris_master m ON p.document_id = m.document_id
+            JOIN lake.housing.acris_legals l ON p.document_id = l.document_id
+            WHERE UPPER(p.name) LIKE ?
+            ORDER BY m.document_date DESC
+            LIMIT 20
+        """, [f"%{search}%"])
 
     # 7. PLUTO — property portfolio by owner name (assessed value, zoning, units)
-    pluto_cols, pluto_rows = _execute(pool, """
-        SELECT ownername, bbl, address, zonedist1,
-               TRY_CAST(assesstot AS DOUBLE) AS assessed_total,
-               TRY_CAST(unitsres AS INTEGER) AS res_units,
-               TRY_CAST(numfloors AS DOUBLE) AS floors,
-               TRY_CAST(bldgarea AS DOUBLE) AS bldg_sqft,
-               yearbuilt, bldgclass, zipcode
-        FROM lake.city_government.pluto
-        WHERE UPPER(ownername) LIKE ?
-        ORDER BY TRY_CAST(assesstot AS DOUBLE) DESC NULLS LAST
-        LIMIT 20
-    """, [f"%{search}%"])
+    pluto_cols, pluto_rows = [], []
+    if _should_query("pluto"):
+        pluto_cols, pluto_rows = _execute(pool, """
+            SELECT ownername, bbl, address, zonedist1,
+                   TRY_CAST(assesstot AS DOUBLE) AS assessed_total,
+                   TRY_CAST(unitsres AS INTEGER) AS res_units,
+                   TRY_CAST(numfloors AS DOUBLE) AS floors,
+                   TRY_CAST(bldgarea AS DOUBLE) AS bldg_sqft,
+                   yearbuilt, bldgclass, zipcode
+            FROM lake.city_government.pluto
+            WHERE UPPER(ownername) LIKE ?
+            ORDER BY TRY_CAST(assesstot AS DOUBLE) DESC NULLS LAST
+            LIMIT 20
+        """, [f"%{search}%"])
 
     # 8. Campaign expenditures — where politicians spend (vendors, consultants)
-    expend_cols, expend_rows = _execute(pool, """
-        SELECT name, candlast || ', ' || candfirst AS candidate,
-               TRY_CAST(amnt AS DOUBLE) AS amount,
-               purpose, explain, date, city
-        FROM lake.city_government.campaign_expenditures
-        WHERE UPPER(name) LIKE ?
-        ORDER BY TRY_CAST(amnt AS DOUBLE) DESC NULLS LAST
-        LIMIT 20
-    """, [f"%{search}%"])
+    expend_cols, expend_rows = [], []
+    if _should_query("campaign_expenditures"):
+        expend_cols, expend_rows = _execute(pool, """
+            SELECT name, candlast || ', ' || candfirst AS candidate,
+                   TRY_CAST(amnt AS DOUBLE) AS amount,
+                   purpose, explain, date, city
+            FROM lake.city_government.campaign_expenditures
+            WHERE UPPER(name) LIKE ?
+            ORDER BY TRY_CAST(amnt AS DOUBLE) DESC NULLS LAST
+            LIMIT 20
+        """, [f"%{search}%"])
 
     # 9. DOB permits — building permits with owner name
-    if len(words) > 1:
-        dob_word_clauses = " AND ".join(
-            [f"(UPPER(owner_s_business_name || ' ' || COALESCE(owner_s_first_name,'') || ' ' || COALESCE(owner_s_last_name,'')) LIKE ?)"] * 1
-        )
-        dob_sql = f"""
-            SELECT owner_s_business_name, owner_s_first_name, owner_s_last_name,
-                   permit_type, job_type, issuance_date,
-                   house || ' ' || street_name AS address,
-                   (borough || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) AS bbl
-            FROM lake.housing.dob_permit_issuance
-            WHERE UPPER(owner_s_business_name) LIKE ?
-               OR UPPER(owner_s_last_name) LIKE ?
-               OR (UPPER(owner_s_last_name) LIKE ? AND UPPER(owner_s_first_name) LIKE ?)
-            ORDER BY issuance_date DESC
-            LIMIT 15
-        """
-        dob_params = [f"%{search}%", f"%{search}%", f"%{words[-1]}%", f"%{words[0]}%"]
-    else:
-        dob_sql = """
-            SELECT owner_s_business_name, owner_s_first_name, owner_s_last_name,
-                   permit_type, job_type, issuance_date,
-                   house || ' ' || street_name AS address,
-                   (borough || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) AS bbl
-            FROM lake.housing.dob_permit_issuance
-            WHERE UPPER(owner_s_business_name) LIKE ?
-               OR UPPER(owner_s_last_name) LIKE ?
-            ORDER BY issuance_date DESC
-            LIMIT 15
-        """
-        dob_params = [f"%{search}%"] * 2
-    dob_cols, dob_rows = _execute(pool, dob_sql, dob_params)
+    dob_cols, dob_rows = [], []
+    if _should_query("dob_permit_issuance"):
+        if len(words) > 1:
+            dob_word_clauses = " AND ".join(
+                [f"(UPPER(owner_s_business_name || ' ' || COALESCE(owner_s_first_name,'') || ' ' || COALESCE(owner_s_last_name,'')) LIKE ?)"] * 1
+            )
+            dob_sql = f"""
+                SELECT owner_s_business_name, owner_s_first_name, owner_s_last_name,
+                       permit_type, job_type, issuance_date,
+                       house || ' ' || street_name AS address,
+                       (borough || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) AS bbl
+                FROM lake.housing.dob_permit_issuance
+                WHERE UPPER(owner_s_business_name) LIKE ?
+                   OR UPPER(owner_s_last_name) LIKE ?
+                   OR (UPPER(owner_s_last_name) LIKE ? AND UPPER(owner_s_first_name) LIKE ?)
+                ORDER BY issuance_date DESC
+                LIMIT 15
+            """
+            dob_params = [f"%{search}%", f"%{search}%", f"%{words[-1]}%", f"%{words[0]}%"]
+        else:
+            dob_sql = """
+                SELECT owner_s_business_name, owner_s_first_name, owner_s_last_name,
+                       permit_type, job_type, issuance_date,
+                       house || ' ' || street_name AS address,
+                       (borough || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) AS bbl
+                FROM lake.housing.dob_permit_issuance
+                WHERE UPPER(owner_s_business_name) LIKE ?
+                   OR UPPER(owner_s_last_name) LIKE ?
+                ORDER BY issuance_date DESC
+                LIMIT 15
+            """
+            dob_params = [f"%{search}%"] * 2
+        dob_cols, dob_rows = _execute(pool, dob_sql, dob_params)
 
     # 10. DCWP consumer protection charges
-    dcwp_cols, dcwp_rows = _execute(pool, """
-        SELECT business_name, dba_trade_name, business_category,
-               charge, violation_date, outcome, charge_count
-        FROM lake.business.dcwp_charges
-        WHERE UPPER(business_name) LIKE ? OR UPPER(dba_trade_name) LIKE ?
-        ORDER BY violation_date DESC
-        LIMIT 15
-    """, [f"%{search}%"] * 2)
+    dcwp_cols, dcwp_rows = [], []
+    if _should_query("dcwp_charges"):
+        dcwp_cols, dcwp_rows = _execute(pool, """
+            SELECT business_name, dba_trade_name, business_category,
+                   charge, violation_date, outcome, charge_count
+            FROM lake.business.dcwp_charges
+            WHERE UPPER(business_name) LIKE ? OR UPPER(dba_trade_name) LIKE ?
+            ORDER BY violation_date DESC
+            LIMIT 15
+        """, [f"%{search}%"] * 2)
 
     # 11. SBS M/WBE certified businesses
-    if len(words) > 1:
-        sbs_word_clauses = " OR ".join(
-            [f"(UPPER(last_name) LIKE ? AND UPPER(first_name) LIKE ?)"] * 1
-        )
-        sbs_sql = f"""
-            SELECT vendor_formal_name, vendor_dba, first_name, last_name,
-                   certification, ethnicity, business_description,
-                   city, bbl
-            FROM lake.business.sbs_certified
-            WHERE UPPER(vendor_formal_name) LIKE ?
-               OR UPPER(vendor_dba) LIKE ?
-               OR ({sbs_word_clauses})
-            LIMIT 10
-        """
-        sbs_params = [f"%{search}%", f"%{search}%", f"%{words[-1]}%", f"%{words[0]}%"]
-    else:
-        sbs_sql = """
-            SELECT vendor_formal_name, vendor_dba, first_name, last_name,
-                   certification, ethnicity, business_description,
-                   city, bbl
-            FROM lake.business.sbs_certified
-            WHERE UPPER(vendor_formal_name) LIKE ?
-               OR UPPER(vendor_dba) LIKE ?
-               OR UPPER(last_name) LIKE ?
-            LIMIT 10
-        """
-        sbs_params = [f"%{search}%"] * 3
-    sbs_cols, sbs_rows = _execute(pool, sbs_sql, sbs_params)
+    sbs_cols, sbs_rows = [], []
+    if _should_query("sbs_certified"):
+        if len(words) > 1:
+            sbs_word_clauses = " OR ".join(
+                [f"(UPPER(last_name) LIKE ? AND UPPER(first_name) LIKE ?)"] * 1
+            )
+            sbs_sql = f"""
+                SELECT vendor_formal_name, vendor_dba, first_name, last_name,
+                       certification, ethnicity, business_description,
+                       city, bbl
+                FROM lake.business.sbs_certified
+                WHERE UPPER(vendor_formal_name) LIKE ?
+                   OR UPPER(vendor_dba) LIKE ?
+                   OR ({sbs_word_clauses})
+                LIMIT 10
+            """
+            sbs_params = [f"%{search}%", f"%{search}%", f"%{words[-1]}%", f"%{words[0]}%"]
+        else:
+            sbs_sql = """
+                SELECT vendor_formal_name, vendor_dba, first_name, last_name,
+                       certification, ethnicity, business_description,
+                       city, bbl
+                FROM lake.business.sbs_certified
+                WHERE UPPER(vendor_formal_name) LIKE ?
+                   OR UPPER(vendor_dba) LIKE ?
+                   OR UPPER(last_name) LIKE ?
+                LIMIT 10
+            """
+            sbs_params = [f"%{search}%"] * 3
+        sbs_cols, sbs_rows = _execute(pool, sbs_sql, sbs_params)
 
     # 12. Citywide payroll — city employees
-    if len(words) > 1:
-        payroll_sql = """
-            SELECT DISTINCT last_name, first_name, agency_name, title_description,
-                   TRY_CAST(base_salary AS DOUBLE) AS salary,
-                   TRY_CAST(total_ot_paid AS DOUBLE) AS overtime,
-                   fiscal_year, work_location_borough
-            FROM lake.city_government.citywide_payroll
-            WHERE (UPPER(last_name) LIKE ? AND UPPER(first_name) LIKE ?)
-            ORDER BY fiscal_year DESC, salary DESC NULLS LAST
-            LIMIT 10
-        """
-        payroll_params = [f"%{words[-1]}%", f"%{words[0]}%"]
-    else:
-        payroll_sql = """
-            SELECT DISTINCT last_name, first_name, agency_name, title_description,
-                   TRY_CAST(base_salary AS DOUBLE) AS salary,
-                   TRY_CAST(total_ot_paid AS DOUBLE) AS overtime,
-                   fiscal_year, work_location_borough
-            FROM lake.city_government.citywide_payroll
-            WHERE UPPER(last_name) LIKE ?
-            ORDER BY fiscal_year DESC, salary DESC NULLS LAST
-            LIMIT 10
-        """
-        payroll_params = [f"%{search}%"]
-    payroll_cols, payroll_rows = _execute(pool, payroll_sql, payroll_params)
+    payroll_cols, payroll_rows = [], []
+    if _should_query("citywide_payroll"):
+        if len(words) > 1:
+            payroll_sql = """
+                SELECT DISTINCT last_name, first_name, agency_name, title_description,
+                       TRY_CAST(base_salary AS DOUBLE) AS salary,
+                       TRY_CAST(total_ot_paid AS DOUBLE) AS overtime,
+                       fiscal_year, work_location_borough
+                FROM lake.city_government.citywide_payroll
+                WHERE (UPPER(last_name) LIKE ? AND UPPER(first_name) LIKE ?)
+                ORDER BY fiscal_year DESC, salary DESC NULLS LAST
+                LIMIT 10
+            """
+            payroll_params = [f"%{words[-1]}%", f"%{words[0]}%"]
+        else:
+            payroll_sql = """
+                SELECT DISTINCT last_name, first_name, agency_name, title_description,
+                       TRY_CAST(base_salary AS DOUBLE) AS salary,
+                       TRY_CAST(total_ot_paid AS DOUBLE) AS overtime,
+                       fiscal_year, work_location_borough
+                FROM lake.city_government.citywide_payroll
+                WHERE UPPER(last_name) LIKE ?
+                ORDER BY fiscal_year DESC, salary DESC NULLS LAST
+                LIMIT 10
+            """
+            payroll_params = [f"%{search}%"]
+        payroll_cols, payroll_rows = _execute(pool, payroll_sql, payroll_params)
 
     # 13. DOB Application Owners — who's on permit applications (different from HPD owner)
-    try:
-        dob_app_cols, dob_app_rows = _execute(pool, """
-            SELECT owner_name, business_name,
-                   owner_address, owner_city, owner_state, owner_zip
-            FROM main.graph_dob_owners
-            WHERE UPPER(owner_name) LIKE ? OR UPPER(business_name) LIKE ?
-            LIMIT 15
-        """, [f"%{search}%"] * 2)
-    except Exception:
-        dob_app_cols, dob_app_rows = [], []
+    dob_app_cols, dob_app_rows = [], []
+    if _should_query("graph_dob_owners"):
+        try:
+            dob_app_cols, dob_app_rows = _execute(pool, """
+                SELECT owner_name, business_name,
+                       owner_address, owner_city, owner_state, owner_zip
+                FROM main.graph_dob_owners
+                WHERE UPPER(owner_name) LIKE ? OR UPPER(business_name) LIKE ?
+                LIMIT 15
+            """, [f"%{search}%"] * 2)
+        except Exception:
+            pass
 
     # 14. Doing Business disclosures — city contractor principals
-    try:
-        doing_biz_cols, doing_biz_rows = _execute(pool, """
-            SELECT entity_name, person_name, title, transaction_type,
-                   entity_address, entity_city, entity_state
-            FROM main.graph_doing_business
-            WHERE UPPER(entity_name) LIKE ? OR UPPER(person_name) LIKE ?
-            LIMIT 15
-        """, [f"%{search}%"] * 2)
-    except Exception:
-        doing_biz_cols, doing_biz_rows = [], []
+    doing_biz_cols, doing_biz_rows = [], []
+    if _should_query("graph_doing_business"):
+        try:
+            doing_biz_cols, doing_biz_rows = _execute(pool, """
+                SELECT entity_name, person_name, title, transaction_type,
+                       entity_address, entity_city, entity_state
+                FROM main.graph_doing_business
+                WHERE UPPER(entity_name) LIKE ? OR UPPER(person_name) LIKE ?
+                LIMIT 15
+            """, [f"%{search}%"] * 2)
+        except Exception:
+            pass
 
     # 15. EPA ECHO facilities — environmental compliance
-    try:
-        epa_cols, epa_rows = _execute(pool, """
-            SELECT facility_name, address, city, zip, county,
-                   current_violation, total_penalties, inspection_count,
-                   formal_action_count, last_penalty_amount
-            FROM main.graph_epa_facilities
-            WHERE UPPER(facility_name) LIKE ?
-            LIMIT 15
-        """, [f"%{search}%"])
-    except Exception:
-        epa_cols, epa_rows = [], []
+    epa_cols, epa_rows = [], []
+    if _should_query("graph_epa_facilities"):
+        try:
+            epa_cols, epa_rows = _execute(pool, """
+                SELECT facility_name, address, city, zip, county,
+                       current_violation, total_penalties, inspection_count,
+                       formal_action_count, last_penalty_amount
+                FROM main.graph_epa_facilities
+                WHERE UPPER(facility_name) LIKE ?
+                LIMIT 15
+            """, [f"%{search}%"])
+        except Exception:
+            pass
 
     # 17. NYS Attorney Registrations — bar admissions
-    try:
-        atty_cols, atty_rows = _execute(pool, """
-            SELECT first_name, last_name, registration_number, law_school,
-                   company_name, status, year_admitted, city, state
-            FROM lake.financial.nys_attorney_registrations
-            WHERE UPPER(last_name) LIKE ? OR UPPER(company_name) LIKE ?
-            LIMIT 20
-        """, [f"%{search}%"] * 2)
-    except Exception:
-        atty_cols, atty_rows = [], []
+    atty_cols, atty_rows = [], []
+    if _should_query("nys_attorney_registrations"):
+        try:
+            atty_cols, atty_rows = _execute(pool, """
+                SELECT first_name, last_name, registration_number, law_school,
+                       company_name, status, year_admitted, city, state
+                FROM lake.financial.nys_attorney_registrations
+                WHERE UPPER(last_name) LIKE ? OR UPPER(company_name) LIKE ?
+                LIMIT 20
+            """, [f"%{search}%"] * 2)
+        except Exception:
+            pass
 
     # 18. ACRIS Personal Property (UCC filings)
-    try:
-        pp_cols, pp_rows = _execute(pool, """
-            SELECT name, party_type, document_id, address_1, city, state, zip
-            FROM lake.business.acris_pp_parties
-            WHERE UPPER(name) LIKE ?
-            LIMIT 20
-        """, [f"%{search}%"])
-    except Exception:
-        pp_cols, pp_rows = [], []
+    pp_cols, pp_rows = [], []
+    if _should_query("acris_pp_parties"):
+        try:
+            pp_cols, pp_rows = _execute(pool, """
+                SELECT name, party_type, document_id, address_1, city, state, zip
+                FROM lake.business.acris_pp_parties
+                WHERE UPPER(name) LIKE ?
+                LIMIT 20
+            """, [f"%{search}%"])
+        except Exception:
+            pass
 
     # 19. Civil Service Active Lists — city exam results
-    try:
-        if len(words) > 1:
-            civil_sql = """
-                SELECT first_name, last_name, list_title_desc, exam_no,
-                       list_no, adj_fa, list_agency_desc, established_date
-                FROM lake.city_government.civil_service_active
-                WHERE (UPPER(last_name) LIKE ? AND UPPER(first_name) LIKE ?)
-                LIMIT 20
-            """
-            civil_params = [f"%{words[-1]}%", f"%{words[0]}%"]
-        else:
-            civil_sql = """
-                SELECT first_name, last_name, list_title_desc, exam_no,
-                       list_no, adj_fa, list_agency_desc, established_date
-                FROM lake.city_government.civil_service_active
-                WHERE UPPER(last_name) LIKE ?
-                LIMIT 20
-            """
-            civil_params = [f"%{search}%"]
-        civil_cols, civil_rows = _execute(pool, civil_sql, civil_params)
-    except Exception:
-        civil_cols, civil_rows = [], []
+    civil_cols, civil_rows = [], []
+    if _should_query("civil_service_active"):
+        try:
+            if len(words) > 1:
+                civil_sql = """
+                    SELECT first_name, last_name, list_title_desc, exam_no,
+                           list_no, adj_fa, list_agency_desc, established_date
+                    FROM lake.city_government.civil_service_active
+                    WHERE (UPPER(last_name) LIKE ? AND UPPER(first_name) LIKE ?)
+                    LIMIT 20
+                """
+                civil_params = [f"%{words[-1]}%", f"%{words[0]}%"]
+            else:
+                civil_sql = """
+                    SELECT first_name, last_name, list_title_desc, exam_no,
+                           list_no, adj_fa, list_agency_desc, established_date
+                    FROM lake.city_government.civil_service_active
+                    WHERE UPPER(last_name) LIKE ?
+                    LIMIT 20
+                """
+                civil_params = [f"%{search}%"]
+            civil_cols, civil_rows = _execute(pool, civil_sql, civil_params)
+        except Exception:
+            pass
 
     # 20. NYS Lobbyist Registration
-    try:
-        lobby_cols, lobby_rows = _execute(pool, """
-            SELECT principal_lobbyist_name, contractual_client_name,
-                   lobbying_subjects, compensation_amount, reporting_year,
-                   level_of_government, individual_lobbyist_s
-            FROM lake.city_government.nys_lobbyist_registration
-            WHERE UPPER(principal_lobbyist_name) LIKE ?
-               OR UPPER(contractual_client_name) LIKE ?
-               OR UPPER(individual_lobbyist_s) LIKE ?
-            LIMIT 20
-        """, [f"%{search}%"] * 3)
-    except Exception:
-        lobby_cols, lobby_rows = [], []
+    lobby_cols, lobby_rows = [], []
+    if _should_query("nys_lobbyist_registration"):
+        try:
+            lobby_cols, lobby_rows = _execute(pool, """
+                SELECT principal_lobbyist_name, contractual_client_name,
+                       lobbying_subjects, compensation_amount, reporting_year,
+                       level_of_government, individual_lobbyist_s
+                FROM lake.city_government.nys_lobbyist_registration
+                WHERE UPPER(principal_lobbyist_name) LIKE ?
+                   OR UPPER(contractual_client_name) LIKE ?
+                   OR UPPER(individual_lobbyist_s) LIKE ?
+                LIMIT 20
+            """, [f"%{search}%"] * 3)
+        except Exception:
+            pass
 
     # 21. NYS Death Index
-    try:
-        if len(words) > 1:
-            death_sql = """
-                SELECT last_name, first_name, year, age, date_of_death,
-                       residence_code, place_of_death_code
-                FROM lake.federal.nys_death_index
-                WHERE (UPPER(last_name) LIKE ? AND UPPER(first_name) LIKE ?)
-                ORDER BY year DESC
-                LIMIT 20
-            """
-            death_params = [f"%{words[-1]}%", f"%{words[0]}%"]
-        else:
-            death_sql = """
-                SELECT last_name, first_name, year, age, date_of_death,
-                       residence_code, place_of_death_code
-                FROM lake.federal.nys_death_index
-                WHERE UPPER(last_name) LIKE ?
-                ORDER BY year DESC
-                LIMIT 20
-            """
-            death_params = [f"%{search}%"]
-        death_cols, death_rows = _execute(pool, death_sql, death_params)
-    except Exception:
-        death_cols, death_rows = [], []
+    death_cols, death_rows = [], []
+    if _should_query("nys_death_index"):
+        try:
+            if len(words) > 1:
+                death_sql = """
+                    SELECT last_name, first_name, year, age, date_of_death,
+                           residence_code, place_of_death_code
+                    FROM lake.federal.nys_death_index
+                    WHERE (UPPER(last_name) LIKE ? AND UPPER(first_name) LIKE ?)
+                    ORDER BY year DESC
+                    LIMIT 20
+                """
+                death_params = [f"%{words[-1]}%", f"%{words[0]}%"]
+            else:
+                death_sql = """
+                    SELECT last_name, first_name, year, age, date_of_death,
+                           residence_code, place_of_death_code
+                    FROM lake.federal.nys_death_index
+                    WHERE UPPER(last_name) LIKE ?
+                    ORDER BY year DESC
+                    LIMIT 20
+                """
+                death_params = [f"%{search}%"]
+            death_cols, death_rows = _execute(pool, death_sql, death_params)
+        except Exception:
+            pass
 
     # 22. NYS Real Estate Brokers
-    try:
-        broker_cols, broker_rows = _execute(pool, """
-            SELECT license_holder_name, business_name, license_type,
-                   license_number, license_expiration_date, county,
-                   business_city, business_state
-            FROM lake.financial.nys_re_brokers
-            WHERE UPPER(license_holder_name) LIKE ? OR UPPER(business_name) LIKE ?
-            LIMIT 20
-        """, [f"%{search}%"] * 2)
-    except Exception:
-        broker_cols, broker_rows = [], []
+    broker_cols, broker_rows = [], []
+    if _should_query("nys_re_brokers"):
+        try:
+            broker_cols, broker_rows = _execute(pool, """
+                SELECT license_holder_name, business_name, license_type,
+                       license_number, license_expiration_date, county,
+                       business_city, business_state
+                FROM lake.financial.nys_re_brokers
+                WHERE UPPER(license_holder_name) LIKE ? OR UPPER(business_name) LIKE ?
+                LIMIT 20
+            """, [f"%{search}%"] * 2)
+        except Exception:
+            pass
 
     # 23. NYS Notaries
-    try:
-        notary_cols, notary_rows = _execute(pool, """
-            SELECT commission_holder_name, commissioned_county,
-                   commission_type_traditional_or_electronic,
-                   term_issue_date, term_expiration_date,
-                   business_name_if_available
-            FROM lake.financial.nys_notaries
-            WHERE UPPER(commission_holder_name) LIKE ?
-               OR UPPER(business_name_if_available) LIKE ?
-            LIMIT 20
-        """, [f"%{search}%"] * 2)
-    except Exception:
-        notary_cols, notary_rows = [], []
+    notary_cols, notary_rows = [], []
+    if _should_query("nys_notaries"):
+        try:
+            notary_cols, notary_rows = _execute(pool, """
+                SELECT commission_holder_name, commissioned_county,
+                       commission_type_traditional_or_electronic,
+                       term_issue_date, term_expiration_date,
+                       business_name_if_available
+                FROM lake.financial.nys_notaries
+                WHERE UPPER(commission_holder_name) LIKE ?
+                   OR UPPER(business_name_if_available) LIKE ?
+                LIMIT 20
+            """, [f"%{search}%"] * 2)
+        except Exception:
+            pass
 
     elapsed = round((time.time() - t0) * 1000)
 
@@ -10465,6 +10576,12 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
         return ToolResult(content=f"No records found for '{name}' across any NYC dataset.")
 
     lines = [f"ENTITY X-RAY — '{name}'\n"]
+    if use_routing:
+        skipped = 23 - len(_ALWAYS_QUERY) - len(routed_sources & (set(routed_sources) - _ALWAYS_QUERY))
+        lines.append(f"Lance-routed: {len(routed_sources)} sources matched, {len(lance_route.get('matched_names', []))} name variants found")
+    else:
+        lines.append("Full scan (Lance index unavailable)")
+    lines.append("")
 
     if corp_rows:
         lines.append(f"--- NYS CORPORATIONS ({len(corp_rows)} entities) ---")
@@ -10655,55 +10772,57 @@ def entity_xray(name: NAME, ctx: Context) -> ToolResult:
 
     # 16. Marriage records (1866-2017) — confirms family relationships
     marriage_cols, marriage_rows = [], []
-    try:
-        if len(words) > 1:
-            mar_where = """(UPPER(groom_surname) = ? AND UPPER(groom_first_name) LIKE ?)
-                OR (UPPER(bride_surname) = ? AND UPPER(bride_first_name) LIKE ?)
-                OR (UPPER(groom_surname) = ? AND UPPER(groom_first_name) LIKE ?)
-                OR (UPPER(bride_surname) = ? AND UPPER(bride_first_name) LIKE ?)"""
-            mar_params = [
-                words[-1], words[0] + '%',
-                words[-1], words[0] + '%',
-                words[0], words[-1] + '%',
-                words[0], words[-1] + '%',
-            ]
-        else:
-            mar_where = "UPPER(groom_surname) = ? OR UPPER(bride_surname) = ?"
-            mar_params = [search, search]
-        marriage_cols, marriage_rows = _execute(pool, f"""
-            SELECT groom_first_name, groom_middle_name, groom_surname,
-                   bride_first_name, bride_middle_name, bride_surname,
-                   LICENSE_BOROUGH_ID AS license_borough, LICENSE_YEAR AS license_year
-            FROM lake.city_government.marriage_licenses_1950_2017
-            WHERE {mar_where}
-            ORDER BY license_year
-            LIMIT 20
-        """, mar_params)
-    except Exception:
-        pass
+    if _should_query("marriage_licenses_1950_2017"):
+        try:
+            if len(words) > 1:
+                mar_where = """(UPPER(groom_surname) = ? AND UPPER(groom_first_name) LIKE ?)
+                    OR (UPPER(bride_surname) = ? AND UPPER(bride_first_name) LIKE ?)
+                    OR (UPPER(groom_surname) = ? AND UPPER(groom_first_name) LIKE ?)
+                    OR (UPPER(bride_surname) = ? AND UPPER(bride_first_name) LIKE ?)"""
+                mar_params = [
+                    words[-1], words[0] + '%',
+                    words[-1], words[0] + '%',
+                    words[0], words[-1] + '%',
+                    words[0], words[-1] + '%',
+                ]
+            else:
+                mar_where = "UPPER(groom_surname) = ? OR UPPER(bride_surname) = ?"
+                mar_params = [search, search]
+            marriage_cols, marriage_rows = _execute(pool, f"""
+                SELECT groom_first_name, groom_middle_name, groom_surname,
+                       bride_first_name, bride_middle_name, bride_surname,
+                       LICENSE_BOROUGH_ID AS license_borough, LICENSE_YEAR AS license_year
+                FROM lake.city_government.marriage_licenses_1950_2017
+                WHERE {mar_where}
+                ORDER BY license_year
+                LIMIT 20
+            """, mar_params)
+        except Exception:
+            pass
 
     # 16b. Marriage certificates 1866-1937
     hist_marriage_rows = []
-    try:
-        if len(words) > 1:
-            _, hist_marriage_rows = _execute(pool, """
-                SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
-                FROM lake.city_government.marriage_certificates_1866_1937
-                WHERE (UPPER(last_name) = ? AND UPPER(first_name) LIKE ?)
-                   OR (UPPER(last_name) = ? AND UPPER(first_name) LIKE ?)
-                ORDER BY year
-                LIMIT 10
-            """, [words[-1], words[0] + '%', words[0], words[-1] + '%'])
-        else:
-            _, hist_marriage_rows = _execute(pool, """
-                SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
-                FROM lake.city_government.marriage_certificates_1866_1937
-                WHERE UPPER(last_name) = ?
-                ORDER BY year
-                LIMIT 10
-            """, [search])
-    except Exception:
-        pass
+    if _should_query("marriage_certificates_1866_1937"):
+        try:
+            if len(words) > 1:
+                _, hist_marriage_rows = _execute(pool, """
+                    SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
+                    FROM lake.city_government.marriage_certificates_1866_1937
+                    WHERE (UPPER(last_name) = ? AND UPPER(first_name) LIKE ?)
+                       OR (UPPER(last_name) = ? AND UPPER(first_name) LIKE ?)
+                    ORDER BY year
+                    LIMIT 10
+                """, [words[-1], words[0] + '%', words[0], words[-1] + '%'])
+            else:
+                _, hist_marriage_rows = _execute(pool, """
+                    SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
+                    FROM lake.city_government.marriage_certificates_1866_1937
+                    WHERE UPPER(last_name) = ?
+                    ORDER BY year
+                    LIMIT 10
+                """, [search])
+        except Exception:
+            pass
 
     all_marriage = list(marriage_rows) + hist_marriage_rows
     if all_marriage:

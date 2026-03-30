@@ -65,7 +65,10 @@ def entity_name_embeddings(context) -> MaterializeResult:
             try:
                 db = lancedb.connect(str(lance_path.parent))
                 tbl = db.open_table(lance_path.stem)
-                existing_names = set(tbl.to_pandas()["name"].tolist())
+                # Only read name column — loading embeddings would OOM
+                existing_names = set(
+                    tbl.to_lance().scanner(columns=["name"]).to_table()["name"].to_pylist()
+                )
                 context.log.info("Existing embeddings: %s names", f"{len(existing_names):,}")
             except Exception as e:
                 context.log.warning("Could not read existing Lance table: %s", e)
@@ -74,11 +77,15 @@ def entity_name_embeddings(context) -> MaterializeResult:
         embed_fn, embed_batch_fn, dims = create_embedder()
         context.log.info("Embedder ready (dims=%d)", dims)
 
-        # Step 4: Process in chunks
+        # Step 4: Process in chunks — write each chunk to Lance immediately
+        # DO NOT accumulate all_records in memory (14M × 768 floats = 42GB OOM)
         embedded_count = 0
         skipped_count = 0
         offset = 0
-        all_records: list[dict] = []
+        lance_initialized = lance_path.exists() and bool(existing_names)
+
+        lance_path.parent.mkdir(parents=True, exist_ok=True)
+        lance_db = lancedb.connect(str(lance_path.parent))
 
         while offset < total:
             chunk = conn.execute(f"""
@@ -98,13 +105,26 @@ def entity_name_embeddings(context) -> MaterializeResult:
                 )
                 vecs = embed_batch_fn(names)
 
-                for i, (name, src) in enumerate(zip(names, sources)):
-                    all_records.append({
-                        "name": name,
-                        "sources": src,
-                        "embedding": vecs[i].tolist(),
-                    })
+                # Write this chunk to Lance immediately (don't accumulate)
+                chunk_table = pa.table({
+                    "name": pa.array(names, type=pa.utf8()),
+                    "sources": pa.array(sources, type=pa.utf8()),
+                    "embedding": pa.array(
+                        [v.tolist() for v in vecs],
+                        type=pa.list_(pa.float32(), dims),
+                    ),
+                })
+
+                if lance_initialized:
+                    lance_tbl = lance_db.open_table(lance_path.stem)
+                    lance_tbl.add(chunk_table)
+                else:
+                    lance_db.create_table(lance_path.stem, data=chunk_table, mode="overwrite")
+                    lance_initialized = True
+
                 embedded_count += len(names)
+                # Add to existing set so subsequent chunks don't re-embed
+                existing_names.update(names)
 
             offset += CHUNK_SIZE
             context.log.info(
@@ -113,32 +133,11 @@ def entity_name_embeddings(context) -> MaterializeResult:
                 f"{embedded_count:,}", f"{skipped_count:,}",
             )
 
-        # Step 5: Write to Lance
-        if all_records:
-            lance_path.parent.mkdir(parents=True, exist_ok=True)
-            db = lancedb.connect(str(lance_path.parent))
-
-            table = pa.table({
-                "name": pa.array([r["name"] for r in all_records], type=pa.utf8()),
-                "sources": pa.array([r["sources"] for r in all_records], type=pa.utf8()),
-                "embedding": pa.array(
-                    [r["embedding"] for r in all_records],
-                    type=pa.list_(pa.float32(), dims),
-                ),
-            })
-
-            if lance_path.exists() and existing_names:
-                tbl = db.open_table(lance_path.stem)
-                tbl.add(table)
-                context.log.info("Appended %s new embeddings to existing Lance table", f"{embedded_count:,}")
-            else:
-                db.create_table(lance_path.stem, data=table, mode="overwrite")
-                context.log.info("Created new Lance table with %s embeddings", f"{embedded_count:,}")
-        else:
+        if embedded_count == 0:
             context.log.info("No new names to embed — Lance table is up to date")
 
         elapsed = time.time() - t_start
-        total_in_lance = embedded_count + len(existing_names)
+        total_in_lance = len(existing_names)  # already includes newly added names
         context.log.info(
             "Done in %.1fs: %s total embeddings (%s new, %s existing)",
             elapsed, f"{total_in_lance:,}", f"{embedded_count:,}", f"{len(existing_names):,}",
