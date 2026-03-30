@@ -3148,12 +3148,17 @@ def describe_table(schema: Annotated[str, Field(description="Schema name")], tab
     cols, rows = _execute(
         pool,
         """
-        SELECT column_name, data_type, is_nullable
-        FROM information_schema.columns
-        WHERE table_catalog = 'lake'
-          AND table_schema = ?
-          AND table_name = ?
-        ORDER BY ordinal_position
+        SELECT c.column_name, c.data_type, c.is_nullable, dc.comment
+        FROM information_schema.columns c
+        LEFT JOIN duckdb_columns() dc
+          ON dc.database_name = 'lake'
+          AND dc.schema_name = c.table_schema
+          AND dc.table_name = c.table_name
+          AND dc.column_name = c.column_name
+        WHERE c.table_catalog = 'lake'
+          AND c.table_schema = ?
+          AND c.table_name = ?
+        ORDER BY c.ordinal_position
         """,
         [schema, table],
     )
@@ -3167,7 +3172,21 @@ def describe_table(schema: Annotated[str, Field(description="Schema name")], tab
     row_count = catalog.get(schema, {}).get(table, {}).get("row_count")
     row_count_str = f"{row_count:,}" if isinstance(row_count, int) else "unknown"
 
+    # Table-level comment
+    table_comment = ""
+    try:
+        _, tc_rows = _execute(pool, """
+            SELECT comment FROM duckdb_tables()
+            WHERE database_name = 'lake' AND schema_name = ? AND table_name = ?
+        """, [schema, table])
+        if tc_rows and tc_rows[0][0]:
+            table_comment = tc_rows[0][0]
+    except Exception:
+        pass
+
     summary = f"{qualified}: {row_count_str} rows, {len(rows)} columns"
+    if table_comment:
+        summary += f"\n{table_comment}"
     return make_result(summary, cols, rows)
 
 
