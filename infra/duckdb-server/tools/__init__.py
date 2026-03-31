@@ -5,6 +5,7 @@ from tools.health import health
 from tools.legal import legal
 from tools.neighborhood import neighborhood
 from tools.query import query
+from tools.safety import safety
 from tools.school import school
 from tools.semantic_search import semantic_search
 from tools.services import services
