@@ -2,6 +2,7 @@ from tools.building import building
 from tools.civic import civic
 from tools.entity import entity
 from tools.health import health
+from tools.legal import legal
 from tools.neighborhood import neighborhood
 from tools.query import query
 from tools.school import school
