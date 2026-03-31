@@ -6,7 +6,6 @@ import re
 import time
 from typing import Annotated, Literal
 
-import duckdb
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
@@ -18,9 +17,8 @@ from shared.types import (
     MAX_QUERY_ROWS,
     LANCE_CATALOG_DISTANCE,
     LANCE_DIR,
-    _SAFE_DDL,
 )
-from shared.validation import validate_sql
+from shared.validation import validate_sql, validate_admin_sql
 
 # ---------------------------------------------------------------------------
 # Schema metadata (duplicated from mcp_server.py — shared source of truth)
@@ -221,19 +219,19 @@ def _admin(pool: CursorPool, sql: str, ctx: Context) -> str:
     if ";" in stripped:
         raise ToolError("Only single SQL statements are allowed.")
 
-    if not _SAFE_DDL.match(stripped):
-        raise ToolError(
-            "Only CREATE OR REPLACE VIEW statements are allowed via admin mode."
-        )
+    validate_admin_sql(stripped)
 
     with pool.cursor() as cur:
         try:
             cur.execute(stripped)
-            # Refresh catalog after DDL
-            from mcp_server import _build_catalog
-            ctx.lifespan_context["catalog"] = _build_catalog(ctx.lifespan_context["db"])
+            # Refresh catalog from the live database
+            catalog = ctx.lifespan_context.get("catalog", {})
+            db = ctx.lifespan_context.get("db")
+            if db is not None:
+                from shared.db import build_catalog
+                ctx.lifespan_context["catalog"] = build_catalog(db)
             return "OK — view created successfully."
-        except duckdb.Error as e:
+        except Exception as e:
             raise ToolError(f"DDL error: {e}. Only CREATE OR REPLACE VIEW is allowed.")
 
 

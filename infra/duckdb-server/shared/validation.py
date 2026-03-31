@@ -4,7 +4,22 @@ import re
 
 from fastmcp.exceptions import ToolError
 
-from shared.types import _UNSAFE_SQL, _SAFE_DDL, _UNSAFE_FUNCTIONS
+from shared.types import _UNSAFE_SQL, _UNSAFE_FUNCTIONS
+
+# ---------------------------------------------------------------------------
+# Safe DDL pattern — only CREATE OR REPLACE VIEW is allowed
+# ---------------------------------------------------------------------------
+
+SAFE_DDL = re.compile(
+    r"^\s*CREATE\s+OR\s+REPLACE\s+VIEW\b",
+    re.IGNORECASE,
+)
+
+
+def validate_admin_sql(sql: str) -> None:
+    """Raise ToolError if DDL is not CREATE OR REPLACE VIEW."""
+    if not SAFE_DDL.match(sql):
+        raise ToolError("Only CREATE OR REPLACE VIEW statements are allowed in admin mode.")
 
 
 def validate_sql(sql: str) -> None:

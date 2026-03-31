@@ -11,7 +11,7 @@ from fastmcp.exceptions import ToolError
 
 from shared.db import execute, safe_query, fill_placeholders
 from shared.formatting import make_result, format_text_table
-from shared.types import MAX_LLM_ROWS, READONLY
+from shared.types import MAX_LLM_ROWS
 
 # ---------------------------------------------------------------------------
 # Input patterns

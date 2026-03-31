@@ -371,7 +371,7 @@ _VIEW_DISPATCH = {
 }
 
 
-async def legal(
+def legal(
     query: Annotated[str, Field(
         description="Person name, agency name, or keyword to search legal proceedings, e.g. 'NYPD', 'Steven Croman', 'lead paint'",
         examples=["NYPD", "Steven Croman", "lead paint", "DOE", "excessive force"],
@@ -398,7 +398,7 @@ async def legal(
     if not query or len(query.strip()) < 2:
         raise ToolError("Query must be at least 2 characters.")
 
-    pool = ctx.request_context.lifespan_context["pool"]
+    pool = ctx.lifespan_context["pool"]
     dispatch_fn = _VIEW_DISPATCH[view]
     sections, structured = dispatch_fn(pool, query)
 

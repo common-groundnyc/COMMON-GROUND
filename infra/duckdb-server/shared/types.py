@@ -10,9 +10,9 @@ from pydantic import Field
 # Annotated types for tool parameters
 # ---------------------------------------------------------------------------
 
-BBL = Annotated[str, Field(description="10-digit BBL: borough(1) + block(5) + lot(4). Example: 1000670001")]
-ZIP = Annotated[str, Field(description="5-digit NYC ZIP code. Example: 10003, 11201, 10456")]
-NAME = Annotated[str, Field(description="Person or company name. Fuzzy matched. Example: 'Barton Perlbinder', 'BLACKSTONE'")]
+BBL = Annotated[str, Field(description="10-digit BBL: borough(1) + block(5) + lot(4). Example: 1000670001", examples=["1000670001", "2039720033", "3012340001"])]
+ZIP = Annotated[str, Field(description="5-digit NYC ZIP code. Example: 10003, 11201, 10456", examples=["10003", "11201", "10456"])]
+NAME = Annotated[str, Field(description="Person or company name. Fuzzy matched. Example: 'Barton Perlbinder', 'BLACKSTONE'", examples=["Steven Croman", "Barton Perlbinder", "BLACKSTONE GROUP"])]
 
 # ---------------------------------------------------------------------------
 # Row limits
@@ -46,11 +46,6 @@ LANCE_CATEGORY_SIM = 0.5       # cosine similarity for resource categories
 _UNSAFE_SQL = re.compile(
     r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY"
     r"|CALL|LOAD|INSTALL|ATTACH|DETACH|EXPORT|IMPORT)\b",
-    re.IGNORECASE,
-)
-
-_SAFE_DDL = re.compile(
-    r"^\s*CREATE\s+OR\s+REPLACE\s+VIEW\b",
     re.IGNORECASE,
 )
 

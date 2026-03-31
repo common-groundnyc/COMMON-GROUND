@@ -12,7 +12,7 @@ from cursor_pool import CursorPool  # re-export
 from sql_utils import sanitize_error
 from shared.types import MAX_QUERY_ROWS, RECONNECT_ERRORS
 
-__all__ = ["CursorPool", "execute", "safe_query", "fill_placeholders"]
+__all__ = ["CursorPool", "execute", "safe_query", "fill_placeholders", "build_catalog"]
 
 # ---------------------------------------------------------------------------
 # Module-level reconnect state (mirrors mcp_server.py globals)
@@ -95,6 +95,27 @@ def safe_query(pool: CursorPool, sql: str, params: list | None = None) -> tuple[
         return execute(pool, sql, params)
     except ToolError:
         return [], []
+
+
+def build_catalog(conn) -> dict:
+    """Build schema -> table -> {row_count, column_count} catalog from DuckLake."""
+    catalog: dict = {}
+    try:
+        cur = conn.execute("""
+            SELECT schema_name, table_name, estimated_size, column_count
+            FROM duckdb_tables()
+            WHERE database_name = 'lake'
+              AND schema_name NOT IN ('information_schema', 'pg_catalog')
+            ORDER BY schema_name, table_name
+        """)
+        for schema, table, est_size, col_count in cur.fetchall():
+            catalog.setdefault(schema, {})[table] = {
+                "row_count": est_size or 0,
+                "column_count": col_count or 0,
+            }
+    except Exception as e:
+        print(f"Warning: catalog cache build failed: {e}", flush=True)
+    return catalog
 
 
 def fill_placeholders(sql_template: str, bbls: list[str]) -> str:

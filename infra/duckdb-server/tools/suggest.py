@@ -71,9 +71,9 @@ _TOPIC_MAP = {
     ],
     "environment": [
         ("health(view='environmental')", "Lead, asthma, air quality by ZIP"),
-        ("neighborhood('zip', view='climate')", "Climate risk and flood zones"),
+        ("neighborhood('zip', view='environment')", "Climate risk and flood zones"),
         ("semantic_search('pollution')", "Environmental complaints and violations"),
-        ("civic(view='inspections')", "EPA ECHO facility inspections"),
+        ("health(view='inspections')", "EPA ECHO facility inspections"),
     ],
     "transportation": [
         ("transit('zip')", "Ridership, traffic volume, and infrastructure"),
@@ -95,13 +95,13 @@ _TOPIC_MAP = {
     ],
     "money": [
         ("network(type='political')", "Campaign donation networks"),
-        ("civic(view='payroll')", "City employee salaries"),
+        ("civic(view='jobs')", "City employee salaries"),
         ("civic(view='contracts')", "City contracts and vendor payments"),
         ("civic(view='budget')", "Revenue and expense budget data"),
     ],
     "finance": [
         ("network(type='political')", "Campaign donation networks"),
-        ("civic(view='payroll')", "City employee salaries"),
+        ("civic(view='jobs')", "City employee salaries"),
         ("civic(view='contracts')", "City contracts and vendor payments"),
         ("civic(view='budget')", "Revenue and expense budget data"),
     ],
