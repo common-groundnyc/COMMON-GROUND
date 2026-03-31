@@ -4,6 +4,7 @@ from tools.entity import entity
 from tools.health import health
 from tools.legal import legal
 from tools.neighborhood import neighborhood
+from tools.network import network
 from tools.query import query
 from tools.safety import safety
 from tools.school import school
