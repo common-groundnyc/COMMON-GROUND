@@ -6,7 +6,7 @@ from pydantic import Field
 from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
 
-from shared.types import LANCE_DIR, LANCE_CATALOG_DISTANCE
+from shared.types import VS_CATALOG_DISTANCE
 
 
 # Pre-built exploration suggestions (curated findings)
@@ -153,24 +153,17 @@ def _topic_guide(topic: str, ctx: Context | None) -> ToolResult:
     embed_fn = ctx.lifespan_context.get("embed_fn") if ctx else None
     if embed_fn:
         try:
-            from embedder import vec_to_sql
-            from shared.db import execute
-
+            emb_conn = ctx.lifespan_context.get("emb_conn")
+            if not emb_conn:
+                raise Exception("Embedding DB unavailable")
             query_vec = embed_fn(topic)
-            vec_literal = vec_to_sql(query_vec)
-            pool = ctx.lifespan_context["pool"]
-            sql = f"""
-                SELECT schema_name, table_name, description, _distance
-                FROM lance_vector_search(
-                    '{LANCE_DIR}/catalog_embeddings.lance',
-                    'embedding',
-                    {vec_literal},
-                    k=5
-                )
-                WHERE _distance < {LANCE_CATALOG_DISTANCE}
-                ORDER BY _distance ASC
-            """
-            cols, rows = execute(pool, sql)
+            rows = emb_conn.execute(
+                "SELECT schema_name, table_name, description, "
+                "array_cosine_distance(embedding, ?::FLOAT[]) AS dist "
+                "FROM catalog_embeddings "
+                "WHERE dist < ? ORDER BY dist LIMIT 5",
+                [query_vec.tolist(), VS_CATALOG_DISTANCE],
+            ).fetchall()
             if rows:
                 lines = [f"Tables related to '{topic}':", ""]
                 for row in rows:

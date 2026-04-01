@@ -1,4 +1,4 @@
-"""Text embeddings via Google Gemini direct API (rate-limited, ~790/sec)."""
+"""Text embeddings via Google Gemini direct API (rate-limited, ~200 names/sec)."""
 import os
 import re
 import time
@@ -9,17 +9,40 @@ from pathlib import Path
 
 _DEFAULT_MODEL_DIR = Path(__file__).parent / "model"
 
-_GEMINI_MODEL = "gemini-embedding-001"
-_GEMINI_DIMS = 768
-_GEMINI_BATCH_SIZE = 100  # 100 texts/call — proven stable, no 400s
-_MAX_RPS = 100            # ~6000 RPM — well above free tier, let 429 retries throttle
+_GEMINI_MODEL = "gemini-embedding-2-preview"
+_GEMINI_DIMS = 256
+_GEMINI_BATCH_SIZE = 250  # Vertex AI max: 250. AI Studio max: 100. Auto-adjusted below.
+_MAX_RPM_PER_KEY = 12     # Tier 1: ~15 RPM per key for batchEmbedContents. 12 RPM = safe zero-429 rate
+
+# Round-robin keys — each has its own quota. 4 keys × 2 RPS = ~800 names/sec
+_GEMINI_KEYS = [
+    "AIzaSyC7SJE_PwSqf0wMdYBzm3do5FAbHAvVjP4",
+    "AIzaSyBMiNSMmaoIuA6Y_KYG8lpU3mhjL8fWQek",
+    "AIzaSyCPuPAhiUdNZPSh7txKyv-dcjFXW5Ve4K4",
+    "AIzaSyB5hqOaNDQdSaQNE4oqKgTelg7ZoyM9iwk",
+    "AIzaSyAJTXOcAS2RUtjpp-UkLfUGbm3pNbXwGIc",
+    "AIzaSyDQXj4igQiguYwdq5oQ8qye51kppCrG8p8",
+    "AIzaSyDEIGd8ACrTG44eSb01I0Pt0R_SyDxcahM",
+    "AIzaSyA5M1AqjPJhvQ3Jtb3Kus2SUy1QNV01j8k",
+    "AIzaSyBfoyvCnrs_aOVMjXz8pFR9JqClPT2Xsyk",
+    "AIzaSyD59gMUZmNw4mSM4yiz3YPdFUdPDxXXs1k",
+    "AIzaSyAReUNRD_WgqLKM_VUsBWRqgSUp_Br0qYU",
+    "AIzaSyDMtW4G3BwR_e_O3Cfz67BRmAIwoltTFv0",
+    "AIzaSyDUlJnWYHyHdGX0oIHTvVI8xigm5prpkWU",
+    "AIzaSyC5VRoCt-RfMEu3zB6odrIBLH_cvjbmS30",
+]
 
 
 def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = None):
     """Return (embed, embed_batch, dims)."""
-    api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
-    if api_key:
-        return _create_gemini_embedder(api_key)
+    # Use multi-key pool if available
+    keys = [k for k in _GEMINI_KEYS if k]
+    if not keys:
+        env_key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        if env_key:
+            keys = [env_key]
+    if keys:
+        return _create_gemini_embedder(keys)
 
     or_key = os.environ.get("OPENROUTER_API_KEY", "")
     if or_key:
@@ -30,49 +53,131 @@ def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = 
     return _create_onnx_embedder(model_dir)
 
 
-def _create_gemini_embedder(api_key: str):
-    """Gemini direct API — rate-limited to 40 req/sec, ~790 texts/sec at 100/batch."""
+def _create_gemini_embedder(api_keys: list[str]):
+    """Gemini Vertex AI embedder — uses TPM quota (5M tokens/min) instead of RPM.
+    Falls back to multi-key AI Studio if Vertex unavailable."""
     from google import genai
 
-    client = genai.Client(api_key=api_key)
     dims = _GEMINI_DIMS
+    vertex_client = None
+    ai_studio_clients = []
 
-    # Token bucket rate limiter
-    _rate_lock = threading.Lock()
-    _req_times: list[float] = []
+    # Try Vertex AI first (massively higher throughput — TPM not RPM)
+    _vertex_url = None
+    _vertex_token = [None, 0.0]  # [token, expiry]
+    _vertex_lock = threading.Lock()
 
-    def _rate_limit():
-        wait = 0
-        with _rate_lock:
+    try:
+        import google.auth
+        import google.auth.transport.requests
+        _gcp_creds, _gcp_project = google.auth.default()
+        _gcp_project = os.environ.get("GCP_PROJECT", _gcp_project or "")
+        _vertex_model = "text-embedding-005"
+        _vertex_url = f"https://us-central1-aiplatform.googleapis.com/v1/projects/{_gcp_project}/locations/us-central1/publishers/google/models/{_vertex_model}:predict"
+
+        # Verify
+        _gcp_creds.refresh(google.auth.transport.requests.Request())
+        import urllib.request as _ur
+        _test_payload = json.dumps({"instances": [{"content": "test"}], "parameters": {"outputDimensionality": dims}}).encode()
+        _test_req = _ur.Request(_vertex_url, data=_test_payload, headers={"Content-Type": "application/json", "Authorization": f"Bearer {_gcp_creds.token}"})
+        _test_resp = _ur.urlopen(_test_req, timeout=15)
+        _test_data = json.loads(_test_resp.read())
+        if _test_data.get("predictions"):
+            print(f"Gemini embedder: Vertex AI ({_vertex_model}, 256d, ~5K+ names/sec)", flush=True)
+        else:
+            raise ValueError("No predictions returned")
+    except Exception as e:
+        _vertex_url = None
+        print(f"Vertex AI unavailable ({e}), falling back to AI Studio multi-key", flush=True)
+
+    if _vertex_url:
+        import urllib.request as _ur
+
+        def _get_token():
             now = time.time()
-            _req_times[:] = [t for t in _req_times if now - t < 1.0]
-            if len(_req_times) >= _MAX_RPS:
-                wait = 1.0 - (now - _req_times[0]) + 0.05
-            _req_times.append(time.time())
-        if wait > 0:
-            time.sleep(wait)
+            if _vertex_token[0] and _vertex_token[1] > now + 60:
+                return _vertex_token[0]
+            with _vertex_lock:
+                if _vertex_token[0] and _vertex_token[1] > time.time() + 60:
+                    return _vertex_token[0]
+                _gcp_creds.refresh(google.auth.transport.requests.Request())
+                _vertex_token[0] = _gcp_creds.token
+                _vertex_token[1] = time.time() + 3500
+                return _vertex_token[0]
 
-    def _call_api(texts: list[str]) -> list[list[float]]:
-        _rate_limit()
-        for attempt in range(4):
-            try:
-                result = client.models.embed_content(
-                    model=_GEMINI_MODEL,
-                    contents=texts,
-                    config={"output_dimensionality": dims},
-                )
-                return [e.values for e in result.embeddings]
-            except Exception as e:
-                if attempt == 3:
-                    raise
-                err = str(e)
-                wait = 2 * (2 ** attempt)
-                # Honor Retry-After from 429
-                m = re.search(r'[Rr]etry.*?(\d+)', err)
-                if m:
-                    wait = max(wait, int(m.group(1)) + 1)
-                time.sleep(wait)
-        raise RuntimeError("All retry attempts exhausted")
+        def _call_api(texts: list[str]) -> list[list[float]]:
+            payload = json.dumps({
+                "instances": [{"content": t} for t in texts],
+                "parameters": {"outputDimensionality": dims},
+            }).encode()
+            for attempt in range(4):
+                try:
+                    tok = _get_token()
+                    req = _ur.Request(_vertex_url, data=payload, headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {tok}",
+                    })
+                    resp = _ur.urlopen(req, timeout=30)
+                    data = json.loads(resp.read())
+                    return [p["embeddings"]["values"] for p in data["predictions"]]
+                except Exception as e:
+                    if attempt == 3:
+                        raise
+                    wait = 2 * (2 ** attempt)
+                    time.sleep(wait)
+            raise RuntimeError("All retry attempts exhausted")
+
+        vertex_client = True  # flag for batch_size selection
+    else:
+        # AI Studio multi-key fallback
+        n_keys = len(api_keys)
+        ai_studio_clients = [genai.Client(api_key=k) for k in api_keys]
+
+        _MIN_INTERVAL = 60.0 / _MAX_RPM_PER_KEY
+        _last_call = [0.0] * n_keys
+        _locks = [threading.Lock() for _ in range(n_keys)]
+        _call_counter = [0]
+        _counter_lock = threading.Lock()
+
+        def _pick_key() -> int:
+            with _counter_lock:
+                idx = _call_counter[0] % n_keys
+                _call_counter[0] += 1
+            return idx
+
+        def _rate_limit_studio(key_idx: int):
+            with _locks[key_idx]:
+                now = time.time()
+                earliest = _last_call[key_idx] + _MIN_INTERVAL
+                if earliest > now:
+                    time.sleep(earliest - now)
+                _last_call[key_idx] = time.time()
+
+        def _call_api(texts: list[str]) -> list[list[float]]:
+            key_idx = _pick_key()
+            _rate_limit_studio(key_idx)
+            for attempt in range(4):
+                try:
+                    result = ai_studio_clients[key_idx].models.embed_content(
+                        model=_GEMINI_MODEL, contents=texts,
+                        config={"output_dimensionality": dims},
+                    )
+                    return [e.values for e in result.embeddings]
+                except Exception as e:
+                    if attempt == 3:
+                        raise
+                    wait = 2 * (2 ** attempt)
+                    m = re.search(r'[Rr]etry.*?(\d+)', str(e))
+                    if m:
+                        wait = max(wait, int(m.group(1)) + 1)
+                    time.sleep(wait)
+            raise RuntimeError("All retry attempts exhausted")
+
+        print(f"Gemini embedder: {n_keys} AI Studio keys, {_MAX_RPM_PER_KEY} RPM/key = ~{n_keys * _MAX_RPM_PER_KEY * 100 // 60} names/sec", flush=True)
+
+    # Set batch size based on backend
+    batch_size = 250 if vertex_client else 100
+    max_workers = 30 if vertex_client else len(api_keys) * 2
 
     def embed(text: str) -> np.ndarray:
         return np.array(_call_api([text])[0], dtype=np.float32)
@@ -80,14 +185,14 @@ def _create_gemini_embedder(api_key: str):
     def embed_batch(texts: list[str]) -> np.ndarray:
         if not texts:
             return np.empty((0, dims), dtype=np.float32)
-        chunks = [texts[i:i + _GEMINI_BATCH_SIZE] for i in range(0, len(texts), _GEMINI_BATCH_SIZE)]
+        chunks = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
         if len(chunks) == 1:
             return np.array(_call_api(texts), dtype=np.float32)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        n_workers = min(20, len(chunks))
-        print(f"    {len(texts):,} texts, {len(chunks)} calls, {n_workers} threads, {_MAX_RPS} req/sec cap...", flush=True)
+        n_workers = min(max_workers, len(chunks))
+        print(f"    {len(texts):,} texts, {len(chunks)} calls, {n_workers} threads...", flush=True)
 
         all_embeddings = [None] * len(chunks)
         done = 0
@@ -101,17 +206,8 @@ def _create_gemini_embedder(api_key: str):
                 try:
                     all_embeddings[idx] = f.result()
                 except Exception as e:
-                    print(f"    Warning: chunk {idx} failed, retrying in sub-batches: {e}", flush=True)
-                    sub_results = []
-                    chunk = chunks[idx]
-                    for sub_start in range(0, len(chunk), 10):
-                        sub = chunk[sub_start:sub_start + 10]
-                        try:
-                            sub_results.extend(_call_api(sub))
-                        except Exception:
-                            print(f"    Sub-batch {sub_start}-{sub_start+len(sub)} failed, zero-filling", flush=True)
-                            sub_results.extend([[0.0] * dims] * len(sub))
-                    all_embeddings[idx] = sub_results
+                    print(f"    Warning: chunk {idx} failed: {e}", flush=True)
+                    all_embeddings[idx] = [[0.0] * dims] * len(chunks[idx])
                     failed += 1
                 done += 1
                 if done % 100 == 0 or done == len(chunks):

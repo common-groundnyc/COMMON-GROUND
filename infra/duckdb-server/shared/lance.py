@@ -1,25 +1,21 @@
-"""Lance vector search helpers — name expansion and entity routing."""
+"""Vector search helpers — name expansion and entity routing via hnsw_acorn."""
 
-from shared.types import LANCE_DIR, LANCE_NAME_DISTANCE
+from shared.types import VS_NAME_DISTANCE
 
 
-def vector_expand_names(ctx: object, search_term: str, threshold: float = LANCE_NAME_DISTANCE, k: int = 5) -> set:
-    """Find similar entity names via Lance vector search. Returns empty set on failure."""
+def vector_expand_names(ctx: object, search_term: str, threshold: float = VS_NAME_DISTANCE, k: int = 5) -> set:
+    """Find similar entity names via HNSW vector search. Returns empty set on failure."""
     embed_fn = ctx.lifespan_context.get("embed_fn")
-    if not embed_fn:
+    emb_conn = ctx.lifespan_context.get("emb_conn")
+    if not embed_fn or not emb_conn:
         return set()
     try:
-        from embedder import vec_to_sql
         query_vec = embed_fn(search_term)
-        vec_literal = vec_to_sql(query_vec)
-        sql = f"""
-            SELECT name, _distance AS dist
-            FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k={k})
-            ORDER BY _distance ASC
-        """
-        pool = ctx.lifespan_context["pool"]
-        with pool.cursor() as cur:
-            rows = cur.execute(sql).fetchall()
+        rows = emb_conn.execute(
+            "SELECT name, array_cosine_distance(embedding, ?::FLOAT[]) AS dist "
+            "FROM entity_names ORDER BY dist LIMIT ?",
+            [query_vec.tolist(), k],
+        ).fetchall()
         result = set()
         for name, dist in rows:
             if dist < threshold:
@@ -31,7 +27,7 @@ def vector_expand_names(ctx: object, search_term: str, threshold: float = LANCE_
 
 
 def lance_route_entity(ctx: object, search_term: str, k: int = 30) -> dict:
-    """Search Lance entity index to find which source tables contain matching names.
+    """Search entity index to find which source tables contain matching names.
 
     Returns dict with:
       - 'sources': set of source_table names that have matches
@@ -39,21 +35,16 @@ def lance_route_entity(ctx: object, search_term: str, k: int = 30) -> dict:
     Returns empty dict on failure (caller falls back to full scan).
     """
     embed_fn = ctx.lifespan_context.get("embed_fn")
-    if not embed_fn:
+    emb_conn = ctx.lifespan_context.get("emb_conn")
+    if not embed_fn or not emb_conn:
         return {}
     try:
-        from embedder import vec_to_sql
         query_vec = embed_fn(search_term)
-        vec_literal = vec_to_sql(query_vec)
-        sql = f"""
-            SELECT name, sources, _distance AS dist
-            FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k={k})
-            WHERE _distance < {LANCE_NAME_DISTANCE}
-            ORDER BY _distance ASC
-        """
-        pool = ctx.lifespan_context["pool"]
-        with pool.cursor() as cur:
-            rows = cur.execute(sql).fetchall()
+        rows = emb_conn.execute(
+            "SELECT name, sources, array_cosine_distance(embedding, ?::FLOAT[]) AS dist "
+            "FROM entity_names WHERE dist < ? ORDER BY dist LIMIT ?",
+            [query_vec.tolist(), VS_NAME_DISTANCE, k],
+        ).fetchall()
 
         if not rows:
             return {}

@@ -13,7 +13,7 @@ from pydantic import Field
 from shared.db import execute, safe_query
 from shared.formatting import make_result
 from shared.lance import vector_expand_names, lance_route_entity
-from shared.types import LANCE_DIR, LANCE_NAME_DISTANCE, MAX_LLM_ROWS
+from shared.types import VS_NAME_DISTANCE, VS_CATALOG_DISTANCE, MAX_LLM_ROWS
 
 # ---------------------------------------------------------------------------
 # Valid source filters for Lance indices
@@ -41,8 +41,6 @@ _VIOLATION_KEYWORDS = re.compile(
 # Heuristic: query looks like a person/company name (2+ capitalized words, no complaint keywords)
 _NAME_PATTERN = re.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+$")
 
-# Lance catalog distance for semantic suggestions
-LANCE_CATALOG_DISTANCE = 0.42
 
 
 def semantic_search(
@@ -261,28 +259,24 @@ def _entity_search(name: str, limit: int, ctx: Context) -> ToolResult:
             "Use entity_xray() for exact name matching instead."
         )
 
-    from embedder import vec_to_sql
-
     t0 = time.time()
     vec = embed_fn(name)
-    vec_literal = vec_to_sql(vec)
+    emb_conn = ctx.lifespan_context.get("emb_conn")
+    if not emb_conn:
+        raise ToolError("Embedding database not available")
 
     capped = min(limit, 50)
-    sql = f"""
-        SELECT source, name,
-               GREATEST(0, 1.0 / (1.0 + CAST(_distance AS FLOAT))) AS similarity
-        FROM lance_vector_search('{LANCE_DIR}/entity_name_embeddings.lance', 'embedding', {vec_literal}, k={capped})
-        ORDER BY _distance ASC
-    """
-
-    pool = ctx.lifespan_context["pool"]
-    with pool.cursor() as cur:
-        try:
-            result = cur.execute(sql)
-            cols = [d[0] for d in result.description]
-            rows = result.fetchall()
-        except Exception as e:
-            raise ToolError(f"Fuzzy entity search failed: {e}")
+    try:
+        result = emb_conn.execute(
+            "SELECT source, name, "
+            "GREATEST(0, 1.0 / (1.0 + array_cosine_distance(embedding, ?::FLOAT[]))) AS similarity "
+            "FROM entity_names ORDER BY array_cosine_distance(embedding, ?::FLOAT[]) LIMIT ?",
+            [vec.tolist(), vec.tolist(), capped],
+        )
+        cols = [d[0] for d in result.description]
+        rows = result.fetchall()
+    except Exception as e:
+        raise ToolError(f"Fuzzy entity search failed: {e}")
 
     elapsed = round((time.time() - t0) * 1000)
 
@@ -515,27 +509,24 @@ def _combined_search(query: str, limit: int, ctx: Context) -> ToolResult:
 
 
 def _semantic_enhance(query: str, ctx: Context, source_filter: str = "") -> list[tuple[str, str, int]]:
-    """Run Lance vector similarity to find related description categories."""
+    """Run vector similarity to find related description categories."""
     embed_fn = ctx.lifespan_context.get("embed_fn")
-    if not embed_fn:
+    emb_conn = ctx.lifespan_context.get("emb_conn")
+    if not embed_fn or not emb_conn:
         return []
     try:
-        from embedder import vec_to_sql
         query_vec = embed_fn(query)
-        vec_literal = vec_to_sql(query_vec)
-        sem_sql = f"""
-            SELECT source, description, _distance AS distance
-            FROM lance_vector_search('{LANCE_DIR}/description_embeddings.lance', 'embedding', {vec_literal}, k=5)
-            {source_filter}
-            ORDER BY _distance ASC
-        """
-        pool = ctx.lifespan_context["pool"]
-        with pool.cursor() as cur:
-            sem_rows = cur.execute(sem_sql).fetchall()
+        where = f"WHERE source = '{source_filter}'" if source_filter and source_filter in VALID_DESC_SOURCES else ""
+        rows = emb_conn.execute(
+            f"SELECT source, description, array_cosine_distance(embedding, ?::FLOAT[]) AS distance "
+            f"FROM description_embeddings {where} "
+            f"ORDER BY distance LIMIT 5",
+            [query_vec.tolist()],
+        ).fetchall()
         return [
             (src, desc, round(max(0, 1.0 / (1.0 + dist)) * 100))
-            for src, desc, dist in sem_rows
-            if dist < LANCE_CATALOG_DISTANCE
+            for src, desc, dist in rows
+            if dist < VS_CATALOG_DISTANCE
         ]
     except Exception:
         return []
