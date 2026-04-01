@@ -159,11 +159,12 @@ def _build_explorations(db):
 # ---------------------------------------------------------------------------
 
 _shared_pool = None
+_shared_catalog = {}
 
 
 @lifespan
 async def app_lifespan(server):
-    global _shared_pool
+    global _shared_pool, _shared_catalog
 
     conn = duckdb.connect(config={"allow_unsigned_extensions": "true"})
     conn.execute("PRAGMA disable_checkpoint_on_shutdown")
@@ -312,7 +313,8 @@ async def app_lifespan(server):
         ("recreation", "signs", "point", "geojson_point"),
         ("recreation", "spray_showers", "point", "geojson_point"),
         ("social_services", "dycd_program_sites", "geocoded_column", "geojson_point"),
-        ("social_services", "literacy_programs", "location_1", "geojson_point"),
+        # literacy_programs removed from Socrata — table no longer exists
+
         ("social_services", "n311_service_requests", "location", "geojson_point"),
         ("social_services", "nys_child_care", "georeference", "geojson_point"),
         ("transportation", "mta_entrances", "entrance_georeference", "geojson_point"),
@@ -520,6 +522,7 @@ async def app_lifespan(server):
         emb_conn.execute(f"""
             CREATE TABLE IF NOT EXISTS entity_names (
                 name VARCHAR, sources VARCHAR,
+                entity_id VARCHAR,
                 embedding FLOAT[{dims}]
             )
         """)
@@ -1564,7 +1567,8 @@ async def app_lifespan(server):
         """Embed entity names from name_index — two passes:
         Pass 1: names in 3+ lake tables (high-value cross-refs, ~1.1M, ~1.6h)
         Pass 2: names in exactly 2 tables (backfill, ~1.8M, ~2.5h)
-        Incremental and resume-safe. Checkpoints every 50K names."""
+        Incremental and resume-safe. Checkpoints every 50K names.
+        Joins entity_master (when available) to attach entity_id."""
 
         existing = set()
         try:
@@ -1572,6 +1576,15 @@ async def app_lifespan(server):
         except Exception:
             pass
         print(f"  Entity names: {len(existing):,} already embedded", flush=True)
+
+        # Check if entity_master is available for entity_id join
+        has_entity_master = False
+        try:
+            read_conn.execute("SELECT 1 FROM lake.foundation.entity_master LIMIT 1")
+            has_entity_master = True
+            print("  Entity master available — will attach entity_id", flush=True)
+        except Exception:
+            print("  Entity master not yet available — entity_id will be NULL", flush=True)
 
         # Drop HNSW index during bulk insert for speed
         try:
@@ -1589,19 +1602,44 @@ async def app_lifespan(server):
             # Stream names in chunks using OFFSET/LIMIT
             offset = 0
             pass_new = 0
+
+            # Build query with optional entity_master join
+            if has_entity_master:
+                query_template = f"""
+                    SELECT
+                        UPPER(TRIM(ni.last_name)) || ', ' || UPPER(TRIM(ni.first_name)) AS name,
+                        STRING_AGG(DISTINCT ni.source_table, ',' ORDER BY ni.source_table) AS sources,
+                        MAX(em.entity_id) AS entity_id
+                    FROM lake.federal.name_index ni
+                    LEFT JOIN lake.federal.resolved_entities re
+                        ON ni.unique_id = re.unique_id
+                    LEFT JOIN lake.foundation.entity_master em
+                        ON re.cluster_id = em.cluster_id
+                    WHERE ni.last_name IS NOT NULL AND LENGTH(ni.last_name) >= 2
+                      AND ni.first_name IS NOT NULL AND LENGTH(ni.first_name) >= 1
+                    GROUP BY UPPER(TRIM(ni.last_name)), UPPER(TRIM(ni.first_name))
+                    HAVING COUNT(DISTINCT ni.source_table) >= {{min_tables}}
+                    LIMIT {{chunk}} OFFSET {{offset}}
+                """
+            else:
+                query_template = f"""
+                    SELECT
+                        UPPER(TRIM(last_name)) || ', ' || UPPER(TRIM(first_name)) AS name,
+                        STRING_AGG(DISTINCT source_table, ',' ORDER BY source_table) AS sources,
+                        NULL AS entity_id
+                    FROM lake.federal.name_index
+                    WHERE last_name IS NOT NULL AND LENGTH(last_name) >= 2
+                      AND first_name IS NOT NULL AND LENGTH(first_name) >= 1
+                    GROUP BY UPPER(TRIM(last_name)), UPPER(TRIM(first_name))
+                    HAVING COUNT(DISTINCT source_table) >= {{min_tables}}
+                    LIMIT {{chunk}} OFFSET {{offset}}
+                """
+
             while True:
                 try:
-                    rows = read_conn.execute(f"""
-                        SELECT
-                            UPPER(TRIM(last_name)) || ', ' || UPPER(TRIM(first_name)) AS name,
-                            STRING_AGG(DISTINCT source_table, ',' ORDER BY source_table) AS sources
-                        FROM lake.federal.name_index
-                        WHERE last_name IS NOT NULL AND LENGTH(last_name) >= 2
-                          AND first_name IS NOT NULL AND LENGTH(first_name) >= 1
-                        GROUP BY UPPER(TRIM(last_name)), UPPER(TRIM(first_name))
-                        HAVING COUNT(DISTINCT source_table) >= {min_tables}
-                        LIMIT {CHUNK_SIZE} OFFSET {offset}
-                    """).fetchall()
+                    rows = read_conn.execute(
+                        query_template.format(min_tables=min_tables, chunk=CHUNK_SIZE, offset=offset)
+                    ).fetchall()
                 except Exception as e:
                     print(f"  Entity names query failed at offset {offset}: {e}", flush=True)
                     break
@@ -1609,19 +1647,21 @@ async def app_lifespan(server):
                 if not rows:
                     break
 
-                new_entries = [(r[0], r[1]) for r in rows if r[0] and r[0] not in existing]
+                new_entries = [(r[0], r[1], r[2]) for r in rows if r[0] and r[0] not in existing]
                 print(f"    Chunk @{offset:,}: {len(rows):,} fetched, {len(new_entries):,} new", flush=True)
 
                 for i in range(0, len(new_entries), 5000):
                     batch = new_entries[i:i + 5000]
-                    names = [n for n, s in batch]
-                    sources = [s for n, s in batch]
+                    names = [n for n, s, e in batch]
+                    sources = [s for n, s, e in batch]
+                    entity_ids = [str(e) if e else None for n, s, e in batch]
                     try:
                         vecs = embed_batch(names)
                         import pyarrow as pa
                         tbl = pa.table({
                             "name": pa.array(names, type=pa.utf8()),
                             "sources": pa.array(sources, type=pa.utf8()),
+                            "entity_id": pa.array(entity_ids, type=pa.utf8()),
                             "embedding": pa.array([v.tolist() for v in vecs], type=pa.list_(pa.float32(), dims)),
                         })
                         emb_conn.execute("INSERT INTO entity_names SELECT * FROM tbl")
@@ -1671,6 +1711,7 @@ async def app_lifespan(server):
 
     pool = CursorPool(conn, size=16)
     _shared_pool = pool
+    _shared_catalog = catalog
     try:
         # Build catalog_json for CitationMiddleware (flat list of {schema, table, rows})
         catalog_json = {"tables": [
@@ -1742,7 +1783,9 @@ async def app_lifespan(server):
 INSTRUCTIONS = """Common Ground -- NYC open data lake. 294 tables, 60M+ rows, 14 schemas.
 
 ROUTING -- pick the FIRST match:
-* Address, BBL, or "this building"       -> building()
+* Street address or "where I live"       -> address_report()
+* Address + specific question (violations, history) -> building()
+* BBL (10-digit number)                  -> building()
 * Person or company name                 -> entity()
 * Cop by name                            -> entity(role="cop")
 * Judge by name                          -> entity(role="judge")
@@ -1792,11 +1835,12 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 from tools import (
-    building, entity, neighborhood, network, school,
+    address_report, building, entity, neighborhood, network, school,
     semantic_search, query, safety, health, legal,
     civic, transit, services, suggest,
 )
 
+mcp.tool(annotations=READONLY)(address_report)
 mcp.tool(annotations=READONLY)(building)
 mcp.tool(annotations=READONLY)(entity)
 mcp.tool(annotations=READONLY)(neighborhood)
@@ -2048,28 +2092,20 @@ async def catalog_json(request: Request) -> JSONResponse:
         )
 
     pool = _shared_pool
-    if pool is None:
+    if pool is None or not _shared_catalog:
         return JSONResponse({"error": "Server starting up"}, status_code=503)
 
     try:
-        cols, rows = execute(pool, """
-            SELECT
-                t.schema_name,
-                t.table_name,
-                t.estimated_size,
-                (SELECT COUNT(*) FROM duckdb_columns() c
-                 WHERE c.schema_name = t.schema_name AND c.table_name = t.table_name) AS column_count
-            FROM duckdb_tables() t
-            WHERE t.schema_name NOT LIKE '%staging%'
-              AND t.schema_name NOT LIKE 'test%'
-              AND t.schema_name NOT LIKE 'ducklake%'
-              AND t.schema_name NOT LIKE 'information%'
-              AND t.schema_name != 'lake'
-              AND t.schema_name != 'foundation'
-              AND t.table_name NOT LIKE '%__null'
-              AND t.table_name NOT LIKE '%__footnotes'
-            ORDER BY t.schema_name, t.estimated_size DESC
-        """)
+        # Build table list from _shared_catalog (pure dict, no SQL view evaluation)
+        _skip = {'staging', 'test', 'ducklake', 'information_schema', 'pg_catalog', 'lake', 'foundation'}
+        rows = []
+        for schema in sorted(_shared_catalog):
+            if schema in _skip or 'staging' in schema or schema.startswith('test'):
+                continue
+            for table, info in sorted(_shared_catalog[schema].items(), key=lambda x: -(x[1].get("row_count", 0))):
+                if table.startswith('_dlt_') or table.startswith('_pipeline') or table.endswith('__null') or table.endswith('__footnotes'):
+                    continue
+                rows.append((schema, table, info.get("row_count", 0), info.get("column_count", 0)))
 
         ducklake_info = {}
         try:
@@ -2116,9 +2152,9 @@ async def catalog_json(request: Request) -> JSONResponse:
         total_rows = 0
 
         for row in rows:
-            schema, table, est_size, col_count = row[:4]
-            if table.startswith('_dlt_') or table.startswith('_pipeline'):
-                continue
+            schema, table, _zero, col_count = row[:4]
+            cat_entry = _shared_catalog.get(schema, {}).get(table, {})
+            est_size = cat_entry.get("row_count", 0)
 
             dl = ducklake_info.get(table, {})
             file_count = dl.get("file_count", 0)

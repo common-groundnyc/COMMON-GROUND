@@ -2,7 +2,8 @@
 from the name_index into a Lance vector index for semantic search.
 
 Reads (last_name, first_name) pairs from lake.federal.name_index,
-embeds via Gemini API, writes to /data/common-ground/lance/entity_name_embeddings.lance.
+embeds via Gemini API, writes to /data/common-ground/lance/entity_name_embeddings.lance
+using DuckDB's native Lance extension (COPY ... FORMAT lance).
 """
 import logging
 import os
@@ -10,7 +11,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import pyarrow as pa
 from dagster import AssetKey, MaterializeResult, MetadataValue, asset
 
@@ -27,13 +27,16 @@ CHUNK_SIZE = 100_000
 @asset(
     key=AssetKey(["foundation", "entity_name_embeddings"]),
     group_name="foundation",
-    deps=[AssetKey(["federal", "name_index"])],
-    description="Lance vector index of embedded entity names from name_index for semantic search.",
+    deps=[
+        AssetKey(["federal", "name_index"]),
+        AssetKey(["foundation", "entity_master"]),
+    ],
+    description="Lance vector index of embedded entity names from name_index for semantic search, with entity_id from entity_master.",
     compute_kind="lance",
 )
 def entity_name_embeddings(context) -> MaterializeResult:
     """Embed distinct names from name_index into a Lance vector index."""
-    import lancedb
+    import duckdb
 
     # Import embedder — try relative path first, fall back to known location
     embedder_candidates = [
@@ -50,19 +53,49 @@ def entity_name_embeddings(context) -> MaterializeResult:
     t_start = time.time()
     conn = _connect_ducklake()
 
+    # Load Lance extension for COPY ... FORMAT lance
+    conn.execute("INSTALL lance; LOAD lance;")
+
     try:
+        # Check if entity_master is available for entity_id join
+        has_entity_master = False
+        try:
+            conn.execute("SELECT 1 FROM lake.foundation.entity_master LIMIT 1")
+            has_entity_master = True
+            context.log.info("Entity master available — will attach entity_id")
+        except Exception:
+            context.log.warning("Entity master not yet available — entity_id will be NULL")
+
         # Step 1: Materialize distinct names into a temp table (avoid OOM on 14M rows)
         context.log.info("Creating temp table of distinct names...")
-        conn.execute("""
-            CREATE TEMP TABLE _distinct_names AS
-            SELECT
-                UPPER(TRIM(last_name)) || ', ' || UPPER(TRIM(first_name)) AS name,
-                STRING_AGG(DISTINCT source_table, ',' ORDER BY source_table) AS sources
-            FROM lake.federal.name_index
-            WHERE last_name IS NOT NULL AND LENGTH(last_name) >= 2
-              AND first_name IS NOT NULL AND LENGTH(first_name) >= 1
-            GROUP BY UPPER(TRIM(last_name)), UPPER(TRIM(first_name))
-        """)
+        if has_entity_master:
+            conn.execute("""
+                CREATE TEMP TABLE _distinct_names AS
+                SELECT
+                    UPPER(TRIM(ni.last_name)) || ', ' || UPPER(TRIM(ni.first_name)) AS name,
+                    STRING_AGG(DISTINCT ni.source_table, ',' ORDER BY ni.source_table) AS sources,
+                    MAX(em.entity_id) AS entity_id
+                FROM lake.federal.name_index ni
+                LEFT JOIN lake.federal.resolved_entities re
+                    ON ni.unique_id = re.unique_id
+                LEFT JOIN lake.foundation.entity_master em
+                    ON re.cluster_id = em.cluster_id
+                WHERE ni.last_name IS NOT NULL AND LENGTH(ni.last_name) >= 2
+                  AND ni.first_name IS NOT NULL AND LENGTH(ni.first_name) >= 1
+                GROUP BY UPPER(TRIM(ni.last_name)), UPPER(TRIM(ni.first_name))
+            """)
+        else:
+            conn.execute("""
+                CREATE TEMP TABLE _distinct_names AS
+                SELECT
+                    UPPER(TRIM(last_name)) || ', ' || UPPER(TRIM(first_name)) AS name,
+                    STRING_AGG(DISTINCT source_table, ',' ORDER BY source_table) AS sources,
+                    NULL AS entity_id
+                FROM lake.federal.name_index
+                WHERE last_name IS NOT NULL AND LENGTH(last_name) >= 2
+                  AND first_name IS NOT NULL AND LENGTH(first_name) >= 1
+                GROUP BY UPPER(TRIM(last_name)), UPPER(TRIM(first_name))
+            """)
         total = conn.execute("SELECT COUNT(*) FROM _distinct_names").fetchone()[0]
         context.log.info("Distinct names: %s", f"{total:,}")
 
@@ -71,12 +104,11 @@ def entity_name_embeddings(context) -> MaterializeResult:
         lance_path = Path(LANCE_PATH)
         if lance_path.exists():
             try:
-                db = lancedb.connect(LANCE_LOCAL_DIR)
-                tbl = db.open_table(LANCE_TABLE_NAME)
-                # Only read name column — loading embeddings would OOM
-                existing_names = set(
-                    tbl.to_lance().scanner(columns=["name"]).to_table()["name"].to_pylist()
-                )
+                existing_names = {
+                    r[0] for r in conn.execute(
+                        f"SELECT name FROM '{LANCE_PATH}'"
+                    ).fetchall()
+                }
                 context.log.info("Existing embeddings: %s names", f"{len(existing_names):,}")
             except Exception as e:
                 context.log.warning("Could not read existing Lance table: %s", e)
@@ -86,49 +118,51 @@ def entity_name_embeddings(context) -> MaterializeResult:
         context.log.info("Embedder ready (dims=%d)", dims)
 
         # Step 4: Process in chunks — write each chunk to Lance immediately
-        # DO NOT accumulate all_records in memory (14M × 768 floats = 42GB OOM)
+        # DO NOT accumulate all_records in memory (14M x 256 floats = 14GB OOM)
         embedded_count = 0
         skipped_count = 0
         offset = 0
         lance_initialized = lance_path.exists() and bool(existing_names)
 
         lance_path.parent.mkdir(parents=True, exist_ok=True)
-        lance_db = lancedb.connect(LANCE_LOCAL_DIR)
 
         while offset < total:
             chunk = conn.execute(f"""
-                SELECT name, sources FROM _distinct_names
+                SELECT name, sources, entity_id FROM _distinct_names
                 LIMIT {CHUNK_SIZE} OFFSET {offset}
             """).fetchall()
 
-            new_rows = [(n, s) for n, s in chunk if n not in existing_names]
+            new_rows = [(n, s, e) for n, s, e in chunk if n not in existing_names]
             skipped_count += len(chunk) - len(new_rows)
 
             if new_rows:
                 names = [r[0] for r in new_rows]
                 sources = [r[1] for r in new_rows]
+                entity_ids = [str(r[2]) if r[2] else None for r in new_rows]
                 context.log.info(
                     "Embedding chunk at offset %s: %s new names (%s skipped)...",
                     f"{offset:,}", f"{len(names):,}", f"{len(chunk) - len(new_rows):,}",
                 )
                 vecs = embed_batch_fn(names)
 
-                # Write this chunk to Lance immediately (don't accumulate)
+                # Write this chunk to Lance via DuckDB's native extension
                 chunk_table = pa.table({
                     "name": pa.array(names, type=pa.utf8()),
                     "sources": pa.array(sources, type=pa.utf8()),
+                    "entity_id": pa.array(entity_ids, type=pa.utf8()),
                     "embedding": pa.array(
                         [v.tolist() for v in vecs],
                         type=pa.list_(pa.float32(), dims),
                     ),
                 })
 
-                if lance_initialized:
-                    lance_tbl = lance_db.open_table(LANCE_TABLE_NAME)
-                    lance_tbl.add(chunk_table)
-                else:
-                    lance_db.create_table(LANCE_TABLE_NAME, data=chunk_table, mode="overwrite")
-                    lance_initialized = True
+                mode = "append" if lance_initialized else "overwrite"
+                conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_emb AS SELECT * FROM chunk_table")
+                conn.execute(
+                    f"COPY _tmp_emb TO '{LANCE_PATH}' (FORMAT lance, mode '{mode}')"
+                )
+                conn.execute("DROP TABLE IF EXISTS _tmp_emb")
+                lance_initialized = True
 
                 embedded_count += len(names)
                 # Add to existing set so subsequent chunks don't re-embed
