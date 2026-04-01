@@ -113,6 +113,27 @@ def _resolve_bbl(pool, identifier: str) -> str:
         if _rows:
             return str(_rows[0][0]).rstrip('.')
 
+        # Fuzzy fallback: strip house number and find nearest lot on street
+        street_match = re.match(r'^\d+[\-\d]*\s+(.+)$', search)
+        house_match = re.match(r'^(\d+)', search)
+        if street_match and house_match:
+            street_name = street_match.group(1)
+            house_num = int(house_match.group(1))
+            boro_filter = "AND borocode = ?" if boro else ""
+            params = [f"%{street_name}%"]
+            if boro:
+                params.append(boro)
+            _cols, _rows = execute(pool, f"""
+                SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl,
+                       address
+                FROM lake.city_government.pluto
+                WHERE UPPER(address) LIKE ? {boro_filter}
+                ORDER BY ABS(TRY_CAST(REGEXP_EXTRACT(address, '^(\\d+)', 1) AS INT) - {house_num}) NULLS LAST
+                LIMIT 1
+            """, params)
+            if _rows:
+                return str(_rows[0][0]).rstrip('.')
+
         raise ToolError(
             f"No building found for address '{identifier}'. "
             "Try a simpler address like '350 5th Ave' or include borough."
