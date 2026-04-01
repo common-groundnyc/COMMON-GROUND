@@ -13,6 +13,7 @@ from dagster_pipeline.defs.flush_sensor import flush_ducklake_sensor
 from dagster_pipeline.defs.freshness_sensor import data_freshness_sensor
 from dagster_pipeline.defs.foundation_assets import h3_index, phonetic_index, row_fingerprints
 from dagster_pipeline.defs.entity_embeddings_asset import entity_name_embeddings
+from dagster_pipeline.defs.entity_master_asset import entity_master
 from dagster_pipeline.defs.quality_assets import data_health
 from dagster_pipeline.defs.materialized_view_assets import (
     mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
@@ -22,6 +23,7 @@ from dagster_pipeline.resources.ducklake import DuckLakeResource
 
 all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, name_index, resolved_entities,
               h3_index, phonetic_index, row_fingerprints, data_health, entity_name_embeddings,
+              entity_master,
               mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
               spatial_views]
 
