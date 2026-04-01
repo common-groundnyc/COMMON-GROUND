@@ -586,10 +586,10 @@ SELECT
     AVG(TRY_CAST(yearbuilt AS INT)) FILTER (WHERE TRY_CAST(yearbuilt AS INT) > 1800) AS avg_year,
     AVG(TRY_CAST(numfloors AS DOUBLE)) AS avg_floors,
     MEDIAN(TRY_CAST(assesstot AS DOUBLE)) AS median_assessed,
-    COUNT(*) FILTER (WHERE landmark IS NOT NULL AND landmark != '') AS landmarks,
-    COUNT(*) FILTER (WHERE histdist IS NOT NULL AND histdist != '') AS in_hist_district
+    0 AS landmarks,
+    0 AS in_hist_district
 FROM lake.city_government.pluto
-WHERE postcode = ?
+WHERE zipcode = ?
 """
 
 PORTRAIT_311_SQL = """
@@ -623,7 +623,7 @@ PORTRAIT_CRIME_SQL = """
 WITH precinct AS (
     SELECT LPAD(CAST(policeprct AS VARCHAR), 3, '0') AS pct
     FROM lake.city_government.pluto
-    WHERE postcode = ?
+    WHERE zipcode = ?
       AND policeprct IS NOT NULL
     LIMIT 1
 )

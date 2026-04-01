@@ -1,3 +1,4 @@
+from tools.address_report import address_report
 from tools.building import building
 from tools.civic import civic
 from tools.entity import entity

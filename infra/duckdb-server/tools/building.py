@@ -37,16 +37,45 @@ _ABBREV_MAP = {
     "PL": "PLACE", "RD": "ROAD", "CT": "COURT", "LN": "LANE", "PKY": "PARKWAY",
 }
 
+_BOROUGH_MAP = {
+    "MANHATTAN": "1", "MN": "1", "NEW YORK": "1", "NY": "1",
+    "BRONX": "2", "BX": "2", "THE BRONX": "2",
+    "BROOKLYN": "3", "BK": "3", "BKLYN": "3", "KINGS": "3",
+    "QUEENS": "4", "QN": "4", "QNS": "4",
+    "STATEN ISLAND": "5", "SI": "5", "RICHMOND": "5",
+}
+
 
 def _normalize_address(raw: str) -> str:
-    """Normalize a street address to match PLUTO format."""
+    """Normalize a street address to match PLUTO format.
+
+    Returns the street part only (no borough/city/state/zip).
+    """
     s = raw.strip().upper()
+    # Strip trailing state/zip (e.g. ", NY 10118")
+    s = re.sub(r',?\s*NY\s*\d*\s*$', '', s)
+    # Strip borough from end (after comma or as trailing word)
+    for boro in sorted(_BOROUGH_MAP.keys(), key=len, reverse=True):
+        s = re.sub(rf',?\s*{re.escape(boro)}\s*$', '', s)
+    s = s.strip().rstrip(',').strip()
+    # Strip ordinal suffixes: 5TH -> 5, 3RD -> 3
     s = re.sub(r'\b(\d+)(?:ST|ND|RD|TH)\b', r'\1', s)
+    # Expand spelled-out ordinals: FIFTH -> 5
     for word, num in _ORDINAL_MAP.items():
         s = re.sub(rf'\b{word}\b', num, s)
+    # Expand abbreviations: AVE -> AVENUE
     for abbr, full in _ABBREV_MAP.items():
         s = re.sub(rf'\b{abbr}\b', full, s)
     return s
+
+
+def _extract_borough(raw: str) -> str | None:
+    """Extract a PLUTO borocode ('1'-'5') from an address string, or None."""
+    s = raw.strip().upper()
+    for boro in sorted(_BOROUGH_MAP.keys(), key=len, reverse=True):
+        if re.search(rf'\b{re.escape(boro)}\b', s):
+            return _BOROUGH_MAP[boro]
+    return None
 
 # ---------------------------------------------------------------------------
 # BBL resolution
@@ -56,17 +85,33 @@ def _normalize_address(raw: str) -> str:
 def _resolve_bbl(pool, identifier: str) -> str:
     """Resolve an address string to a 10-digit BBL via PLUTO lookup."""
     search = _normalize_address(identifier)
+    boro = _extract_borough(identifier)
+
     try:
+        # Try with borough filter first (more precise)
+        if boro:
+            _cols, _rows = execute(pool, """
+                SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
+                FROM lake.city_government.pluto
+                WHERE borocode = ? AND UPPER(address) LIKE ?
+                ORDER BY assesstot DESC NULLS LAST LIMIT 1
+            """, [boro, f"%{search}%"])
+            if _rows:
+                return str(_rows[0][0]).rstrip('.')
+
+        # Fallback: search without borough filter
         _cols, _rows = execute(pool, """
-            SELECT bbl FROM lake.city_government.pluto
+            SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
+            FROM lake.city_government.pluto
             WHERE UPPER(address) LIKE ?
             ORDER BY assesstot DESC NULLS LAST LIMIT 1
         """, [f"%{search}%"])
         if _rows:
-            return str(_rows[0][0])
+            return str(_rows[0][0]).rstrip('.')
+
         raise ToolError(
             f"No building found for address '{identifier}'. "
-            "Try a simpler address like '350 5th' or include borough."
+            "Try a simpler address like '350 5th Ave' or include borough."
         )
     except ToolError:
         raise
@@ -87,7 +132,7 @@ SELECT bbl, address, zipcode AS zip, stories, total_units,
        dob_violations AS total_dob_violations,
        latest_dob AS latest_dob_date
 FROM lake.foundation.mv_building_hub
-WHERE bbl = ?
+WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
 """
 
 BUILDING_PROFILE_SQL = """
@@ -105,7 +150,7 @@ violation_counts AS (
         COUNT(*) FILTER (WHERE violationstatus = 'Open') AS open_violations,
         MAX(TRY_CAST(novissueddate AS DATE)) AS latest_violation_date
     FROM lake.housing.hpd_violations
-    WHERE bbl = ?::VARCHAR
+    WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?::VARCHAR
 ),
 complaint_counts AS (
     SELECT
@@ -113,7 +158,7 @@ complaint_counts AS (
         COUNT(DISTINCT complaint_id) FILTER (WHERE complaint_status = 'OPEN') AS open_complaints,
         MAX(TRY_CAST(received_date AS DATE)) AS latest_complaint_date
     FROM lake.housing.hpd_complaints
-    WHERE bbl = ?::VARCHAR
+    WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?::VARCHAR
 ),
 dob_counts AS (
     SELECT
@@ -143,7 +188,7 @@ WITH hpd AS (
            violationstatus AS status, novissueddate AS issue_date,
            currentstatus AS current_status, currentstatusdate AS status_date
     FROM lake.housing.hpd_violations
-    WHERE bbl = ?
+    WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
     ORDER BY TRY_CAST(novissueddate AS DATE) DESC NULLS LAST
     LIMIT 200
 ),
@@ -173,8 +218,8 @@ ORDER BY sort_date DESC NULLS LAST
 
 STORY_PLUTO_SQL = """
 SELECT yearbuilt, numfloors, unitsres, unitstotal, bldgclass, bldgarea, lotarea,
-       address, ownername, landmark, histdist, yearalter1, yearalter2,
-       zonedist1, assesstot, borough, postcode
+       address, ownername, histdist, yearalter1, yearalter2,
+       zonedist1, assesstot, borough, zipcode
 FROM lake.city_government.pluto
 WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
 LIMIT 1
@@ -219,7 +264,7 @@ SELECT
     AVG(TRY_CAST(numfloors AS DOUBLE)) AS avg_floors,
     AVG(TRY_CAST(unitsres AS DOUBLE)) AS avg_units
 FROM lake.city_government.pluto
-WHERE postcode = ? AND TRY_CAST(yearbuilt AS INT) > 1800
+WHERE zipcode = ? AND TRY_CAST(yearbuilt AS INT) > 1800
 """
 
 # ---------------------------------------------------------------------------
@@ -228,7 +273,7 @@ WHERE postcode = ? AND TRY_CAST(yearbuilt AS INT) > 1800
 
 CONTEXT_ERA_BUILDINGS_SQL = """
 SELECT COUNT(*) AS total_same_year,
-       COUNT(DISTINCT postcode) AS zips_with_same_year
+       COUNT(DISTINCT zipcode) AS zips_with_same_year
 FROM lake.city_government.pluto
 WHERE TRY_CAST(yearbuilt AS INT) = ?
 """
@@ -257,7 +302,7 @@ SELECT
     MIN(TRY_CAST(yearbuilt AS INT)) FILTER (WHERE TRY_CAST(yearbuilt AS INT) > 1800) AS oldest_in_zip,
     MAX(TRY_CAST(yearbuilt AS INT)) AS newest_in_zip
 FROM lake.city_government.pluto
-WHERE postcode = ?
+WHERE zipcode = ?
 """
 
 # ---------------------------------------------------------------------------
@@ -266,7 +311,7 @@ WHERE postcode = ?
 
 BLOCK_PLUTO_SQL = """
 SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl,
-       address, borough, postcode, TRY_CAST(yearbuilt AS INT) AS yearbuilt,
+       address, borough, zipcode, TRY_CAST(yearbuilt AS INT) AS yearbuilt,
        TRY_CAST(numfloors AS DOUBLE) AS numfloors, bldgclass
 FROM lake.city_government.pluto
 WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
@@ -338,14 +383,14 @@ ORDER BY yr DESC, cnt DESC
 TWINS_FIND_SQL = """
 WITH target AS (
     SELECT bbl, yearbuilt, numfloors, unitsres, bldgclass, bldgarea, lotarea,
-           address, borough, postcode, assesstot
+           address, borough, zipcode, assesstot
     FROM lake.city_government.pluto
     WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
     LIMIT 1
 )
 SELECT
     REPLACE(CAST(p.bbl AS VARCHAR), '.00000000', '') AS twin_bbl,
-    p.address, p.borough, p.postcode,
+    p.address, p.borough, p.zipcode,
     TRY_CAST(p.yearbuilt AS INT) AS yearbuilt,
     TRY_CAST(p.numfloors AS DOUBLE) AS numfloors,
     TRY_CAST(p.unitsres AS INT) AS unitsres,
@@ -497,7 +542,7 @@ def _view_full(pool, bbl: str) -> ToolResult:
                 SELECT bbl, COUNT(*) AS cnt FROM lake.housing.hpd_violations GROUP BY bbl
             )
             SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE cnt <= (
-                SELECT cnt FROM bbl_counts WHERE bbl = ?
+                SELECT cnt FROM bbl_counts WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
             )) / COUNT(*), 1) AS percentile
             FROM bbl_counts
         """, [bbl])
@@ -515,7 +560,7 @@ def _view_full(pool, bbl: str) -> ToolResult:
         _, landmark_rows = execute(pool, """
             SELECT lm_name, lm_type, hist_distr, status, desdate
             FROM lake.housing.designated_buildings
-            WHERE bbl = ?
+            WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
             LIMIT 1
         """, [bbl])
     except Exception:
@@ -632,7 +677,7 @@ def _view_story(pool, bbl: str) -> ToolResult:
     address = p.get("address") or "Unknown"
     owner = p.get("ownername") or "Unknown"
     borough = p.get("borough") or ""
-    zipcode = p.get("postcode") or ""
+    zipcode = p.get("zipcode") or ""
     landmark = p.get("landmark")
     hist_dist = p.get("histdist")
     lot_area = int(float(p.get("lotarea") or 0))
@@ -794,7 +839,7 @@ def _view_block(pool, bbl: str) -> ToolResult:
     bldg = dict(zip(cols_b, rows_b[0]))
     address = bldg.get("address") or "Unknown"
     borough = bldg.get("borough") or ""
-    zipcode = bldg.get("postcode") or ""
+    zipcode = bldg.get("zipcode") or ""
     boro_digit = bbl[0]
     block = str(int(bbl[1:6]))
     block_prefix = bbl[:6]
@@ -937,7 +982,7 @@ def _view_similar(pool, bbl: str, ctx=None) -> ToolResult:
         if not emb_conn:
             raise Exception("No embedding DB")
         target_rows = emb_conn.execute(
-            "SELECT features FROM building_vectors WHERE bbl = ?", [bbl]
+            "SELECT features FROM building_vectors WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?", [bbl]
         ).fetchall()
 
         if target_rows:
@@ -1054,7 +1099,7 @@ def _view_similar(pool, bbl: str, ctx=None) -> ToolResult:
                 elif ratio < 0.8:
                     val_diff = f" ({ratio:.1f}x your assessed value)"
 
-            lines.append(f"\n  {tw.get('address')}, {tw.get('borough')} (ZIP {tw.get('postcode')})")
+            lines.append(f"\n  {tw.get('address')}, {tw.get('borough')} (ZIP {tw.get('zipcode')})")
             lines.append(f"    Built {tw.get('yearbuilt')} · {int(float(tw.get('numfloors') or 0))} floors · {tw.get('unitsres')} units")
             lines.append(f"    Assessed: ${tw_assessed:,.0f}{val_diff}")
             lines.append(f"    Violations: {tw_viols[0]:,} total, {tw_viols[1]:,} open")
@@ -1099,7 +1144,7 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
             MAX(TRY_CAST(novissueddate AS DATE)) AS latest,
             MIN(TRY_CAST(novissueddate AS DATE)) AS earliest
         FROM lake.housing.hpd_violations
-        WHERE bbl = ?
+        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
     """, [bbl])
     hpd = dict(zip(hpd_cols, hpd_rows[0])) if hpd_rows else {}
 
@@ -1126,7 +1171,7 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
             MAX(TRY_CAST(vio_date AS DATE)) AS latest,
             MIN(TRY_CAST(vio_date AS DATE)) AS earliest
         FROM lake.housing.fdny_violations
-        WHERE bbl = ?
+        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
     """, [bbl])
     fdny = dict(zip(fdny_cols, fdny_rows[0])) if fdny_rows else {}
 
@@ -1153,7 +1198,7 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
                inspection_date, violation_code, violation_description,
                critical_flag, score
         FROM lake.health.restaurant_inspections
-        WHERE bbl = ?
+        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
         ORDER BY inspection_date DESC
         LIMIT 20
     """, [bbl])
@@ -1165,7 +1210,7 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
             COUNT(DISTINCT complaint_id) FILTER (WHERE UPPER(complaint_status) = 'OPEN') AS open_complaints,
             MAX(TRY_CAST(received_date AS DATE)) AS latest
         FROM lake.housing.hpd_complaints
-        WHERE bbl = ?
+        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
     """, [bbl])
     complaints = dict(zip(complaint_cols, complaint_rows[0])) if complaint_rows else {}
 
@@ -1360,7 +1405,7 @@ def _view_history(pool, bbl: str) -> ToolResult:
             SELECT document_id, doc_type, amount, doc_date, party_name AS name,
                    role, address_1, city, state
             FROM lake.foundation.mv_acris_deeds
-            WHERE bbl = ?
+            WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
             ORDER BY doc_date DESC
             LIMIT 500
         """, [bbl])
@@ -1705,7 +1750,7 @@ def _view_building_context(pool, bbl: str) -> ToolResult:
     year = int(float(p.get("yearbuilt") or 0))
     address = p.get("address") or "Unknown"
     borough = p.get("borough") or ""
-    zipcode = p.get("postcode") or ""
+    zipcode = p.get("zipcode") or ""
 
     if year < 1800:
         raise ToolError("Building has no valid construction year. Cannot provide context.")
