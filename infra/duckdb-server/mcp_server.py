@@ -533,22 +533,69 @@ async def app_lifespan(server):
             )
         """)
 
-    def _build_catalog_embeddings(emb_conn, embed_batch, dims):
-        """Embed schema descriptions — always rebuilt (tiny, ~12 rows)."""
-        rows = []
+    def _build_catalog_embeddings(emb_conn, embed_batch, dims, read_conn=None):
+        """Embed schema + table descriptions — schemas always rebuilt, tables incremental."""
+        # --- Schema-level (always rebuild, tiny) ---
+        schema_rows = []
         for schema_name, description in SCHEMA_DESCRIPTIONS.items():
-            rows.append((schema_name, "__schema__", description))
-        if not rows:
-            return
-        texts = [r[2] for r in rows]
-        vecs = embed_batch(texts)
-        emb_conn.execute("DELETE FROM catalog_embeddings")
-        for (s, t, d), vec in zip(rows, vecs):
-            emb_conn.execute(
-                f"INSERT INTO catalog_embeddings VALUES (?, ?, ?, ?::FLOAT[{dims}])",
-                [s, t, d, vec.tolist()],
-            )
-        print(f"  Catalog embeddings: {len(rows)} rows (rebuilt)", flush=True)
+            schema_rows.append((schema_name, "__schema__", description))
+
+        # --- Table-level (incremental) ---
+        table_rows = []
+        if read_conn:
+            try:
+                existing = set()
+                try:
+                    existing_rows = emb_conn.execute(
+                        "SELECT schema_name, table_name FROM catalog_embeddings WHERE table_name != '__schema__'"
+                    ).fetchall()
+                    existing = {(r[0], r[1]) for r in existing_rows}
+                except Exception:
+                    pass
+
+                lake_tables = read_conn.execute("""
+                    SELECT schema_name, table_name, comment
+                    FROM duckdb_tables()
+                    WHERE database_name = 'lake'
+                      AND schema_name NOT IN ('information_schema', 'pg_catalog', 'ducklake', 'public')
+                    ORDER BY schema_name, table_name
+                """).fetchall()
+
+                for schema, table, comment in lake_tables:
+                    if (schema, table) in existing:
+                        continue
+                    desc = comment if comment else f"{schema} — {table.replace('_', ' ')} table"
+                    table_rows.append((schema, table, desc))
+            except Exception as e:
+                print(f"  Warning: table description scan failed: {e}", flush=True)
+
+        # --- Embed schemas (always) ---
+        if schema_rows:
+            texts = [r[2] for r in schema_rows]
+            vecs = embed_batch(texts)
+            emb_conn.execute("DELETE FROM catalog_embeddings WHERE table_name = '__schema__'")
+            for (s, t, d), vec in zip(schema_rows, vecs):
+                emb_conn.execute(
+                    f"INSERT INTO catalog_embeddings VALUES (?, ?, ?, ?::FLOAT[{dims}])",
+                    [s, t, d, vec.tolist()],
+                )
+
+        # --- Embed new tables (incremental) ---
+        if table_rows:
+            BATCH = 100
+            for i in range(0, len(table_rows), BATCH):
+                batch = table_rows[i:i + BATCH]
+                texts = [r[2] for r in batch]
+                vecs = embed_batch(texts)
+                for (s, t, d), vec in zip(batch, vecs):
+                    emb_conn.execute(
+                        f"INSERT INTO catalog_embeddings VALUES (?, ?, ?, ?::FLOAT[{dims}])",
+                        [s, t, d, vec.tolist()],
+                    )
+
+        total = emb_conn.execute("SELECT COUNT(*) FROM catalog_embeddings").fetchone()[0]
+        new_tables = len(table_rows)
+        print(f"  Catalog embeddings: {total} rows ({len(schema_rows)} schemas, {new_tables} new tables)", flush=True)
 
     def _build_description_embeddings(read_conn, emb_conn, embed_batch, dims):
         """Embed complaint/violation descriptions — incremental append."""
@@ -1699,7 +1746,7 @@ async def app_lifespan(server):
                 read_cursor = conn.cursor()
 
                 print("Background: building embeddings (hnsw_acorn)...", flush=True)
-                _build_catalog_embeddings(emb_conn, embed_batch_fn, embed_dims)
+                _build_catalog_embeddings(emb_conn, embed_batch_fn, embed_dims, read_conn=conn)
                 _build_description_embeddings(read_cursor, emb_conn, embed_batch_fn, embed_dims)
                 _build_entity_name_embeddings(read_cursor, emb_conn, embed_batch_fn, embed_dims)
                 _create_hnsw_indexes(emb_conn)
