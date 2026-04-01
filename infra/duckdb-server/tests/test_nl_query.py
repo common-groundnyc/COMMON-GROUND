@@ -14,6 +14,9 @@ _spec = importlib.util.spec_from_file_location("nl_query", _nl_query_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 build_schema_context = _mod.build_schema_context
+compose_prompt = _mod.compose_prompt
+validate_generated_sql = _mod.validate_generated_sql
+compose_correction_prompt = _mod.compose_correction_prompt
 
 
 def test_build_schema_context_formats_correctly():
@@ -66,3 +69,41 @@ def test_format_examples_returns_pairs():
     assert "SQL:" in result
     assert result.count("Question:") == 3
     assert len(NL_SQL_EXAMPLES) >= 8
+
+
+def test_compose_prompt_includes_all_sections():
+    result = compose_prompt(
+        question="How many violations in Brooklyn?",
+        schema_context="### lake.housing.hpd_violations\n  - boroid (VARCHAR)",
+        examples="Question: count by borough\nSQL: SELECT ...",
+    )
+    assert "How many violations in Brooklyn?" in result
+    assert "lake.housing.hpd_violations" in result
+    assert "DuckDB" in result
+    assert "LIMIT" in result
+    assert "TRY_CAST" in result
+
+
+def test_validate_generated_sql_accepts_valid():
+    assert validate_generated_sql("SELECT 1") is True
+
+
+def test_validate_generated_sql_rejects_ddl():
+    assert validate_generated_sql("DROP TABLE foo") is False
+
+
+def test_validate_generated_sql_rejects_empty():
+    assert validate_generated_sql("") is False
+    assert validate_generated_sql("   ") is False
+
+
+def test_compose_correction_prompt_includes_error():
+    result = compose_correction_prompt(
+        original_question="How many violations?",
+        bad_sql="SELECT * FROM lake.housing.violations",
+        error="Table 'violations' does not exist",
+        schema_context="### lake.housing.hpd_violations\n  - id (BIGINT)",
+    )
+    assert "violations" in result
+    assert "does not exist" in result
+    assert "hpd_violations" in result

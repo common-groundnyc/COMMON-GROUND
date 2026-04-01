@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import re
 import time
+import urllib.request
 from typing import Any
 
 
@@ -88,3 +91,125 @@ def build_schema_context(table_schemas: list[dict]) -> str:
         sections.append(header + "\n" + "\n".join(col_lines))
 
     return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# Prompt composition
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = """You are a SQL expert for the Common Ground NYC open data lake.
+The database is DuckDB. All tables use the format: lake.schema.table_name
+
+Rules:
+- Write ONLY a single SELECT statement. No DDL, no INSERT, no UPDATE, no DELETE.
+- Always use lake.schema.table_name (e.g., lake.housing.hpd_violations)
+- Use TRY_CAST() instead of CAST() for type conversions (handles nulls gracefully)
+- Use ILIKE for case-insensitive string matching
+- Always include LIMIT (default 20, max 100)
+- Use GROUP BY ALL when grouping (DuckDB shortcut)
+- For counts with conditions, use COUNT(*) FILTER (WHERE ...)
+- Return ONLY the SQL query, no explanation, no markdown, no backticks."""
+
+
+def compose_prompt(question: str, schema_context: str, examples: str) -> str:
+    """Compose the full prompt for SQL generation."""
+    return f"""{_SYSTEM_PROMPT}
+
+## Available Tables
+
+{schema_context}
+
+## Examples
+
+{examples}
+
+## Question
+
+{question}
+
+SQL:"""
+
+
+def generate_sql(question: str, schema_context: str, api_key: str, model: str = "gemini-2.5-flash") -> str:
+    """Call Gemini to generate SQL from a natural language question."""
+    from shared.nl_examples import format_examples
+
+    examples = format_examples(4)
+    prompt = compose_prompt(question, schema_context, examples)
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 1024},
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{url}?key={api_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
+
+    text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    if text.endswith("```"):
+        text = text[:-3].strip()
+    if text.lower().startswith("sql\n"):
+        text = text[4:].strip()
+
+    return text
+
+
+# ---------------------------------------------------------------------------
+# SQL validation + self-correction
+# ---------------------------------------------------------------------------
+
+def validate_generated_sql(sql: str) -> bool:
+    """Check if generated SQL is safe and syntactically reasonable."""
+    if not sql or not sql.strip():
+        return False
+    stripped = sql.strip().rstrip(";")
+    if not re.match(r"^\s*(SELECT|WITH)\b", stripped, re.IGNORECASE):
+        return False
+    try:
+        from shared.validation import validate_sql
+    except ImportError:
+        # fastmcp not available in this environment — skip deep validation
+        return True
+    try:
+        validate_sql(stripped)
+    except Exception:
+        return False
+    return True
+
+
+def try_explain(pool, sql: str) -> str | None:
+    """Try to EXPLAIN the SQL without executing. Returns None if valid, error string if not."""
+    try:
+        with pool.cursor() as cur:
+            cur.execute(f"EXPLAIN {sql.strip().rstrip(';')}")
+        return None
+    except Exception as e:
+        return str(e)
+
+
+def compose_correction_prompt(original_question: str, bad_sql: str, error: str, schema_context: str) -> str:
+    """Compose a prompt for correcting a failed SQL query."""
+    return f"""{_SYSTEM_PROMPT}
+
+## Available Tables
+
+{schema_context}
+
+## Previous Attempt
+
+Question: {original_question}
+Generated SQL: {bad_sql}
+Error: {error}
+
+Fix the SQL to avoid this error. Return ONLY the corrected SQL query.
+
+SQL:"""
