@@ -1,5 +1,5 @@
 import pytest
-from api.explore import classify_column, FilterType
+from api.explore import classify_column, FilterType, build_filtered_query
 
 
 class TestClassifyColumn:
@@ -83,3 +83,72 @@ class TestClassifyColumn:
 
     def test_units_integer_is_numeric(self):
         assert classify_column("units", "INTEGER") == FilterType.NUMERIC_RANGE
+
+
+class TestBuildFilteredQuery:
+    def test_no_filters_returns_select_with_limit(self):
+        sql, params = build_filtered_query("housing.hpd_violations", {}, None, "desc", 1, 20)
+        assert "SELECT *" in sql
+        assert "lake.housing.hpd_violations" in sql
+        assert "LIMIT" in sql
+        assert "OFFSET" in sql
+        assert params == [20, 0]
+
+    def test_borough_filter(self):
+        sql, params = build_filtered_query("housing.hpd_violations", {"borough": "MANHATTAN"}, None, "desc", 1, 20)
+        assert '"borough" = ?' in sql
+        assert params[0] == "MANHATTAN"
+
+    def test_date_after_filter(self):
+        sql, params = build_filtered_query("housing.hpd_violations", {"after:inspection_date": "2024-01-01"}, None, "desc", 1, 20)
+        assert '"inspection_date" >= ?' in sql
+        assert params[0] == "2024-01-01"
+
+    def test_date_before_filter(self):
+        sql, params = build_filtered_query("housing.hpd_violations", {"before:inspection_date": "2025-01-01"}, None, "desc", 1, 20)
+        assert '"inspection_date" <= ?' in sql
+        assert params[0] == "2025-01-01"
+
+    def test_text_search_filter(self):
+        sql, params = build_filtered_query("housing.hpd_violations", {"q:address": "350 5TH"}, None, "desc", 1, 20)
+        assert "ILIKE" in sql
+        assert params[0] == "%350 5TH%"
+
+    def test_numeric_min_filter(self):
+        sql, params = build_filtered_query("housing.hpd_violations", {"min:penalty_amount": "1000"}, None, "desc", 1, 20)
+        assert '"penalty_amount" >= ?' in sql
+
+    def test_numeric_max_filter(self):
+        sql, params = build_filtered_query("housing.hpd_violations", {"max:penalty_amount": "5000"}, None, "desc", 1, 20)
+        assert '"penalty_amount" <= ?' in sql
+
+    def test_sort_asc(self):
+        sql, _ = build_filtered_query("housing.hpd_violations", {}, "inspection_date", "asc", 1, 20)
+        assert 'ORDER BY "inspection_date" ASC' in sql
+
+    def test_sort_desc(self):
+        sql, _ = build_filtered_query("housing.hpd_violations", {}, "borough", "desc", 1, 20)
+        assert 'ORDER BY "borough" DESC' in sql
+
+    def test_pagination_page_2(self):
+        sql, params = build_filtered_query("housing.hpd_violations", {}, None, "desc", 2, 20)
+        assert params[-1] == 20  # OFFSET = (2-1) * 20
+
+    def test_multiple_filters_combined(self):
+        sql, params = build_filtered_query(
+            "housing.hpd_violations",
+            {"borough": "MANHATTAN", "status": "Open", "after:inspection_date": "2024-01-01"},
+            "inspection_date", "desc", 1, 20,
+        )
+        assert sql.count("?") == len(params)
+        assert "MANHATTAN" in params
+        assert "Open" in params
+        assert "2024-01-01" in params
+
+    def test_rejects_invalid_table_name(self):
+        with pytest.raises(ValueError, match="Invalid table"):
+            build_filtered_query("housing; DROP TABLE --", {}, None, "desc", 1, 20)
+
+    def test_rejects_invalid_column_in_filter(self):
+        with pytest.raises(ValueError, match="Invalid column"):
+            build_filtered_query("housing.hpd_violations", {"Robert'; DROP TABLE students--": "x"}, None, "desc", 1, 20)
