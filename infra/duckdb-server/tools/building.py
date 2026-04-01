@@ -36,6 +36,7 @@ _ABBREV_MAP = {
     "AVE": "AVENUE", "ST": "STREET", "BLVD": "BOULEVARD", "BL": "BOULEVARD",
     "DR": "DRIVE", "PL": "PLACE", "RD": "ROAD", "CT": "COURT", "LN": "LANE",
     "PKY": "PARKWAY", "PKWY": "PARKWAY", "TER": "TERRACE", "HWY": "HIGHWAY",
+    "E": "EAST", "W": "WEST", "N": "NORTH", "S": "SOUTH",
 }
 
 _BOROUGH_MAP = {
@@ -55,9 +56,9 @@ def _normalize_address(raw: str) -> str:
     s = raw.strip().upper()
     # Strip trailing state/zip (e.g. ", NY 10118")
     s = re.sub(r',?\s*NY\s*\d*\s*$', '', s)
-    # Strip borough from end (after comma or as trailing word)
+    # Strip borough from end (only after comma to avoid stripping from street names)
     for boro in sorted(_BOROUGH_MAP.keys(), key=len, reverse=True):
-        s = re.sub(rf',?\s*{re.escape(boro)}\s*$', '', s)
+        s = re.sub(rf',\s*{re.escape(boro)}\s*$', '', s)
     s = s.strip().rstrip(',').strip()
     # Strip apartment/unit/floor/suite suffixes
     s = re.sub(r'\s*(APT|UNIT|FL|FLOOR|STE|SUITE|RM|ROOM|#)\s*\S+\s*$', '', s)
@@ -96,9 +97,9 @@ def _resolve_bbl(pool, identifier: str) -> str:
             _cols, _rows = execute(pool, """
                 SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
                 FROM lake.city_government.pluto
-                WHERE borocode = ? AND UPPER(address) LIKE ?
+                WHERE borocode = ? AND UPPER(address) LIKE ? || '%'
                 ORDER BY assesstot DESC NULLS LAST LIMIT 1
-            """, [boro, f"%{search}%"])
+            """, [boro, search])
             if _rows:
                 return str(_rows[0][0]).rstrip('.')
 
@@ -106,9 +107,9 @@ def _resolve_bbl(pool, identifier: str) -> str:
         _cols, _rows = execute(pool, """
             SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
             FROM lake.city_government.pluto
-            WHERE UPPER(address) LIKE ?
+            WHERE UPPER(address) LIKE ? || '%'
             ORDER BY assesstot DESC NULLS LAST LIMIT 1
-        """, [f"%{search}%"])
+        """, [search])
         if _rows:
             return str(_rows[0][0]).rstrip('.')
 

@@ -136,7 +136,7 @@ def assemble_report(ctx: dict, results: dict) -> str:
     bldg_lines: list[str] = []
     bldg_lines.append(
         f" Built {fmt(year, 'year') if year else 'n/a'}"
-        f"  ·  {floors} stories  ·  {units} units  ·  {bldg_class}"
+        f"  ·  {fmt(floors)} stories  ·  {fmt(units)} units  ·  {bldg_class}"
     )
     bldg_lines.append(f" Zoning {zoning}  ·  Owner: {owner}")
     if assessed:

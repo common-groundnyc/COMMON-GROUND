@@ -56,6 +56,8 @@ def address_report(
         cd=ctx_data.get("community_district", ""),
         boro_code=bbl[0] if bbl else "",
         address=ctx_data.get("address", address),
+        latitude=ctx_data.get("latitude"),
+        longitude=ctx_data.get("longitude"),
     )
     results = parallel_queries(pool, queries)
 
@@ -96,7 +98,9 @@ def _resolve_context_by_bbl(pool, bbl: str) -> dict:
             cd AS community_district, council AS council_district,
             tract2010 AS census_tract,
             TRY_CAST(lotarea AS INT) AS lotarea,
-            TRY_CAST(bldgarea AS INT) AS bldgarea
+            TRY_CAST(bldgarea AS INT) AS bldgarea,
+            TRY_CAST(latitude AS DOUBLE) AS latitude,
+            TRY_CAST(longitude AS DOUBLE) AS longitude
         FROM lake.city_government.pluto
         WHERE borocode || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0') = ?
         LIMIT 1
@@ -149,7 +153,9 @@ def _resolve_context(pool, address: str) -> dict:
             cd AS community_district, council AS council_district,
             tract2010 AS census_tract,
             TRY_CAST(lotarea AS INT) AS lotarea,
-            TRY_CAST(bldgarea AS INT) AS bldgarea
+            TRY_CAST(bldgarea AS INT) AS bldgarea,
+            TRY_CAST(latitude AS DOUBLE) AS latitude,
+            TRY_CAST(longitude AS DOUBLE) AS longitude
         FROM lake.city_government.pluto
         WHERE borocode || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0') = ?
         LIMIT 1

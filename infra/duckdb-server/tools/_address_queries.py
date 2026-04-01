@@ -9,6 +9,8 @@ def build_queries(
     cd: str,
     boro_code: str,
     address: str = "",
+    latitude: float | None = None,
+    longitude: float | None = None,
 ) -> list[tuple[str, str, list | None]]:
     """Return list of (name, sql, params) tuples for the 360 report."""
     queries: list[tuple[str, str, list | None]] = []
@@ -407,14 +409,18 @@ def build_queries(
     # SCHOOLS (nearest + district, ~3 queries)
     # ══════════════════════════════════════════════════════════════════════
 
+    # DBN format: district(2) + borough_letter(1) + school(3)
+    # Borough letter: M=Manhattan, X=Bronx, K=Brooklyn, Q=Queens, R=Staten Island
+    boro_letter = {"1": "M", "2": "X", "3": "K", "4": "Q", "5": "R"}.get(boro_code, "")
+
     queries.append(("school_nearest", """
         SELECT DISTINCT school_name, dbn
         FROM lake.education.quality_reports
-        WHERE dbn LIKE ? || '%'
+        WHERE SUBSTR(dbn, 3, 1) = ?
           AND school_name IS NOT NULL
         ORDER BY school_name
         LIMIT 3
-    """, [boro_code]))
+    """, [boro_letter]))
 
     queries.append(("school_ela", """
         SELECT school_name, mean_scale_score,
@@ -422,11 +428,11 @@ def build_queries(
         FROM lake.education.ela_results
         WHERE report_category = 'School'
           AND grade = 'All Grades'
-          AND geographic_subdivision LIKE ? || '%'
+          AND SUBSTR(geographic_subdivision, 3, 1) = ?
           AND year = (SELECT MAX(year) FROM lake.education.ela_results)
         ORDER BY TRY_CAST(level_3_4_1 AS DOUBLE) DESC NULLS LAST
         LIMIT 3
-    """, [boro_code]))
+    """, [boro_letter]))
 
     queries.append(("school_math", """
         SELECT school_name, mean_scale_score,
@@ -434,11 +440,11 @@ def build_queries(
         FROM lake.education.math_results
         WHERE report_category = 'School'
           AND grade = 'All Grades'
-          AND geographic_subdivision LIKE ? || '%'
+          AND SUBSTR(geographic_subdivision, 3, 1) = ?
           AND year = (SELECT MAX(year) FROM lake.education.math_results)
         ORDER BY TRY_CAST(level_3_4_1 AS DOUBLE) DESC NULLS LAST
         LIMIT 3
-    """, [boro_code]))
+    """, [boro_letter]))
 
     # ══════════════════════════════════════════════════════════════════════
     # HEALTH (ZIP/UHF, ~5 queries)
@@ -577,15 +583,16 @@ def build_queries(
     # SERVICES (~3 queries)
     # ══════════════════════════════════════════════════════════════════════
 
-    queries.append(("services_subway", """
-        SELECT station_name, line_name AS line,
-               entrance_latitude, entrance_longitude
-        FROM lake.transportation.mta_entrances
-        WHERE TRY_CAST(entrance_latitude AS DOUBLE) IS NOT NULL
-        ORDER BY ABS(TRY_CAST(entrance_latitude AS DOUBLE) - 40.65)
-               + ABS(TRY_CAST(entrance_longitude AS DOUBLE) - (-73.95))
-        LIMIT 3
-    """, None))
+    if latitude and longitude:
+        queries.append(("services_subway", """
+            SELECT station_name, line_name AS line,
+                   entrance_latitude, entrance_longitude
+            FROM lake.transportation.mta_entrances
+            WHERE TRY_CAST(entrance_latitude AS DOUBLE) IS NOT NULL
+            ORDER BY ABS(TRY_CAST(entrance_latitude AS DOUBLE) - ?)
+                   + ABS(TRY_CAST(entrance_longitude AS DOUBLE) - ?)
+            LIMIT 3
+        """, [latitude, longitude]))
 
     queries.append(("services_food_pantries", """
         SELECT COUNT(*) AS cnt
