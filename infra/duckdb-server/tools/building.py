@@ -48,11 +48,11 @@ _BOROUGH_MAP = {
 }
 
 
-def _normalize_address(raw: str, *, strip_ordinals: bool = True) -> str:
-    """Normalize a street address to match PLUTO format.
+def _normalize_address_for_pad(raw: str) -> str:
+    """Normalize a street address to match PAD (Property Address Directory) format.
 
-    Returns the street part only (no borough/city/state/zip).
-    When strip_ordinals=False, keeps "10TH" as-is (PLUTO is inconsistent).
+    Returns the full normalized address (with house number, no borough/city/state/zip).
+    Always strips ordinal suffixes (5TH -> 5) since PAD is consistent on this.
     """
     s = raw.strip().upper()
     # Strip trailing state/zip (e.g. ", NY 10118")
@@ -64,8 +64,7 @@ def _normalize_address(raw: str, *, strip_ordinals: bool = True) -> str:
     # Strip apartment/unit/floor/suite suffixes
     s = re.sub(r'\s*(APT|UNIT|FL|FLOOR|STE|SUITE|RM|ROOM|#)\s*\S+\s*$', '', s)
     # Strip ordinal suffixes: 5TH -> 5, 3RD -> 3
-    if strip_ordinals:
-        s = re.sub(r'\b(\d+)(?:ST|ND|RD|TH)\b', r'\1', s)
+    s = re.sub(r'\b(\d+)(?:ST|ND|RD|TH)\b', r'\1', s)
     # Expand spelled-out ordinals: FIFTH -> 5
     for word, num in _ORDINAL_MAP.items():
         s = re.sub(rf'\b{word}\b', num, s)
@@ -75,12 +74,27 @@ def _normalize_address(raw: str, *, strip_ordinals: bool = True) -> str:
     return s
 
 
+# Backward-compat alias — address_report.py imports _normalize_address
+_normalize_address = _normalize_address_for_pad
+
+
 def _extract_borough(raw: str) -> str | None:
-    """Extract a PLUTO borocode ('1'-'5') from an address string, or None."""
+    """Extract a borough code ('1'-'5') from an address string, or None."""
     s = raw.strip().upper()
     for boro in sorted(_BOROUGH_MAP.keys(), key=len, reverse=True):
         if re.search(rf'\b{re.escape(boro)}\b', s):
             return _BOROUGH_MAP[boro]
+    return None
+
+
+def _extract_house_number(raw: str) -> int | None:
+    """Extract the leading house number from an address string, or None.
+
+    Handles hyphenated Queens-style addresses (45-17 21st St -> 45).
+    """
+    m = re.match(r'^\s*(\d+)', raw.strip())
+    if m:
+        return int(m.group(1))
     return None
 
 # ---------------------------------------------------------------------------
@@ -89,74 +103,70 @@ def _extract_borough(raw: str) -> str | None:
 
 
 def _resolve_bbl(pool, identifier: str) -> str:
-    """Resolve an address string to a 10-digit BBL via PLUTO lookup.
+    """Resolve an address string to a 10-digit BBL via PAD lookup.
 
-    Three-tier search:
-    1. Exact prefix match (ordinals stripped): "200 EAST 10 STREET%"
-    2. Exact prefix match (ordinals kept): "200 EAST 10TH STREET%"
-    3. Nearest lot on same street (when exact house number doesn't exist)
+    Two-tier search against foundation.address_lookup:
+    1. Exact house number + street prefix match (with borough filter if available)
+    2. Nearest lot on same street (fallback)
     """
-    search = _normalize_address(identifier, strip_ordinals=True)
-    search_ord = _normalize_address(identifier, strip_ordinals=False)
+    street_norm = _normalize_address_for_pad(identifier)
     boro = _extract_borough(identifier)
+    house_num = _extract_house_number(identifier)
 
-    # Both search variants to try (ordinals stripped, then ordinals kept)
-    searches = [search]
-    if search_ord != search:
-        searches.append(search_ord)
+    # Extract street part (everything after house number)
+    street_part = re.sub(r'^\d+[\-\d]*\s*', '', street_norm).strip()
 
-    try:
-        for s in searches:
-            # Try with borough filter first (more precise)
-            if boro:
-                _cols, _rows = execute(pool, """
-                    SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
-                    FROM lake.city_government.pluto
-                    WHERE borocode = ? AND UPPER(address) LIKE ? || '%'
-                    ORDER BY assesstot DESC NULLS LAST LIMIT 1
-                """, [boro, s])
-                if _rows:
-                    return str(_rows[0][0]).rstrip('.')
-
-            # Without borough filter
-            _cols, _rows = execute(pool, """
-                SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
-                FROM lake.city_government.pluto
-                WHERE UPPER(address) LIKE ? || '%'
-                ORDER BY assesstot DESC NULLS LAST LIMIT 1
-            """, [s])
-            if _rows:
-                return str(_rows[0][0]).rstrip('.')
-
-        # Tier 3: nearest lot on the same street (try both ordinal forms)
-        for s in searches:
-            street_match = re.match(r'^\d+[\-\d]*\s+(.+)$', s)
-            house_match = re.match(r'^(\d+)', s)
-            if street_match and house_match:
-                street_name = street_match.group(1)
-                house_num = int(house_match.group(1))
-                boro_filter = "AND borocode = ?" if boro else ""
-                params = ['% ' + street_name]
-                if boro:
-                    params.append(boro)
-                _cols, _rows = execute(pool, f"""
-                    SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
-                    FROM lake.city_government.pluto
-                    WHERE UPPER(address) LIKE ? {boro_filter}
-                    ORDER BY ABS(TRY_CAST(REGEXP_EXTRACT(address, '^(\\d+)', 1) AS INT) - {house_num}) NULLS LAST
-                    LIMIT 1
-                """, params)
-                if _rows:
-                    return str(_rows[0][0]).rstrip('.')
-
+    if not street_part:
         raise ToolError(
-            f"No building found for address '{identifier}'. "
-            "Try a simpler address like '350 5th Ave' or include borough."
+            f"Could not parse street name from '{identifier}'. "
+            "Try a format like '350 5th Ave, Manhattan'."
         )
-    except ToolError:
-        raise
-    except Exception:
-        raise ToolError(f"Could not resolve address '{identifier}'.")
+
+    # Tier 1: exact house number + street prefix
+    if house_num is not None:
+        boro_clause = "AND boro_code = ?" if boro else ""
+
+        _cols, _rows = execute(pool, f"""
+            SELECT bbl FROM lake.foundation.address_lookup
+            WHERE house_number <= ? AND house_number_high >= ?
+              AND street_std LIKE ?
+              AND addr_type IN ('', 'V')
+              {boro_clause}
+            LIMIT 1
+        """, [house_num, house_num, street_part + "%"] + ([boro] if boro else []))
+        if _rows:
+            return str(_rows[0][0])
+
+        # Tier 1b: exact house_number match (no range)
+        _cols, _rows = execute(pool, f"""
+            SELECT bbl FROM lake.foundation.address_lookup
+            WHERE house_number = ?
+              AND street_std LIKE ?
+              AND addr_type IN ('', 'V')
+              {boro_clause}
+            LIMIT 1
+        """, [house_num, street_part + "%"] + ([boro] if boro else []))
+        if _rows:
+            return str(_rows[0][0])
+
+    # Tier 2: nearest lot on the same street
+    if house_num is not None and street_part:
+        boro_clause = "AND boro_code = ?" if boro else ""
+        _cols, _rows = execute(pool, f"""
+            SELECT bbl FROM lake.foundation.address_lookup
+            WHERE street_std LIKE ?
+              AND addr_type IN ('', 'V')
+              {boro_clause}
+            ORDER BY ABS(house_number - ?)
+            LIMIT 1
+        """, [street_part + "%"] + ([boro] if boro else []) + [house_num])
+        if _rows:
+            return str(_rows[0][0])
+
+    raise ToolError(
+        f"No building found for address '{identifier}'. "
+        "Try a simpler address like '350 5th Ave' or include borough."
+    )
 
 # ---------------------------------------------------------------------------
 # SQL constants — building profile
