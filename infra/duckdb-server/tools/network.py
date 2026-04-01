@@ -3,7 +3,6 @@ filter semantics.  type="all" (the default) fans out across every edge
 type and returns everything found.  A specific type narrows to one
 relationship family."""
 
-import re
 import time
 from typing import Annotated, Literal
 
@@ -16,13 +15,13 @@ from shared.db import execute, safe_query, fill_placeholders
 from shared.formatting import make_result, format_text_table
 from shared.graph import require_graph
 from shared.lance import vector_expand_names
-from shared.types import MAX_LLM_ROWS, LANCE_DIR
+from shared.types import MAX_LLM_ROWS, BBL_PATTERN
 
 # ---------------------------------------------------------------------------
 # Input patterns
 # ---------------------------------------------------------------------------
 
-_BBL_PATTERN = re.compile(r"^\d{10}$")
+_BBL_PATTERN = BBL_PATTERN
 
 # ---------------------------------------------------------------------------
 # Borough mapping (shared across several sub-functions)

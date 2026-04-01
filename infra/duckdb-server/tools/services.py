@@ -12,12 +12,13 @@ from pydantic import Field
 
 from shared.db import safe_query
 from shared.formatting import make_result
+from shared.types import ZIP_PATTERN
 
 # ---------------------------------------------------------------------------
 # Input patterns
 # ---------------------------------------------------------------------------
 
-_ZIP_PATTERN = re.compile(r"^\d{5}$")
+_ZIP_PATTERN = ZIP_PATTERN
 
 # ---------------------------------------------------------------------------
 # SQL constants — DYCD programs (food, childcare, youth)

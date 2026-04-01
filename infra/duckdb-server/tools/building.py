@@ -2,6 +2,7 @@
 building_story, building_context, block_timeline, nyc_twins, similar_buildings,
 enforcement_web, property_history, and flipper_detector into one dispatch."""
 
+import datetime
 import re
 import time
 from typing import Annotated, Literal
@@ -13,13 +14,13 @@ from pydantic import Field
 
 from shared.db import execute, safe_query, fill_placeholders
 from shared.formatting import make_result, format_text_table
-from shared.types import MAX_LLM_ROWS, LANCE_DIR
+from shared.types import MAX_LLM_ROWS, BBL_PATTERN
 
 # ---------------------------------------------------------------------------
 # Input patterns
 # ---------------------------------------------------------------------------
 
-_BBL_PATTERN = re.compile(r"^\d{10}$")
+_BBL_PATTERN = BBL_PATTERN  # alias for backward compat
 
 # ---------------------------------------------------------------------------
 # Address normalization helpers
@@ -645,7 +646,7 @@ def _view_story(pool, bbl: str) -> ToolResult:
     block = str(int(bbl[1:6]))
     lot = str(int(bbl[6:10]))
 
-    current_year = 2026
+    current_year = datetime.date.today().year
     age = current_year - year if year > 1800 else None
     era_name, era_desc = "an unknown era", ""
     for yr_range, (name, desc) in _NYC_ERAS.items():
@@ -926,42 +927,34 @@ def _view_block(pool, bbl: str) -> ToolResult:
     )
 
 
-def _view_similar(pool, bbl: str) -> ToolResult:
-    """Find similar buildings via Lance vector similarity + PLUTO twins."""
+def _view_similar(pool, bbl: str, ctx=None) -> ToolResult:
+    """Find similar buildings via vector similarity + PLUTO twins."""
     t0 = time.time()
 
-    # Try Lance vector search first
+    # Try hnsw_acorn vector search first
+    emb_conn = ctx.lifespan_context.get("emb_conn") if hasattr(ctx, 'lifespan_context') else None
     try:
-        with pool.cursor() as cur:
-            target_rows = cur.execute(
-                f"SELECT features FROM '{LANCE_DIR}/building_vectors.lance' WHERE bbl = '{bbl}'"
-            ).fetchall()
+        if not emb_conn:
+            raise Exception("No embedding DB")
+        target_rows = emb_conn.execute(
+            "SELECT features FROM building_vectors WHERE bbl = ?", [bbl]
+        ).fetchall()
 
         if target_rows:
             target_vec = target_rows[0][0]
-            vec_literal = "[" + ",".join(f"{v:.6g}" for v in target_vec) + "]::FLOAT[]"
             limit = 10
-            knn_sql = f"""
-SELECT
-    bv.bbl,
-    gb.housenumber,
-    gb.streetname,
-    gb.zip,
-    gb.stories,
-    gb.units,
-    gb.year_built,
-    gb.borough,
-    bv._distance AS distance
-FROM lance_vector_search('{LANCE_DIR}/building_vectors.lance', 'features', {vec_literal}, k={limit+1}) bv
-LEFT JOIN main.graph_buildings gb ON gb.bbl = bv.bbl
-WHERE bv.bbl != '{bbl}'
-ORDER BY bv._distance ASC
-LIMIT {limit}
-"""
-            with pool.cursor() as cur:
-                knn_result = cur.execute(knn_sql)
-                result = knn_result.fetchall()
-                cols = [d[0] for d in knn_result.description]
+            knn_result = emb_conn.execute(
+                "SELECT bv.bbl, gb.housenumber, gb.streetname, gb.zip, "
+                "gb.stories, gb.units, gb.year_built, gb.borough, "
+                "array_distance(bv.features, ?::FLOAT[]) AS distance "
+                "FROM building_vectors bv "
+                "LEFT JOIN main.graph_buildings gb ON gb.bbl = bv.bbl "
+                "WHERE bv.bbl != ? "
+                "ORDER BY distance LIMIT ?",
+                [list(target_vec), bbl, limit],
+            )
+            result = knn_result.fetchall()
+            cols = [d[0] for d in knn_result.description]
 
             elapsed = round((time.time() - t0) * 1000)
 
@@ -1803,7 +1796,7 @@ def _view_building_context(pool, bbl: str) -> ToolResult:
                 lines.append(f"  Newest building in ZIP: {newest}")
 
     # Perspective
-    current_year = 2026
+    current_year = datetime.date.today().year
     age = current_year - year
     lines.append(f"\nPERSPECTIVE")
     lines.append(f"  Your building has been standing for {age} years.")
@@ -1886,4 +1879,9 @@ def building(
     if not handler:
         raise ToolError(f"Unknown view '{view}'. Choose from: full, story, block, similar, enforcement, history, flippers")
 
+    # Pass ctx for views that need it (e.g. _view_similar)
+    import inspect
+    sig = inspect.signature(handler)
+    if "ctx" in sig.parameters:
+        return handler(pool, bbl, ctx=ctx)
     return handler(pool, bbl)

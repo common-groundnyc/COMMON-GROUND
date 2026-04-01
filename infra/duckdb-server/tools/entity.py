@@ -20,10 +20,19 @@ from pydantic import Field
 from shared.db import execute, safe_query
 from shared.formatting import format_text_table
 from shared.lance import vector_expand_names, lance_route_entity
-from shared.types import LANCE_DIR, LANCE_NAME_DISTANCE, LANCE_TIGHT_DISTANCE
 
-from entity import phonetic_search_sql, fuzzy_name_sql
+from entity import phonetic_search_sql
 
+# ---------------------------------------------------------------------------
+# Tables always queried during entity xray (even when Lance routing is active)
+# ---------------------------------------------------------------------------
+
+_ALWAYS_QUERY = frozenset({
+    "nys_corporations", "issued_licenses", "restaurant_inspections",
+    "campaign_expenditures", "dcwp_charges",
+    "graph_dob_owners", "graph_doing_business", "graph_epa_facilities",
+    "marriage_licenses_1950_2017", "nys_lobbyist_registration",
+})
 
 # ---------------------------------------------------------------------------
 # SQL constants — Due Diligence
@@ -323,13 +332,6 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
 
     lance_matched = set(lance_route.get("matched_names", []))
     extra_names = extra_names | lance_matched
-
-    _ALWAYS_QUERY = {
-        "nys_corporations", "issued_licenses", "restaurant_inspections",
-        "campaign_expenditures", "dcwp_charges",
-        "graph_dob_owners", "graph_doing_business", "graph_epa_facilities",
-        "marriage_licenses_1950_2017", "nys_lobbyist_registration",
-    }
 
     def _should_query(source_table: str) -> bool:
         if source_table in _ALWAYS_QUERY:

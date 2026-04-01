@@ -15,8 +15,7 @@ from shared.db import execute, CursorPool
 from shared.formatting import make_result
 from shared.types import (
     MAX_QUERY_ROWS,
-    LANCE_CATALOG_DISTANCE,
-    LANCE_DIR,
+    VS_CATALOG_DISTANCE,
 )
 from shared.validation import validate_sql, validate_admin_sql
 
@@ -235,7 +234,7 @@ def _admin(pool: CursorPool, sql: str, ctx: Context) -> str:
             raise ToolError(f"DDL error: {e}. Only CREATE OR REPLACE VIEW is allowed.")
 
 
-def _catalog(pool: CursorPool, keyword: str, catalog: dict, embed_fn=None) -> ToolResult:
+def _catalog(pool: CursorPool, keyword: str, catalog: dict, embed_fn=None, ctx=None) -> ToolResult:
     """Search the catalog by keyword with fuzzy and semantic matching."""
     if not keyword.strip():
         lines = []
@@ -258,7 +257,7 @@ def _catalog(pool: CursorPool, keyword: str, catalog: dict, embed_fn=None) -> To
         rows = [r for r in rows if r[schema_idx] not in _HIDDEN_SCHEMAS]
 
     # Semantic fallback: when rapidfuzz finds < 3 tables, try vector similarity
-    semantic_note = _semantic_fallback(pool, kw, len(rows), embed_fn)
+    semantic_note = _semantic_fallback(pool, kw, len(rows), embed_fn, ctx=ctx)
 
     if not rows and semantic_note:
         return ToolResult(content=f"No exact matches for '{kw}', but found related tables:{semantic_note}")
@@ -275,24 +274,23 @@ def _catalog(pool: CursorPool, keyword: str, catalog: dict, embed_fn=None) -> To
     return make_result(summary, cols, rows)
 
 
-def _semantic_fallback(pool: CursorPool, kw: str, match_count: int, embed_fn=None) -> str:
+def _semantic_fallback(pool: CursorPool, kw: str, match_count: int, embed_fn=None, ctx=None) -> str:
     """Try Lance vector search on catalog descriptions when fuzzy matches are sparse."""
     if match_count >= 3 or embed_fn is None:
         return ""
     try:
-        from embedder import vec_to_sql
-
+        emb_conn = ctx.lifespan_context.get("emb_conn") if hasattr(ctx, 'lifespan_context') else None
+        if not emb_conn:
+            return ""
         query_vec = embed_fn(kw)
-        vec_literal = vec_to_sql(query_vec)
-        sem_sql = f"""
-            SELECT schema_name, table_name, description, _distance AS distance
-            FROM lance_vector_search('{LANCE_DIR}/catalog_embeddings.lance', 'embedding', {vec_literal}, k=5)
-            WHERE table_name != '__schema__'
-            ORDER BY _distance ASC
-        """
-        with pool.cursor() as cur:
-            sem_rows = cur.execute(sem_sql).fetchall()
-        good_matches = [(s, t, d) for s, t, d, dist in sem_rows if dist < LANCE_CATALOG_DISTANCE]
+        sem_rows = emb_conn.execute(
+            "SELECT schema_name, table_name, description, "
+            "array_cosine_distance(embedding, ?::FLOAT[]) AS distance "
+            "FROM catalog_embeddings WHERE table_name != '__schema__' "
+            "ORDER BY distance LIMIT 5",
+            [query_vec.tolist()],
+        ).fetchall()
+        good_matches = [(s, t, d) for s, t, d, dist in sem_rows if dist < VS_CATALOG_DISTANCE]
         if good_matches:
             note = "\n\nSemantic matches (by description similarity):\n"
             for s, t, d in good_matches:
@@ -484,7 +482,7 @@ def query(
         return _admin(pool, input, ctx)
     elif mode == "catalog":
         embed_fn = ctx.lifespan_context.get("embed_fn")
-        return _catalog(pool, input, catalog, embed_fn)
+        return _catalog(pool, input, catalog, embed_fn, ctx=ctx)
     elif mode == "schemas":
         return _schemas(catalog)
     elif mode == "tables":

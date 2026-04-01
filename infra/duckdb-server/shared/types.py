@@ -30,14 +30,21 @@ READONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentH
 ADMIN = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True)
 
 # ---------------------------------------------------------------------------
-# Lance vector search constants
+# Vector search constants (hnsw_acorn — cosine distance thresholds)
 # ---------------------------------------------------------------------------
 
+EMBEDDINGS_DB = "/data/common-ground/emb.duckdb"
+# Cosine distance = 1 - cosine_similarity. Lower = more similar.
+VS_NAME_DISTANCE = 0.21       # ~79% cosine — allows spelling variants
+VS_TIGHT_DISTANCE = 0.12      # ~88% cosine — higher-confidence cross-domain
+VS_CATALOG_DISTANCE = 0.58    # loose — table/schema discovery
+VS_CATEGORY_SIM = 0.5         # cosine similarity for resource categories
+
+# Legacy aliases for gradual migration
 LANCE_DIR = "/data/common-ground/lance"
-LANCE_NAME_DISTANCE = 0.25     # ~79% cosine — allows spelling variants
-LANCE_TIGHT_DISTANCE = 0.18    # ~88% cosine — higher-confidence cross-domain
-LANCE_CATALOG_DISTANCE = 0.42  # loose — table/schema discovery
-LANCE_CATEGORY_SIM = 0.5       # cosine similarity for resource categories
+LANCE_NAME_DISTANCE = VS_NAME_DISTANCE
+LANCE_TIGHT_DISTANCE = VS_TIGHT_DISTANCE
+LANCE_CATALOG_DISTANCE = VS_CATALOG_DISTANCE
 
 # ---------------------------------------------------------------------------
 # SQL safety regex patterns
@@ -68,3 +75,11 @@ RECONNECT_ERRORS = ("HTTP 403", "HTTP 400", "HTTP 301", "Bad Request", "s3://duc
 # ---------------------------------------------------------------------------
 
 GRAPH_CACHE_DIR = "/data/common-ground/graph-cache"
+
+# ---------------------------------------------------------------------------
+# Compiled regex patterns (shared across tools)
+# ---------------------------------------------------------------------------
+
+ZIP_PATTERN = re.compile(r"^\d{5}$")
+COORDS_PATTERN = re.compile(r"^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$")
+BBL_PATTERN = re.compile(r"^\d{10}$")

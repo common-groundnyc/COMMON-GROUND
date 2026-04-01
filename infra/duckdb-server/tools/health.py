@@ -19,14 +19,14 @@ from pydantic import Field
 
 from shared.db import execute, safe_query
 from shared.formatting import make_result, format_text_table
-from shared.types import MAX_LLM_ROWS
+from shared.types import MAX_LLM_ROWS, ZIP_PATTERN, COORDS_PATTERN
 
 # ---------------------------------------------------------------------------
 # Input patterns
 # ---------------------------------------------------------------------------
 
-_ZIP_PATTERN = re.compile(r"^\d{5}$")
-_COORDS_PATTERN = re.compile(r"^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$")
+_ZIP_PATTERN = ZIP_PATTERN
+_COORDS_PATTERN = COORDS_PATTERN
 
 # ---------------------------------------------------------------------------
 # ZIP resolution helpers

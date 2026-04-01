@@ -22,14 +22,14 @@ from pydantic import Field
 
 from shared.db import execute, safe_query
 from shared.formatting import make_result, format_text_table
-from shared.types import MAX_LLM_ROWS
+from shared.types import MAX_LLM_ROWS, ZIP_PATTERN, COORDS_PATTERN
 
 # ---------------------------------------------------------------------------
 # Input patterns
 # ---------------------------------------------------------------------------
 
-_ZIP_PATTERN = re.compile(r"^\d{5}$")
-_COORDS_PATTERN = re.compile(r"^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$")
+_ZIP_PATTERN = ZIP_PATTERN
+_COORDS_PATTERN = COORDS_PATTERN
 
 
 # ---------------------------------------------------------------------------
@@ -649,35 +649,27 @@ GROUP BY industry ORDER BY cnt DESC LIMIT 8
 # ---------------------------------------------------------------------------
 
 def _borough_from_zip(zipcode: str) -> tuple[str, str]:
-    """Return (borough_name, boro_code) from a ZIP prefix."""
-    pfx = zipcode[:3]
-    if pfx in ("100", "101", "102"):
+    """Return (borough_name, boro_code) from numeric ZIP range."""
+    z = int(zipcode)
+    if 10001 <= z <= 10282:
         return "Manhattan", "1"
-    elif pfx in ("104", "105"):
+    elif 10451 <= z <= 10475:
         return "Bronx", "2"
-    elif pfx in ("112", "111", "110", "113", "114"):
+    elif 11201 <= z <= 11256:
         return "Brooklyn", "3"
-    elif pfx in ("110", "111", "113", "114", "116"):
+    elif (11001 <= z <= 11109) or (11351 <= z <= 11697):
         return "Queens", "4"
-    elif pfx == "103":
+    elif 10301 <= z <= 10314:
         return "Staten Island", "5"
     return "NYC", "1"
 
 
 def _boro_name_from_zip(zipcode: str) -> str:
     """Return friendly borough name for portrait header."""
-    prefix = int(zipcode[:3])
-    if 100 <= prefix <= 102:
-        return "Manhattan"
-    elif prefix == 103:
-        return "Staten Island"
-    elif 104 <= prefix <= 105:
+    borough, _ = _borough_from_zip(zipcode)
+    if borough == "Bronx":
         return "The Bronx"
-    elif prefix == 112:
-        return "Brooklyn"
-    elif 110 <= prefix <= 116:
-        return "Queens"
-    return "NYC"
+    return borough
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ from fastmcp.exceptions import ToolError
 
 from shared.db import execute, safe_query, fill_placeholders
 from shared.formatting import make_result, format_text_table
-from shared.types import MAX_LLM_ROWS
+from shared.types import MAX_LLM_ROWS, ZIP_PATTERN
 
 # ---------------------------------------------------------------------------
 # Input patterns
@@ -19,7 +19,7 @@ from shared.types import MAX_LLM_ROWS
 
 _DBN_PATTERN = re.compile(r"^\d{2}[MXKQR]\d{3}$", re.IGNORECASE)
 _DISTRICT_PATTERN = re.compile(r"^(?:district\s*)?(\d{1,2})$", re.IGNORECASE)
-_ZIP_PATTERN = re.compile(r"^\d{5}$")
+_ZIP_PATTERN = ZIP_PATTERN
 
 # ---------------------------------------------------------------------------
 # SQL — school report
