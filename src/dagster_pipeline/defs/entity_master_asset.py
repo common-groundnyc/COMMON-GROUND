@@ -1,10 +1,7 @@
 """Dagster asset producing lake.foundation.entity_master."""
 
-import re
+import hashlib
 import uuid
-from collections import Counter
-
-ENTITY_NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
 ORG_INDICATORS = (
     "LLC", "L.L.C.", "L.L.C", "CORP", "CORPORATION", "INC", "INCORPORATED",
@@ -28,22 +25,9 @@ def classify_entity_type(name: str | None) -> str:
     return "PERSON"
 
 
-def generate_entity_id(name: str) -> str:
-    """Generate a deterministic UUID for a normalized name."""
-    normalized = re.sub(r"\s+", " ", name.upper().strip())
-    return str(uuid.uuid5(ENTITY_NAMESPACE, normalized))
-
-
-def select_canonical_name(names: list[str]) -> str | None:
-    """Pick the canonical name: most frequent, then longest as tiebreak."""
-    if not names:
-        return None
-    counts = Counter(names)
-    max_count = max(counts.values())
-    candidates = [n for n, c in counts.items() if c == max_count]
-    return max(candidates, key=len)
-
-
-def aggregate_confidence(probabilities: list[float]) -> float:
-    """Aggregate match probabilities into a single confidence score."""
-    return sum(probabilities) / len(probabilities)
+def generate_entity_id(member_unique_ids: list[str]) -> uuid.UUID:
+    """Generate a deterministic UUID from sorted cluster member IDs.
+    Same members in any order always produce the same UUID."""
+    sorted_hashes = sorted(hashlib.md5(m.encode()).hexdigest() for m in member_unique_ids)
+    combined = "|".join(sorted_hashes)
+    return uuid.UUID(hashlib.md5(combined.encode()).hexdigest())
