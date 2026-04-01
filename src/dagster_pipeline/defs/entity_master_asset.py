@@ -1,5 +1,10 @@
 """Dagster asset producing lake.foundation.entity_master."""
 
+import re
+import uuid
+
+ENTITY_NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+
 ORG_INDICATORS = (
     "LLC", "L.L.C.", "L.L.C", "CORP", "CORPORATION", "INC", "INCORPORATED",
     "LTD", "LIMITED", "LP", "L.P.", "LLP", "L.L.P.",
@@ -20,3 +25,9 @@ def classify_entity_type(name: str | None) -> str:
         if indicator in upper:
             return "ORGANIZATION"
     return "PERSON"
+
+
+def generate_entity_id(name: str) -> str:
+    """Generate a deterministic UUID for a normalized name."""
+    normalized = re.sub(r"\s+", " ", name.upper().strip())
+    return str(uuid.uuid5(ENTITY_NAMESPACE, normalized))
