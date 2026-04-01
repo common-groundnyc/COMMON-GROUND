@@ -119,8 +119,17 @@ def test_parse_adr_csv_filters_and_parses(tmp_path):
     csv_file = tmp_path / "bobaadr.txt"
     csv_file.write_text(csv_content)
 
-    rows = parse_adr_csv(str(csv_file))
+    out_file = tmp_path / "adr_clean.csv"
+    row_count = parse_adr_csv(str(csv_file), str(out_file))
+
     # Real (1 WALL ST) + Vanity (68 BROADWAY) = 2 rows, pseudo excluded
+    assert row_count == 2
+    assert out_file.exists()
+
+    import csv as _csv
+    with open(out_file, newline="", encoding="utf-8") as f:
+        rows = list(_csv.DictReader(f))
+
     assert len(rows) == 2
     assert rows[0]["address_std"] == "1 WALL STREET"
     assert rows[1]["address_std"] == "68 BROADWAY"

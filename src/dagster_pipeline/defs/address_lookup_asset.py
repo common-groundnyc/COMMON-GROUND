@@ -3,6 +3,7 @@
 import csv
 import logging
 import os
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -22,6 +23,12 @@ PAD_DOWNLOAD_URL = (
 
 _INCLUDED_ADDR_TYPES = {"", "V"}
 
+_OUTPUT_COLUMNS = [
+    "bbl", "bin", "house_number", "house_number_high",
+    "street_std", "street_code", "boro_code", "zipcode",
+    "addr_type", "address_std",
+]
+
 
 def parse_adr_row(row: dict) -> dict | None:
     """Parse a single PAD ADR row into our lookup schema.
@@ -36,13 +43,18 @@ def parse_adr_row(row: dict) -> dict | None:
     if not lhns or not lhns.isdigit():
         return None
 
+    boro = row.get("boro", "").strip()
+    block_raw = row.get("block", "").strip()
+    lot_raw = row.get("lot", "").strip()
+    if not boro or not block_raw or not lot_raw:
+        return None
+
     hhns = row.get("hhns", "").strip()
     house_number = int(lhns)
     house_number_high = int(hhns) if hhns and hhns.isdigit() else house_number
 
-    boro = row["boro"].strip()
-    block = row["block"].strip().zfill(5)
-    lot = row["lot"].strip().zfill(4)
+    block = block_raw.zfill(5)
+    lot = lot_raw.zfill(4)
     bbl = f"{boro}{block}{lot}"
 
     street_std = row.get("stname", "").strip()
@@ -65,16 +77,20 @@ def parse_adr_row(row: dict) -> dict | None:
     }
 
 
-def parse_adr_csv(csv_path: str) -> list[dict]:
-    """Parse PAD ADR CSV file, returning filtered and cleaned rows."""
-    rows = []
-    with open(csv_path, "r", encoding="latin-1") as f:
-        reader = csv.DictReader(f)
+def parse_adr_csv(csv_path: str, output_path: str) -> int:
+    """Parse PAD ADR CSV, write filtered rows to output_path, return row count."""
+    row_count = 0
+    with open(csv_path, "r", encoding="latin-1") as src, \
+         open(output_path, "w", newline="", encoding="utf-8") as dst:
+        reader = csv.DictReader(src)
+        writer = csv.DictWriter(dst, fieldnames=_OUTPUT_COLUMNS)
+        writer.writeheader()
         for raw in reader:
             parsed = parse_adr_row(raw)
             if parsed is not None:
-                rows.append(parsed)
-    return rows
+                writer.writerow(parsed)
+                row_count += 1
+    return row_count
 
 
 def download_pad_zip(dest_dir: str) -> str:
@@ -121,6 +137,12 @@ def download_pad_zip(dest_dir: str) -> str:
             )
 
         adr_name = adr_names[0]
+
+        # Zip path traversal guard
+        resolved = os.path.realpath(os.path.join(str(dest), adr_name))
+        if not resolved.startswith(str(dest.resolve())):
+            raise RuntimeError(f"Zip slip detected: {adr_name}")
+
         zf.extract(adr_name, dest)
         logger.info("Extracted %s", adr_name)
         return str(dest / adr_name)
@@ -137,75 +159,81 @@ def download_pad_zip(dest_dir: str) -> str:
 )
 def address_lookup(context) -> MaterializeResult:
     """Download PAD, parse ADR CSV, load into lake.foundation.address_lookup."""
-    import tempfile
-
     t0 = time.time()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         context.log.info("Downloading PAD from Socrata...")
         adr_path = download_pad_zip(tmp_dir)
 
-        context.log.info("Parsing ADR CSV...")
-        rows = parse_adr_csv(adr_path)
-        context.log.info("Parsed %d address rows", len(rows))
+        context.log.info("Parsing ADR CSV (streaming to temp file)...")
+        clean_csv_path = os.path.join(tmp_dir, "adr_clean.csv")
+        row_count_parsed = parse_adr_csv(adr_path, clean_csv_path)
+        context.log.info("Parsed %d address rows", row_count_parsed)
 
-    conn = _connect_ducklake()
-    try:
-        conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
-        conn.execute("DROP TABLE IF EXISTS lake.foundation.address_lookup")
+        conn = _connect_ducklake()
+        try:
+            conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
 
-        conn.execute("""
-            CREATE TABLE lake.foundation.address_lookup (
-                bbl              VARCHAR(10),
-                bin              VARCHAR(7),
-                house_number     INT,
-                house_number_high INT,
-                street_std       VARCHAR,
-                street_code      VARCHAR(10),
-                boro_code        VARCHAR(1),
-                zipcode          VARCHAR(5),
-                addr_type        VARCHAR(1),
-                address_std      VARCHAR
-            )
-        """)
-
-        conn.executemany(
-            """INSERT INTO lake.foundation.address_lookup VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )""",
-            [
-                (
-                    r["bbl"], r["bin"], r["house_number"], r["house_number_high"],
-                    r["street_std"], r["street_code"], r["boro_code"],
-                    r["zipcode"], r["addr_type"], r["address_std"],
+            # Write to staging, then atomic rename — avoids partial-table window
+            conn.execute("DROP TABLE IF EXISTS lake.foundation.address_lookup_staging")
+            conn.execute("""
+                CREATE TABLE lake.foundation.address_lookup_staging (
+                    bbl              VARCHAR(10),
+                    bin              VARCHAR(7),
+                    house_number     INT,
+                    house_number_high INT,
+                    street_std       VARCHAR,
+                    street_code      VARCHAR(10),
+                    boro_code        VARCHAR(1),
+                    zipcode          VARCHAR(5),
+                    addr_type        VARCHAR(1),
+                    address_std      VARCHAR
                 )
-                for r in rows
-            ],
-        )
+            """)
 
-        row_count = conn.execute(
-            "SELECT COUNT(*) FROM lake.foundation.address_lookup"
-        ).fetchone()[0]
-        distinct_bbls = conn.execute(
-            "SELECT COUNT(DISTINCT bbl) FROM lake.foundation.address_lookup"
-        ).fetchone()[0]
-        distinct_streets = conn.execute(
-            "SELECT COUNT(DISTINCT street_std) FROM lake.foundation.address_lookup"
-        ).fetchone()[0]
+            conn.execute(
+                """
+                INSERT INTO lake.foundation.address_lookup_staging
+                SELECT
+                    bbl, bin,
+                    house_number::INT,
+                    house_number_high::INT,
+                    street_std, street_code, boro_code,
+                    zipcode, addr_type, address_std
+                FROM read_csv(?, header=true)
+                """,
+                [clean_csv_path],
+            )
 
-        elapsed = time.time() - t0
-        context.log.info(
-            "address_lookup: %s rows, %s BBLs, %s streets in %.1fs",
-            f"{row_count:,}", f"{distinct_bbls:,}", f"{distinct_streets:,}", elapsed,
-        )
+            conn.execute("DROP TABLE IF EXISTS lake.foundation.address_lookup")
+            conn.execute(
+                "ALTER TABLE lake.foundation.address_lookup_staging "
+                "RENAME TO address_lookup"
+            )
 
-        return MaterializeResult(
-            metadata={
-                "row_count": MetadataValue.int(row_count),
-                "distinct_bbls": MetadataValue.int(distinct_bbls),
-                "distinct_streets": MetadataValue.int(distinct_streets),
-                "duration_seconds": MetadataValue.float(elapsed),
-            }
-        )
-    finally:
-        conn.close()
+            row_count = conn.execute(
+                "SELECT COUNT(*) FROM lake.foundation.address_lookup"
+            ).fetchone()[0]
+            distinct_bbls = conn.execute(
+                "SELECT COUNT(DISTINCT bbl) FROM lake.foundation.address_lookup"
+            ).fetchone()[0]
+            distinct_streets = conn.execute(
+                "SELECT COUNT(DISTINCT street_std) FROM lake.foundation.address_lookup"
+            ).fetchone()[0]
+
+            elapsed = time.time() - t0
+            context.log.info(
+                "address_lookup: %s rows, %s BBLs, %s streets in %.1fs",
+                f"{row_count:,}", f"{distinct_bbls:,}", f"{distinct_streets:,}", elapsed,
+            )
+
+            return MaterializeResult(
+                metadata={
+                    "row_count": MetadataValue.int(row_count),
+                    "distinct_bbls": MetadataValue.int(distinct_bbls),
+                    "distinct_streets": MetadataValue.int(distinct_streets),
+                    "duration_seconds": MetadataValue.float(elapsed),
+                }
+            )
+        finally:
+            conn.close()
