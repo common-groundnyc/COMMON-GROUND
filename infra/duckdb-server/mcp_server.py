@@ -1606,20 +1606,23 @@ async def app_lifespan(server):
             # Build query with optional entity_master join
             if has_entity_master:
                 query_template = f"""
-                    SELECT
-                        UPPER(TRIM(ni.last_name)) || ', ' || UPPER(TRIM(ni.first_name)) AS name,
-                        STRING_AGG(DISTINCT ni.source_table, ',' ORDER BY ni.source_table) AS sources,
-                        MAX(em.entity_id) AS entity_id
-                    FROM lake.federal.name_index ni
-                    LEFT JOIN lake.federal.resolved_entities re
-                        ON ni.unique_id = re.unique_id
+                    SELECT dn.name, dn.sources, em.entity_id
+                    FROM (
+                        SELECT
+                            UPPER(TRIM(last_name)) || ', ' || UPPER(TRIM(first_name)) AS name,
+                            UPPER(TRIM(last_name)) AS u_last,
+                            UPPER(TRIM(first_name)) AS u_first,
+                            STRING_AGG(DISTINCT source_table, ',' ORDER BY source_table) AS sources
+                        FROM lake.federal.name_index
+                        WHERE last_name IS NOT NULL AND LENGTH(last_name) >= 2
+                          AND first_name IS NOT NULL AND LENGTH(first_name) >= 1
+                        GROUP BY UPPER(TRIM(last_name)), UPPER(TRIM(first_name))
+                        HAVING COUNT(DISTINCT source_table) >= {{min_tables}}
+                        LIMIT {{chunk}} OFFSET {{offset}}
+                    ) dn
                     LEFT JOIN lake.foundation.entity_master em
-                        ON re.cluster_id = em.cluster_id
-                    WHERE ni.last_name IS NOT NULL AND LENGTH(ni.last_name) >= 2
-                      AND ni.first_name IS NOT NULL AND LENGTH(ni.first_name) >= 1
-                    GROUP BY UPPER(TRIM(ni.last_name)), UPPER(TRIM(ni.first_name))
-                    HAVING COUNT(DISTINCT ni.source_table) >= {{min_tables}}
-                    LIMIT {{chunk}} OFFSET {{offset}}
+                        ON em.canonical_last = dn.u_last
+                        AND em.canonical_first = dn.u_first
                 """
             else:
                 query_template = f"""
