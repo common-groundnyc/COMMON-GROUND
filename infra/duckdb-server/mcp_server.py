@@ -1496,12 +1496,8 @@ async def app_lifespan(server):
     else:
         print("PostHog analytics disabled (no POSTHOG_API_KEY)", flush=True)
 
-    # Explorations use core graph tables (already built)
-    try:
-        conn.execute("SELECT 1 FROM main.graph_owners LIMIT 1")
-        explorations = _build_explorations(conn)
-    except Exception:
-        explorations = []
+    # Explorations — defer to background (avoids contention with extended graph thread)
+    explorations = []
 
     # Percentile tables — build in background to avoid contention with extended graph thread
     percentiles_ready = False
