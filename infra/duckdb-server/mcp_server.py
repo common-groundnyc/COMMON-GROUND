@@ -1496,27 +1496,36 @@ async def app_lifespan(server):
     else:
         print("PostHog analytics disabled (no POSTHOG_API_KEY)", flush=True)
 
-    # Explorations use graph_tables (loaded from cache) not DuckPGQ, so check tables exist
+    # Explorations use core graph tables (already built)
     try:
         conn.execute("SELECT 1 FROM main.graph_owners LIMIT 1")
         explorations = _build_explorations(conn)
     except Exception:
         explorations = []
 
-    # Build percentile ranking tables
+    # Percentile tables — build in background to avoid contention with extended graph thread
     percentiles_ready = False
-    try:
-        build_percentile_tables(conn)
-        print("Percentile tables built (owners + buildings)", flush=True)
-        percentiles_ready = True
-    except Exception as e:
-        print(f"Warning: Percentile table build failed: {e}", flush=True)
 
-    try:
-        build_lake_percentile_tables(conn)
-        print("Lake percentile tables built (restaurants + ZIPs + precincts)", flush=True)
-    except Exception as e:
-        print(f"Warning: Lake percentile tables failed: {e}", flush=True)
+    def _build_percentiles_bg():
+        nonlocal percentiles_ready
+        # Wait for extended graph thread to finish first (avoids DuckDB write contention)
+        if 'extended_graph_thread' in dir():
+            extended_graph_thread.join(timeout=600)
+        try:
+            build_percentile_tables(conn)
+            print("Percentile tables built (owners + buildings)", flush=True)
+            percentiles_ready = True
+        except Exception as e:
+            print(f"Warning: Percentile table build failed: {e}", flush=True)
+        try:
+            build_lake_percentile_tables(conn)
+            print("Lake percentile tables built (restaurants + ZIPs + precincts)", flush=True)
+        except Exception as e:
+            print(f"Warning: Lake percentile tables failed: {e}", flush=True)
+
+    percentile_thread = threading.Thread(target=_build_percentiles_bg, daemon=True)
+    percentile_thread.start()
+    print("Percentile build started in background thread", flush=True)
 
     # --- Vector embeddings for semantic search (hnsw_acorn, persistent DuckDB) ---
     embed_fn = None
