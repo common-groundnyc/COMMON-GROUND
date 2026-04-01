@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /app
 COPY *.py ./
+COPY api/ api/
 COPY middleware/ middleware/
 COPY shared/ shared/
 COPY tools/ tools/
