@@ -127,6 +127,14 @@ def _process_batch(conn, group_values, group_col, batch_num, total_batches, firs
     results = linker.inference.predict(threshold_match_probability=PREDICT_THRESHOLD)
     pred_time = time.time() - t_pred
 
+    # Persist pairwise match probabilities before clustering discards them
+    predict_rel = results.as_duckdbpyrelation()
+    conn.execute("""
+        INSERT INTO pairwise_probabilities_staging
+        SELECT unique_id_l, unique_id_r, match_probability
+        FROM predict_rel
+    """)
+
     # Cluster
     t_clust = time.time()
     clusters = linker.clustering.cluster_pairwise_predictions_at_threshold(
@@ -207,6 +215,15 @@ def resolved_entities(context) -> MaterializeResult:
         total_batches = len(batches)
         context.log.info("Packed into %d batches (target size: %s)", total_batches, f"{BATCH_SIZE:,}")
 
+        # Create staging table for pairwise match probabilities
+        conn.execute("""
+            CREATE OR REPLACE TABLE pairwise_probabilities_staging (
+                unique_id_l BIGINT,
+                unique_id_r BIGINT,
+                match_probability DOUBLE
+            )
+        """)
+
         # Process batches
         cumulative_records = 0
         cumulative_clusters = 0
@@ -249,6 +266,24 @@ def resolved_entities(context) -> MaterializeResult:
             write_time = time.time() - t_write
             context.log.info("DuckLake write completed in %.1fs", write_time)
 
+        # Persist pairwise probabilities to DuckLake
+        prob_count = conn.execute(
+            "SELECT COUNT(*) FROM pairwise_probabilities_staging"
+        ).fetchone()[0]
+        if prob_count > 0:
+            context.log.info(
+                "Writing %s pairwise probabilities to DuckLake...",
+                f"{prob_count:,}",
+            )
+            conn.execute("""
+                CREATE OR REPLACE TABLE lake.federal.pairwise_probabilities AS
+                SELECT * FROM pairwise_probabilities_staging
+            """)
+            context.log.info("Pairwise probabilities persisted.")
+        else:
+            context.log.warning("No pairwise probabilities captured.")
+        conn.execute("DROP TABLE IF EXISTS pairwise_probabilities_staging")
+
         # Final metrics
         elapsed = time.time() - t_start
         multi_record = 0
@@ -261,9 +296,9 @@ def resolved_entities(context) -> MaterializeResult:
             """).fetchone()[0]
 
         context.log.info(
-            "DONE: %s records, %s clusters, %s multi-record matches in %.1f min",
+            "DONE: %s records, %s clusters, %s multi-record matches, %s probability pairs in %.1f min",
             f"{cumulative_records:,}", f"{cumulative_clusters:,}",
-            f"{multi_record:,}", elapsed / 60,
+            f"{multi_record:,}", f"{prob_count:,}", elapsed / 60,
         )
 
         return MaterializeResult(
@@ -271,6 +306,7 @@ def resolved_entities(context) -> MaterializeResult:
                 "total_records": MetadataValue.int(cumulative_records),
                 "total_clusters": MetadataValue.int(cumulative_clusters),
                 "multi_record_matches": MetadataValue.int(multi_record),
+                "pairwise_probabilities": MetadataValue.int(prob_count),
                 "failed_batches": MetadataValue.int(failed_batches),
                 "duration_minutes": MetadataValue.float(elapsed / 60),
                 "batches": MetadataValue.int(total_batches),
