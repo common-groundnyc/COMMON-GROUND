@@ -254,6 +254,64 @@ LIMIT 10
 
 
 # ---------------------------------------------------------------------------
+# Helper: entity_master availability check + lookup
+# ---------------------------------------------------------------------------
+
+def _has_entity_master(pool) -> bool:
+    """Check if lake.foundation.entity_master is available."""
+    try:
+        execute(pool, "SELECT 1 FROM lake.foundation.entity_master LIMIT 1", [])
+        return True
+    except Exception:
+        return False
+
+
+def _lookup_entity_master(pool, cluster_ids: list) -> dict:
+    """Look up entity_master rows for given cluster_ids.
+
+    Joins resolved_entities -> name_index -> entity_master via canonical name match.
+    Returns dict mapping cluster_id -> {entity_id, entity_type, confidence, ...}.
+    Returns empty dict if entity_master unavailable.
+    """
+    if not cluster_ids:
+        return {}
+    try:
+        placeholders = ", ".join(["?"] * len(cluster_ids))
+        cols, rows = execute(pool, f"""
+            SELECT
+                re.cluster_id,
+                em.entity_id,
+                em.canonical_last,
+                em.canonical_first,
+                em.entity_type,
+                em.confidence,
+                em.member_count,
+                em.source_count
+            FROM (
+                SELECT cluster_id,
+                       MODE() WITHIN GROUP (ORDER BY last_name) AS top_last,
+                       MODE() WITHIN GROUP (ORDER BY first_name) AS top_first
+                FROM lake.federal.resolved_entities
+                WHERE cluster_id IN ({placeholders})
+                GROUP BY cluster_id
+            ) re
+            JOIN lake.foundation.entity_master em
+                ON em.canonical_last = re.top_last
+                AND em.canonical_first = re.top_first
+        """, list(cluster_ids))
+        result = {}
+        for r in rows:
+            result[r[0]] = {
+                "entity_id": r[1], "canonical_last": r[2], "canonical_first": r[3],
+                "entity_type": r[4], "confidence": r[5],
+                "member_count": r[6], "source_count": r[7],
+            }
+        return result
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # Helper: resolve Splink name variants
 # ---------------------------------------------------------------------------
 
@@ -1048,8 +1106,9 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                 lines.append(f"  {r[7] or '?'} | {r[6] or '?'} | {groom} (certificate)")
         lines.append("")
 
-    # Splink cluster
+    # Splink cluster + entity_master
     splink_cluster_rows = []
+    entity_info = {}
     if name_variants:
         try:
             variant_last = name_variants[0][0]
@@ -1063,6 +1122,9 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
             cluster_ids = [r[0] for r in cid_rows if r[0] is not None]
 
             if cluster_ids:
+                # Look up entity_master for entity_id and confidence
+                entity_info = _lookup_entity_master(pool, cluster_ids)
+
                 placeholders = ", ".join(["?"] * len(cluster_ids))
                 splink_cols, splink_cluster_rows = execute(pool, f"""
                     SELECT source_table, last_name, first_name,
@@ -1077,7 +1139,14 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
 
     if splink_cluster_rows:
         variant_names = sorted({f"{r[1] or ''} {r[2] or ''}".strip() for r in splink_cluster_rows})
-        lines.append(f"--- SPLINK CLUSTER ({len(splink_cluster_rows)} records, {len(variant_names)} name variants) ---")
+        header = f"--- ENTITY RESOLUTION ({len(splink_cluster_rows)} records, {len(variant_names)} name variants)"
+        if entity_info:
+            first_entity = next(iter(entity_info.values()))
+            header += f" | entity_id={first_entity['entity_id'][:8]}..."
+            header += f" | type={first_entity['entity_type']}"
+            header += f" | confidence={first_entity['confidence']:.2f}"
+        header += " ---"
+        lines.append(header)
         lines.append(f"  Name variants: {', '.join(variant_names[:10])}")
         current_table = None
         for r in splink_cluster_rows:
@@ -1086,7 +1155,9 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                 current_table = table
                 lines.append(f"  [{table}]")
             loc = f"{r[3] or ''} {r[4] or ''}".strip() or "?"
-            lines.append(f"    {r[1] or ''}, {r[2] or ''} | {loc} | cluster={r[5]}")
+            em = entity_info.get(r[5], {})
+            eid_tag = f" | entity={em['entity_id'][:8]}..." if em.get("entity_id") else ""
+            lines.append(f"    {r[1] or ''}, {r[2] or ''} | {loc}{eid_tag}")
         lines.append("")
 
     # Phonetic cross-reference
@@ -1155,8 +1226,10 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                 + [{"first_name": r[0], "last_name": r[2], "county": r[6], "year": r[7],
                     "source": "certificates_1866_1937"} for r in hist_marriage_rows],
             "splink_cluster": [{"source_table": r[0], "last_name": r[1], "first_name": r[2],
-                                "city": r[3], "zip": r[4], "cluster_id": r[5]}
+                                "city": r[3], "zip": r[4], "cluster_id": r[5],
+                                **(entity_info.get(r[5], {}))}
                                for r in splink_cluster_rows],
+            "entity_master": entity_info if entity_info else None,
             "name_variants": [{"last_name": ln, "first_name": fn} for ln, fn in name_variants],
             "phonetic_matches": phonetic_matches,
         },
@@ -1735,19 +1808,35 @@ def _top_crossrefs(name: str, pool, ctx) -> ToolResult:
                 msg += f" and last name starting with '{prefix}'"
             return ToolResult(content=msg + ".")
 
-        lines = [f"# Top Cross-Referenced People ({min_tables}+ tables)"]
+        # Enrich with entity_master data
+        cluster_ids = [r[0] for r in rows if r[0] is not None]
+        em_lookup = _lookup_entity_master(pool, cluster_ids)
+
+        lines = [f"# Top Cross-Referenced Entities ({min_tables}+ tables)"]
         if prefix:
             lines[0] += f" — last name '{prefix}*'"
         lines.append("")
-        lines.append("| Last Name | First Name | Tables | Records | Source Tables |")
-        lines.append("|---|---|---|---|---|")
+
+        if em_lookup:
+            lines.append("| Last Name | First Name | Type | Confidence | Tables | Records | Source Tables |")
+            lines.append("|---|---|---|---|---|---|---|")
+        else:
+            lines.append("| Last Name | First Name | Tables | Records | Source Tables |")
+            lines.append("|---|---|---|---|---|")
+
         for r in rows:
             tables_str = ", ".join(r[5][:8]) if r[5] else ""
             if r[5] and len(r[5]) > 8:
                 tables_str += f" (+{len(r[5]) - 8})"
-            lines.append(f"| {r[1]} | {r[2]} | {r[3]} | {r[4]} | {tables_str} |")
+            em = em_lookup.get(r[0], {})
+            if em_lookup:
+                etype = em.get("entity_type", "?")
+                conf = f"{em['confidence']:.2f}" if em.get("confidence") is not None else "?"
+                lines.append(f"| {r[1]} | {r[2]} | {etype} | {conf} | {r[3]} | {r[4]} | {tables_str} |")
+            else:
+                lines.append(f"| {r[1]} | {r[2]} | {r[3]} | {r[4]} | {tables_str} |")
 
-        lines.append(f"\nTotal: {len(rows)} people shown")
+        lines.append(f"\nTotal: {len(rows)} entities shown")
         lines.append(f"({elapsed}ms)")
 
         return ToolResult(
@@ -1756,7 +1845,8 @@ def _top_crossrefs(name: str, pool, ctx) -> ToolResult:
                 "people": [
                     {"cluster_id": r[0], "last_name": r[1], "first_name": r[2],
                      "table_count": r[3], "total_records": r[4],
-                     "tables": r[5] if r[5] else []}
+                     "tables": r[5] if r[5] else [],
+                     **(em_lookup.get(r[0], {}))}
                     for r in rows
                 ],
             },
