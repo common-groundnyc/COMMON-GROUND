@@ -2,6 +2,7 @@
 
 import re
 import uuid
+from collections import Counter
 
 ENTITY_NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
@@ -31,3 +32,18 @@ def generate_entity_id(name: str) -> str:
     """Generate a deterministic UUID for a normalized name."""
     normalized = re.sub(r"\s+", " ", name.upper().strip())
     return str(uuid.uuid5(ENTITY_NAMESPACE, normalized))
+
+
+def select_canonical_name(names: list[str]) -> str | None:
+    """Pick the canonical name: most frequent, then longest as tiebreak."""
+    if not names:
+        return None
+    counts = Counter(names)
+    max_count = max(counts.values())
+    candidates = [n for n, c in counts.items() if c == max_count]
+    return max(candidates, key=len)
+
+
+def aggregate_confidence(probabilities: list[float]) -> float:
+    """Aggregate match probabilities into a single confidence score."""
+    return sum(probabilities) / len(probabilities)

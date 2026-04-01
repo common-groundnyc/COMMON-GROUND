@@ -1,5 +1,10 @@
 import pytest
-from dagster_pipeline.defs.entity_master_asset import classify_entity_type, generate_entity_id
+from dagster_pipeline.defs.entity_master_asset import (
+    classify_entity_type,
+    generate_entity_id,
+    select_canonical_name,
+    aggregate_confidence,
+)
 
 
 @pytest.mark.parametrize("name,expected", [
@@ -40,3 +45,30 @@ class TestGenerateEntityId:
     def test_different_names_differ(self):
         """Different names produce different IDs."""
         assert generate_entity_id("JOHN SMITH") != generate_entity_id("JANE DOE")
+
+
+class TestSelectCanonicalName:
+    def test_picks_most_frequent(self):
+        names = ["JOHN SMITH", "JOHN SMITH", "J SMITH", "JOHN A SMITH"]
+        assert select_canonical_name(names) == "JOHN SMITH"
+
+    def test_tiebreak_longest(self):
+        """When frequency ties, pick the longest name."""
+        names = ["J SMITH", "JOHN SMITH"]
+        assert select_canonical_name(names) == "JOHN SMITH"
+
+    def test_single_name(self):
+        assert select_canonical_name(["JANE DOE"]) == "JANE DOE"
+
+    def test_empty_list(self):
+        assert select_canonical_name([]) is None
+
+
+class TestAggregateConfidence:
+    def test_average_probabilities(self):
+        probs = [0.9, 0.8, 0.95]
+        result = aggregate_confidence(probs)
+        assert round(result, 4) == 0.8833
+
+    def test_single_probability(self):
+        assert aggregate_confidence([0.75]) == 0.75
