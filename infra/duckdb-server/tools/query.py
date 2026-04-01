@@ -5,6 +5,7 @@ import os
 import re
 import time
 from typing import Annotated, Literal
+from urllib.parse import urlencode
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -18,6 +19,20 @@ from shared.types import (
     VS_CATALOG_DISTANCE,
 )
 from shared.validation import validate_sql, validate_admin_sql
+
+# ---------------------------------------------------------------------------
+# Explore link helper
+# ---------------------------------------------------------------------------
+
+
+def explore_link(table: str, filters: dict | None = None) -> str:
+    """Generate a common-ground.nyc/explore URL with pre-applied filters."""
+    params = {"table": table}
+    if filters:
+        params.update(filters)
+    qs = urlencode({k: v for k, v in params.items() if v})
+    return f"https://common-ground.nyc/explore?{qs}"
+
 
 # ---------------------------------------------------------------------------
 # Schema metadata (duplicated from mcp_server.py — shared source of truth)
