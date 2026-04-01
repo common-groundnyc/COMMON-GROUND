@@ -134,34 +134,37 @@ def mock_lake():
 
 def test_build_entity_master_produces_rows(mock_lake):
     result = build_entity_master(mock_lake, table_prefix="lake__federal__", output_table="entity_master_out")
-    rows = mock_lake.execute("SELECT * FROM entity_master_out ORDER BY member_count DESC").fetchall()
+    assert result == 2
+    rows = mock_lake.execute("SELECT * FROM entity_master_out").fetchall()
     assert len(rows) == 2
 
 
 def test_build_entity_master_cluster_person(mock_lake):
     build_entity_master(mock_lake, table_prefix="lake__federal__", output_table="entity_master_out")
-    row = mock_lake.execute(
-        "SELECT * FROM entity_master_out WHERE member_count = 3"
-    ).fetchone()
-    # columns: entity_id, canonical_last, canonical_first, entity_type, confidence, member_count, source_count
+    row = mock_lake.execute("""
+        SELECT entity_id, canonical_last, canonical_first, entity_type,
+               confidence, record_count, source_count
+        FROM entity_master_out WHERE record_count = 3
+    """).fetchone()
     assert row is not None
     assert len(str(row[0])) == 36  # entity_id is UUID
     assert row[1] == "SMITH"       # canonical_last
     assert row[2] == "JOHN"        # canonical_first
     assert row[3] == "PERSON"      # entity_type
     assert row[4] > 0              # confidence
-    assert row[5] == 3             # member_count
+    assert row[5] == 3             # record_count
     assert row[6] == 3             # source_count (3 distinct sources)
 
 
 def test_build_entity_master_cluster_org(mock_lake):
     build_entity_master(mock_lake, table_prefix="lake__federal__", output_table="entity_master_out")
-    row = mock_lake.execute(
-        "SELECT * FROM entity_master_out WHERE member_count = 1"
-    ).fetchone()
+    row = mock_lake.execute("""
+        SELECT entity_type, confidence
+        FROM entity_master_out WHERE record_count = 1
+    """).fetchone()
     assert row is not None
-    assert row[3] == "ORGANIZATION"  # entity_type
-    assert row[4] == 1.0            # confidence = 1.0 for single member (no pairs)
+    assert row[0] == "ORGANIZATION"  # entity_type
+    assert row[1] == 1.0            # confidence = 1.0 for single member (no pairs)
 
 
 def test_build_entity_master_deterministic_ids(mock_lake):
@@ -170,3 +173,17 @@ def test_build_entity_master_deterministic_ids(mock_lake):
     ids1 = mock_lake.execute("SELECT entity_id FROM em1 ORDER BY entity_id").fetchall()
     ids2 = mock_lake.execute("SELECT entity_id FROM em2 ORDER BY entity_id").fetchall()
     assert ids1 == ids2
+
+
+def test_build_entity_master_has_expected_columns(mock_lake):
+    build_entity_master(mock_lake, table_prefix="lake__federal__", output_table="entity_master_out")
+    cols = {r[0] for r in mock_lake.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'entity_master_out'"
+    ).fetchall()}
+    expected = {
+        "entity_id", "cluster_id", "canonical_last", "canonical_first",
+        "name_variants", "entity_type", "confidence", "min_confidence",
+        "match_pair_count", "source_count", "record_count", "source_tables",
+        "member_ids",
+    }
+    assert expected == cols

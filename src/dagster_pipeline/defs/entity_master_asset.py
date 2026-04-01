@@ -1,15 +1,14 @@
 """Dagster asset producing lake.foundation.entity_master."""
 
 import hashlib
-import logging
 import time
 import uuid
 from collections import Counter
 
-import duckdb
+import dagster
 from dagster import AssetKey, MaterializeResult, MetadataValue, asset
 
-logger = logging.getLogger(__name__)
+from dagster_pipeline.resources.ducklake import DuckLakeResource
 
 ORG_INDICATORS = (
     "LLC", "L.L.C.", "L.L.C", "CORP", "CORPORATION", "INC", "INCORPORATED",
@@ -20,6 +19,122 @@ ORG_INDICATORS = (
     "CITY OF", "STATE OF", "COUNTY OF", "DEPT OF", "DEPARTMENT",
     "AUTHORITY", "COMMISSION", "BOARD OF", "AGENCY",
 )
+
+# SQL CASE expression for entity type classification (mirrors classify_entity_type)
+_ENTITY_TYPE_SQL = """
+    CASE
+        WHEN canonical_last LIKE '%LLC%'
+          OR canonical_last LIKE '%L.L.C%'
+          OR canonical_last LIKE '%CORP%'
+          OR canonical_last LIKE '%CORPORATION%'
+          OR canonical_last LIKE '%INC%'
+          OR canonical_last LIKE '%INCORPORATED%'
+          OR canonical_last LIKE '%LTD%'
+          OR canonical_last LIKE '%LIMITED%'
+          OR canonical_last LIKE '%TRUST%'
+          OR canonical_last LIKE '%BANK%'
+          OR canonical_last LIKE '%FUND%'
+          OR canonical_last LIKE '%FOUNDATION%'
+          OR canonical_last LIKE '%ASSOCIATION%'
+          OR canonical_last LIKE '%HOLDINGS%'
+          OR canonical_last LIKE '%REALTY%'
+          OR canonical_last LIKE '%PROPERTIES%'
+          OR canonical_last LIKE '%MANAGEMENT%'
+          OR canonical_last LIKE '%MGMT%'
+          OR canonical_last LIKE '%DEVELOPMENT%'
+          OR canonical_last LIKE '%ENTERPRISES%'
+          OR canonical_last LIKE '%PARTNERS%'
+          OR canonical_last LIKE '%CITY OF%'
+          OR canonical_last LIKE '%STATE OF%'
+          OR canonical_last LIKE '%COUNTY OF%'
+          OR canonical_last LIKE '%DEPT OF%'
+          OR canonical_last LIKE '%DEPARTMENT%'
+          OR canonical_last LIKE '%AUTHORITY%'
+          OR canonical_last LIKE '%COMMISSION%'
+          OR canonical_last LIKE '%BOARD OF%'
+          OR canonical_last LIKE '%AGENCY%'
+        THEN 'ORGANIZATION'
+        ELSE 'PERSON'
+    END
+"""
+
+# Template SQL — call .format(re_table=..., ni_table=..., pp_table=...) before use
+_ENTITY_MASTER_SQL_TEMPLATE = """
+    WITH cluster_members AS (
+        SELECT
+            re.cluster_id,
+            ni.unique_id,
+            ni.last_name,
+            ni.first_name,
+            ni.source_table
+        FROM {re_table} re
+        JOIN {ni_table} ni ON re.unique_id = ni.unique_id
+    ),
+    name_freq AS (
+        SELECT cluster_id, last_name, first_name, COUNT(*) AS freq
+        FROM cluster_members
+        GROUP BY cluster_id, last_name, first_name
+    ),
+    canonical AS (
+        SELECT cluster_id, last_name, first_name
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY cluster_id ORDER BY freq DESC, last_name, first_name
+            ) AS rn
+            FROM name_freq
+        )
+        WHERE rn = 1
+    ),
+    cluster_stats AS (
+        SELECT
+            cm.cluster_id,
+            c.last_name AS canonical_last,
+            c.first_name AS canonical_first,
+            LIST(DISTINCT {{last_name: cm.last_name, first_name: cm.first_name}}) AS name_variants,
+            COUNT(DISTINCT cm.source_table) AS source_count,
+            COUNT(*) AS record_count,
+            LIST(DISTINCT cm.source_table) AS source_tables,
+            LIST(cm.unique_id::VARCHAR ORDER BY cm.unique_id) AS member_ids
+        FROM cluster_members cm
+        JOIN canonical c ON cm.cluster_id = c.cluster_id
+        GROUP BY cm.cluster_id, c.last_name, c.first_name
+    ),
+    cluster_confidence AS (
+        SELECT
+            re.cluster_id,
+            AVG(pp.match_probability) AS avg_probability,
+            MIN(pp.match_probability) AS min_probability,
+            COUNT(*) AS pair_count
+        FROM {pp_table} pp
+        JOIN {re_table} re ON pp.unique_id_l = re.unique_id
+        GROUP BY re.cluster_id
+    ),
+    with_hashes AS (
+        SELECT
+            cs.*,
+            list_sort(list_transform(cs.member_ids, x -> md5(x))) AS sorted_hashes,
+            COALESCE(cc.avg_probability, 1.0) AS confidence,
+            COALESCE(cc.min_probability, 1.0) AS min_confidence,
+            COALESCE(cc.pair_count, 0) AS match_pair_count
+        FROM cluster_stats cs
+        LEFT JOIN cluster_confidence cc ON cs.cluster_id = cc.cluster_id
+    )
+    SELECT
+        md5(array_to_string(sorted_hashes, '|'))::UUID AS entity_id,
+        cluster_id,
+        canonical_last,
+        canonical_first,
+        name_variants,
+        {entity_type_sql} AS entity_type,
+        confidence,
+        min_confidence,
+        match_pair_count,
+        source_count,
+        record_count,
+        source_tables,
+        member_ids
+    FROM with_hashes
+"""
 
 
 def classify_entity_type(name: str | None) -> str:
@@ -57,104 +172,25 @@ def aggregate_confidence(probabilities: list[float]) -> float:
 
 
 def build_entity_master(
-    conn: duckdb.DuckDBPyConnection,
+    conn,
     table_prefix: str = "lake.federal.",
     output_table: str = "lake.foundation.entity_master",
 ) -> int:
-    """Build entity_master table from resolved_entities + name_index + pairwise_probabilities.
+    """Build entity_master table via SQL aggregation.
 
     Returns the number of entities produced.
     """
-    ni = f"{table_prefix}name_index"
-    re_tbl = f"{table_prefix}resolved_entities"
-    pp = f"{table_prefix}pairwise_probabilities"
+    sql = _ENTITY_MASTER_SQL_TEMPLATE.format(
+        ni_table=f"{table_prefix}name_index",
+        re_table=f"{table_prefix}resolved_entities",
+        pp_table=f"{table_prefix}pairwise_probabilities",
+        entity_type_sql=_ENTITY_TYPE_SQL,
+    )
 
-    # Step 1: Get cluster data with names
-    clusters = conn.execute(f"""
-        SELECT
-            re.cluster_id,
-            CAST(ni.unique_id AS VARCHAR) AS unique_id_str,
-            ni.last_name,
-            ni.first_name,
-            ni.source_table
-        FROM {re_tbl} re
-        JOIN {ni} ni ON re.unique_id = ni.unique_id
-        ORDER BY re.cluster_id, ni.unique_id
-    """).fetchall()
+    conn.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
 
-    # Step 2: Get pairwise probabilities per cluster
-    probs_by_cluster = {}
-    try:
-        prob_rows = conn.execute(f"""
-            SELECT re_l.cluster_id, pp.match_probability
-            FROM {pp} pp
-            JOIN {re_tbl} re_l ON pp.unique_id_l = re_l.unique_id
-        """).fetchall()
-        for cluster_id, prob in prob_rows:
-            probs_by_cluster.setdefault(cluster_id, []).append(prob)
-    except Exception:
-        pass  # pairwise_probabilities may not exist
-
-    # Step 3: Group by cluster_id and aggregate
-    from collections import defaultdict
-    cluster_data = defaultdict(list)
-    for cluster_id, uid_str, last_name, first_name, source_table in clusters:
-        cluster_data[cluster_id].append({
-            "unique_id_str": uid_str,
-            "last_name": last_name or "",
-            "first_name": first_name or "",
-            "source_table": source_table,
-        })
-
-    # Step 4: Build entity rows
-    entity_rows = []
-    for cluster_id, members in cluster_data.items():
-        member_ids = [m["unique_id_str"] for m in members]
-        entity_id = str(generate_entity_id(member_ids))
-
-        records_with_names = [m for m in members if m["last_name"]]
-        if records_with_names:
-            canonical_last, canonical_first = select_canonical_name(records_with_names)
-        else:
-            canonical_last, canonical_first = "", ""
-
-        full_name = f"{canonical_last} {canonical_first}".strip() if canonical_first else canonical_last
-        entity_type = classify_entity_type(full_name)
-
-        probs = probs_by_cluster.get(cluster_id, [])
-        confidence = aggregate_confidence(probs)
-
-        source_count = len({m["source_table"] for m in members})
-
-        entity_rows.append((
-            entity_id,
-            canonical_last,
-            canonical_first,
-            entity_type,
-            confidence,
-            len(members),
-            source_count,
-        ))
-
-    # Step 5: Write to output table
-    if entity_rows:
-        conn.execute(f"""
-            CREATE OR REPLACE TABLE {output_table} (
-                entity_id VARCHAR,
-                canonical_last VARCHAR,
-                canonical_first VARCHAR,
-                entity_type VARCHAR,
-                confidence DOUBLE,
-                member_count INTEGER,
-                source_count INTEGER
-            )
-        """)
-        conn.executemany(
-            f"INSERT INTO {output_table} VALUES (?, ?, ?, ?, ?, ?, ?)",
-            entity_rows,
-        )
-
-    return len(entity_rows)
+    row_count = conn.execute(f"SELECT COUNT(*) FROM {output_table}").fetchone()[0]
+    return row_count
 
 
 @asset(
@@ -163,33 +199,43 @@ def build_entity_master(
     deps=[
         AssetKey(["federal", "resolved_entities"]),
     ],
-    description="Unified entity master — one row per resolved entity with canonical name, type, and confidence.",
+    description="Canonical entity table with stable UUIDs, entity types, and confidence scores",
     compute_kind="duckdb",
 )
-def entity_master(context) -> MaterializeResult:
+def entity_master(context: dagster.AssetExecutionContext, ducklake: DuckLakeResource):
     """Materialize entity_master from resolved_entities + pairwise_probabilities + name_index."""
-    from dagster_pipeline.defs.name_index_asset import _connect_ducklake
-
     t_start = time.time()
-    conn = _connect_ducklake()
+    conn = ducklake.get_connection()
 
-    try:
-        conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
+    conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
 
-        context.log.info("Building entity_master from resolved_entities...")
-        entity_count = build_entity_master(conn)
+    context.log.info("Building entity_master from resolved_entities + pairwise_probabilities...")
+    row_count = build_entity_master(conn)
 
-        elapsed = time.time() - t_start
-        context.log.info(
-            "Entity master built: %s entities in %.1fs",
-            f"{entity_count:,}", elapsed,
-        )
+    person_count = conn.execute(
+        "SELECT COUNT(*) FROM lake.foundation.entity_master WHERE entity_type = 'PERSON'"
+    ).fetchone()[0]
+    org_count = conn.execute(
+        "SELECT COUNT(*) FROM lake.foundation.entity_master WHERE entity_type = 'ORGANIZATION'"
+    ).fetchone()[0]
+    avg_confidence = conn.execute(
+        "SELECT AVG(confidence) FROM lake.foundation.entity_master"
+    ).fetchone()[0] or 0.0
 
-        return MaterializeResult(
-            metadata={
-                "entity_count": MetadataValue.int(entity_count),
-                "duration_seconds": MetadataValue.float(elapsed),
-            }
-        )
-    finally:
-        conn.close()
+    elapsed = time.time() - t_start
+    context.log.info(
+        "entity_master complete: %s entities (%s persons, %s orgs), "
+        "avg confidence: %.3f, duration: %.1fs",
+        f"{row_count:,}", f"{person_count:,}", f"{org_count:,}",
+        avg_confidence, elapsed,
+    )
+
+    return MaterializeResult(
+        metadata={
+            "row_count": MetadataValue.int(row_count),
+            "person_count": MetadataValue.int(person_count),
+            "org_count": MetadataValue.int(org_count),
+            "avg_confidence": MetadataValue.float(round(avg_confidence, 3)),
+            "duration_seconds": MetadataValue.float(elapsed),
+        }
+    )
