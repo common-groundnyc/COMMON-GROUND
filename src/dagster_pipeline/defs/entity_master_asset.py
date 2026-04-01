@@ -2,6 +2,7 @@
 
 import hashlib
 import uuid
+from collections import Counter
 
 ORG_INDICATORS = (
     "LLC", "L.L.C.", "L.L.C", "CORP", "CORPORATION", "INC", "INCORPORATED",
@@ -31,3 +32,18 @@ def generate_entity_id(member_unique_ids: list[str]) -> uuid.UUID:
     sorted_hashes = sorted(hashlib.md5(m.encode()).hexdigest() for m in member_unique_ids)
     combined = "|".join(sorted_hashes)
     return uuid.UUID(hashlib.md5(combined.encode()).hexdigest())
+
+
+def select_canonical_name(records: list[dict]) -> tuple[str, str]:
+    """Pick canonical (last_name, first_name) from records: most frequent, alphabetical tiebreak."""
+    counts = Counter((r["last_name"], r["first_name"]) for r in records)
+    max_count = max(counts.values())
+    candidates = sorted(name for name, count in counts.items() if count == max_count)
+    return candidates[0]
+
+
+def aggregate_confidence(probabilities: list[float]) -> float:
+    """Aggregate match probabilities into a single confidence score."""
+    if not probabilities:
+        return 1.0
+    return sum(probabilities) / len(probabilities)

@@ -1,5 +1,10 @@
 import pytest
-from dagster_pipeline.defs.entity_master_asset import classify_entity_type, generate_entity_id
+from dagster_pipeline.defs.entity_master_asset import (
+    classify_entity_type,
+    generate_entity_id,
+    select_canonical_name,
+    aggregate_confidence,
+)
 
 
 @pytest.mark.parametrize("name,expected", [
@@ -44,3 +49,43 @@ def test_entity_id_is_uuid_format():
     result = generate_entity_id(["a", "b", "c"])
     parsed = uuid_mod.UUID(str(result))
     assert str(parsed) == str(result)
+
+
+def test_canonical_name_most_frequent():
+    records = [
+        {"last_name": "SMITH", "first_name": "JOHN"},
+        {"last_name": "SMITH", "first_name": "JOHN"},
+        {"last_name": "SMITH", "first_name": "J"},
+        {"last_name": "SMYTH", "first_name": "JOHN"},
+    ]
+    last, first = select_canonical_name(records)
+    assert last == "SMITH"
+    assert first == "JOHN"
+
+
+def test_canonical_name_tiebreak_alphabetical():
+    records = [
+        {"last_name": "SMITH", "first_name": "JOHN"},
+        {"last_name": "SMYTH", "first_name": "JOHN"},
+    ]
+    last, first = select_canonical_name(records)
+    assert last == "SMITH"
+
+
+def test_canonical_name_single_record():
+    records = [{"last_name": "JONES", "first_name": "ALICE"}]
+    last, first = select_canonical_name(records)
+    assert last == "JONES"
+    assert first == "ALICE"
+
+
+def test_aggregate_confidence_returns_mean():
+    assert abs(aggregate_confidence([0.95, 0.92, 0.98]) - 0.95) < 0.001
+
+
+def test_aggregate_confidence_empty():
+    assert aggregate_confidence([]) == 1.0
+
+
+def test_aggregate_confidence_single():
+    assert aggregate_confidence([0.93]) == 0.93
