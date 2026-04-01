@@ -3,6 +3,7 @@
 import csv
 import logging
 import os
+import re
 import tempfile
 import time
 import zipfile
@@ -39,9 +40,13 @@ def parse_adr_row(row: dict) -> dict | None:
     if addr_type not in _INCLUDED_ADDR_TYPES:
         return None
 
-    lhns = row.get("lhns", "").strip()
-    if not lhns or not lhns.isdigit():
+    # Use lhnd/hhnd (display format) for house numbers — lhns/hhns is sort format
+    # with zero-padding and suffix codes like "000045000AA"
+    lhnd = row.get("lhnd", "").strip()
+    m_lo = re.match(r"^(\d+)", lhnd)
+    if not m_lo:
         return None
+    house_number = int(m_lo.group(1))
 
     boro = row.get("boro", "").strip()
     block_raw = row.get("block", "").strip()
@@ -49,9 +54,9 @@ def parse_adr_row(row: dict) -> dict | None:
     if not boro or not block_raw or not lot_raw:
         return None
 
-    hhns = row.get("hhns", "").strip()
-    house_number = int(lhns)
-    house_number_high = int(hhns) if hhns and hhns.isdigit() else house_number
+    hhnd = row.get("hhnd", "").strip()
+    m_hi = re.match(r"^(\d+)", hhnd)
+    house_number_high = int(m_hi.group(1)) if m_hi else house_number
 
     block = block_raw.zfill(5)
     lot = lot_raw.zfill(4)
