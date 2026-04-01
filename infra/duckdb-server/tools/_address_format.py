@@ -1,7 +1,15 @@
 """Report formatting for address_report — 360 Address Dossier."""
 
+W = 52  # standard report width
 
-def pctile_bar(value, label, raw, width=10):
+
+def _divider(label: str) -> str:
+    """Build '━━ LABEL ━━━━━━━━━━━━━━━━━━━━━' exactly W chars wide."""
+    prefix = f"━━ {label} "
+    return prefix + "━" * (W - len(prefix))
+
+
+def pctile_bar(value: float | None, label: str, raw: str, width: int = 10) -> str:
     """Render: ' HPD violations      2,733   ████████░░ 87th — high'"""
     if value is None:
         return f" {label:<22s} {raw:>8s}   {'░' * width} n/a"
@@ -12,7 +20,7 @@ def pctile_bar(value, label, raw, width=10):
     return f" {label:<22s} {raw:>8s}   {bar} {n}th — {sev}"
 
 
-def severity(pctile):
+def severity(pctile: int) -> str:
     """Return severity word for a percentile 0–100."""
     if pctile <= 20:
         return "low"
@@ -27,21 +35,38 @@ def severity(pctile):
     return "extreme"
 
 
-def fmt(n):
-    """Format number with commas, or 'n/a' if None."""
+def fmt(n: object, kind: str = "auto") -> str:
+    """Format number with commas, or 'n/a' if None.
+
+    kind: 'auto' | 'money' | 'pct' | 'year'
+    """
     if n is None:
         return "n/a"
-    if isinstance(n, float):
-        return f"{n:,.1f}"
+    if kind == "year":
+        return str(int(n))
+    if kind == "money":
+        v = int(n) if float(n) == int(float(n)) else n
+        if isinstance(v, int):
+            return f"${v:,}"
+        return f"${v:,.2f}"
+    if kind == "pct":
+        return f"{n}%"
+    # auto: detect years (4-digit ints between 1800–2100)
     if isinstance(n, int):
+        if 1800 <= n <= 2100:
+            return str(n)
         return f"{n:,}"
+    if isinstance(n, float):
+        if n == int(n) and 1800 <= int(n) <= 2100:
+            return str(int(n))
+        return f"{n:,.1f}"
     return str(n)
 
 
 # ── helpers ──────────────────────────────────────────────────────
 
 
-def _get(results, name):
+def _get(results: dict, name: str) -> dict:
     """Get first row from results as dict, or empty dict."""
     cols, rows = results.get(name, ([], []))
     if cols and rows:
@@ -49,16 +74,26 @@ def _get(results, name):
     return {}
 
 
-def _get_all(results, name):
+def _get_all(results: dict, name: str) -> list[dict]:
     """Get all rows from results as list of dicts."""
     cols, rows = results.get(name, ([], []))
     return [dict(zip(cols, r)) for r in rows]
 
 
+def _section_or_empty(lines: list[str], label: str, content_lines: list[str]) -> None:
+    """Append a section. If content_lines is empty, show 'No data available'."""
+    lines.append(_divider(label))
+    if content_lines:
+        lines.extend(content_lines)
+    else:
+        lines.append(" No data available")
+    lines.append("")
+
+
 # ── main assembly ────────────────────────────────────────────────
 
 
-def assemble_report(ctx, results):
+def assemble_report(ctx: dict, results: dict) -> str:
     """Build the full 360 report from parallel query results dict.
 
     ctx:     dict from _resolve_context (bbl, address, zip, borough, etc.)
@@ -68,6 +103,7 @@ def assemble_report(ctx, results):
     address = ctx.get("address", "")
     borough = ctx.get("borough", "")
     zipcode = ctx.get("zip", "")
+    neighborhood = ctx.get("neighborhood", "")
     precinct = ctx.get("precinct", "")
     cd = ctx.get("community_district", "")
     council = ctx.get("council_district", "")
@@ -79,283 +115,313 @@ def assemble_report(ctx, results):
     owner = ctx.get("ownername", "")
     assessed = ctx.get("assesstot", "")
 
-    lines = []
-    W = "━" * 52
+    lines: list[str] = []
+    rule = "━" * W
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━ HEADER ━━━━━━━━━━━━━━━━━━━━━━━━━━
-    lines.append(W)
+    lines.append(rule)
     lines.append(" 360 ADDRESS REPORT — COMMON GROUND")
-    lines.append(W)
-    lines.append(f" {address}, {borough}, NY {zipcode}")
+    lines.append(rule)
+    loc_parts = [address, borough, f"NY {zipcode}"]
+    if neighborhood:
+        loc_parts.insert(1, neighborhood)
+    lines.append(f" {', '.join(loc_parts)}")
     lines.append(f" BBL {bbl}  ·  CD {cd}  ·  Council {council}")
     lines.append("")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━ BUILDING ━━━━━━━━━━━━━━━━━━━━━━━━
-    lines.append(f"━━ BUILDING {'━' * 40}")
-    lines.append(f" Built {year}  ·  {floors} stories  ·  {units} units  ·  {bldg_class}")
-    lines.append(f" Zoning {zoning}  ·  Owner: {owner}")
+    bldg_lines: list[str] = []
+    bldg_lines.append(
+        f" Built {fmt(year, 'year') if year else 'n/a'}"
+        f"  ·  {floors} stories  ·  {units} units  ·  {bldg_class}"
+    )
+    bldg_lines.append(f" Zoning {zoning}  ·  Owner: {owner}")
     if assessed:
-        lines.append(f" Assessed value: ${fmt(assessed)}")
+        bldg_lines.append(f" Assessed value: {fmt(assessed, 'money')}")
 
     sale = _get(results, "building_sale")
     if sale.get("price"):
-        lines.append(f" Last sale: ${fmt(sale['price'])} ({sale.get('sale_date', 'n/a')})")
+        bldg_lines.append(
+            f" Last sale: {fmt(sale['price'], 'money')}"
+            f" ({sale.get('sale_date', 'n/a')})"
+        )
 
     portfolio = _get(results, "building_owner_portfolio")
     if portfolio.get("portfolio_size", 0) > 1:
-        lines.append(f" Owner portfolio: {fmt(portfolio['portfolio_size'])} buildings")
+        bldg_lines.append(f" Owner portfolio: {fmt(portfolio['portfolio_size'])} buildings")
 
-    lines.append("")
+    bldg_lines.append("")
 
     # Violations with percentile bars
     v = _get(results, "building_hpd_violations")
     pv = _get(results, "pctile_violations")
     if v:
-        lines.append(pctile_bar(pv.get("pctile"), "HPD violations", fmt(v.get("total", 0))))
-        lines.append(f"   Open: {fmt(v.get('open_cnt', 0))}  ·  Class C: {fmt(v.get('class_c', 0))}")
+        bldg_lines.append(pctile_bar(pv.get("pctile"), "HPD violations", fmt(v.get("total", 0))))
+        bldg_lines.append(
+            f"   Open: {fmt(v.get('open_cnt', 0))}"
+            f"  ·  Class C: {fmt(v.get('class_c', 0))}"
+        )
+        # Worst 5% warning
+        pctile_val = pv.get("pctile")
+        if pctile_val is not None and round(pctile_val * 100) > 95:
+            bldg_lines.append(" ⚠ This building is in the worst 5% citywide")
 
     c = _get(results, "building_hpd_complaints")
     pc = _get(results, "pctile_complaints")
     if c:
-        lines.append(pctile_bar(pc.get("pctile"), "HPD complaints", fmt(c.get("total", 0))))
+        bldg_lines.append(pctile_bar(pc.get("pctile"), "HPD complaints", fmt(c.get("total", 0))))
         if c.get("top_category"):
-            lines.append(f"   Top category: {c['top_category']}")
+            bldg_lines.append(f"   Top category: {c['top_category']}")
 
     dob = _get(results, "building_dob_violations")
     if dob and dob.get("total", 0) > 0:
-        lines.append(f" DOB/ECB violations     {fmt(dob['total']):>8s}   penalties: ${fmt(dob.get('penalties', 0))}")
+        bldg_lines.append(
+            f" DOB/ECB violations     {fmt(dob['total']):>8s}"
+            f"   penalties: {fmt(dob.get('penalties', 0), 'money')}"
+        )
 
     fdny = _get(results, "building_fdny")
     if fdny and fdny.get("total", 0) > 0:
-        lines.append(f" FDNY violations        {fmt(fdny['total']):>8s}")
+        bldg_lines.append(f" FDNY violations        {fmt(fdny['total']):>8s}")
 
     evict = _get(results, "building_evictions")
     if evict and evict.get("total", 0) > 0:
-        lines.append(f" Eviction filings       {fmt(evict['total']):>8s}")
+        total_evict = evict["total"]
+        line = f" Eviction filings       {fmt(total_evict):>8s}"
+        if total_evict > 10:
+            line += f"   {fmt(total_evict)} eviction filings on record"
+        bldg_lines.append(line)
 
     energy = _get(results, "building_energy")
     if energy and energy.get("energy_star_score"):
-        lines.append(f" Energy Star score: {fmt(energy['energy_star_score'])}")
+        bldg_lines.append(f" Energy Star score: {fmt(energy['energy_star_score'])}")
 
     # Warning flags
-    flags = []
     if _get(results, "building_aep").get("on_list"):
-        flags.append("⚠ AEP (worst buildings list)")
+        bldg_lines.append(" ⚠ Alternative Enforcement Program — one of NYC's worst buildings")
     if _get(results, "building_tax_lien").get("cnt", 0) > 0:
-        flags.append("⚠ Tax lien sale history")
+        bldg_lines.append(" ⚠ Tax lien sale history")
     facade = _get(results, "building_facade")
     if facade and str(facade.get("filing_status", "")).upper() == "UNSAFE":
-        flags.append("⚠ Facade: UNSAFE")
+        bldg_lines.append(" ⚠ Facade: UNSAFE")
     boiler = _get(results, "building_boiler")
-    if boiler and str(boiler.get("overall_status", "")).upper() != "COMPLIANT" and boiler.get("overall_status"):
-        flags.append(f"⚠ Boiler: {boiler['overall_status']}")
-    for f in flags:
-        lines.append(f" {f}")
+    if (
+        boiler
+        and str(boiler.get("overall_status", "")).upper() != "COMPLIANT"
+        and boiler.get("overall_status")
+    ):
+        bldg_lines.append(f" ⚠ Boiler: {boiler['overall_status']}")
 
-    lines.append("")
+    _section_or_empty(lines, "BUILDING", bldg_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━ BLOCK ━━━━━━━━━━━━━━━━━━━━━━━━━━
     block = _get(results, "block_buildings")
     trees = _get_all(results, "block_trees")
     films = _get_all(results, "block_film")
-    has_block = block or trees or films
 
-    if has_block:
-        lines.append(f"━━ BLOCK {'━' * 43}")
-        if block:
-            lines.append(
-                f" {fmt(block.get('cnt', 0))} buildings  ·  "
-                f"avg {fmt(block.get('avg_floors'))} floors  ·  "
-                f"avg built {fmt(block.get('avg_year'))}"
-            )
-            lines.append(f" {fmt(block.get('total_units', 0))} total units on block")
-        if trees:
-            top_tree = trees[0].get("species", "unknown")
-            tree_count = sum(t.get("cnt", 0) for t in trees)
-            lines.append(f" Street trees: {fmt(tree_count)}  ·  most common: {top_tree}")
-        if films:
-            lines.append(f" Film shoots nearby: {len(films)} recent")
-        lines.append("")
+    block_lines: list[str] = []
+    if block:
+        block_lines.append(
+            f" {fmt(block.get('cnt', 0))} buildings  ·  "
+            f"avg {fmt(block.get('avg_floors'))} floors  ·  "
+            f"avg built {fmt(block.get('avg_year'), 'year')}"
+        )
+        block_lines.append(f" {fmt(block.get('total_units', 0))} total units on block")
+    if trees:
+        top_tree = trees[0].get("species", "unknown")
+        tree_count = sum(t.get("cnt", 0) for t in trees)
+        block_lines.append(f" Street trees: {fmt(tree_count)}  ·  most common: {top_tree}")
+    if films:
+        block_lines.append(f" Film shoots nearby: {len(films)} recent")
+
+    _section_or_empty(lines, "BLOCK", block_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━ NEIGHBORHOOD ━━━━━━━━━━━━━━━━━━━━━━
     acs = _get(results, "neighborhood_acs")
     n311 = _get_all(results, "neighborhood_311_top")
     broadband = _get(results, "neighborhood_broadband")
     recycling = _get(results, "neighborhood_recycling")
-    has_neighborhood = acs or n311 or broadband or recycling
 
-    if has_neighborhood:
-        zip_tag = f" ({zipcode})" if zipcode else ""
-        pad = max(0, 37 - len(zip_tag))
-        lines.append(f"━━ NEIGHBORHOOD{zip_tag} {'━' * pad}")
-        if acs:
-            lines.append(f" Population: {fmt(acs.get('total_population'))}")
-            lines.append(f" Median income: ${fmt(acs.get('median_household_income'))}")
-            lines.append(f" Poverty rate: {fmt(acs.get('poverty_rate'))}%")
-            lines.append(f" Median rent: ${fmt(acs.get('median_gross_rent'))}")
-            lines.append(f" Rent-burdened: {fmt(acs.get('pct_renter_cost_burdened'))}%")
-            lines.append(f" Foreign-born: {fmt(acs.get('pct_foreign_born'))}%")
-        if n311:
-            top = n311[0]
-            lines.append(f" Top 311 complaint: {top.get('complaint_type', '?')} ({fmt(top.get('cnt'))})")
-        if broadband and broadband.get("broadband_adoption_rate"):
-            lines.append(f" Broadband adoption: {fmt(broadband['broadband_adoption_rate'])}%")
-        if recycling and recycling.get("diversion_rate_total"):
-            lines.append(f" Recycling rate: {fmt(recycling['diversion_rate_total'])}%")
-        lines.append("")
+    hood_label = "NEIGHBORHOOD"
+    if neighborhood:
+        hood_label = f"NEIGHBORHOOD — {neighborhood}"
+    elif zipcode:
+        hood_label = f"NEIGHBORHOOD ({zipcode})"
+
+    hood_lines: list[str] = []
+    if acs:
+        hood_lines.append(f" Population: {fmt(acs.get('total_population'))}")
+        hood_lines.append(f" Median income: {fmt(acs.get('median_household_income'), 'money')}")
+        hood_lines.append(f" Poverty rate: {fmt(acs.get('poverty_rate'), 'pct')}")
+        hood_lines.append(f" Median rent: {fmt(acs.get('median_gross_rent'), 'money')}")
+        hood_lines.append(f" Rent-burdened: {fmt(acs.get('pct_renter_cost_burdened'), 'pct')}")
+        hood_lines.append(f" Foreign-born: {fmt(acs.get('pct_foreign_born'), 'pct')}")
+    if n311:
+        top = n311[0]
+        hood_lines.append(
+            f" Top 311 complaint: {top.get('complaint_type', '?')} ({fmt(top.get('cnt'))})"
+        )
+    if broadband and broadband.get("broadband_adoption_rate"):
+        hood_lines.append(f" Broadband adoption: {fmt(broadband['broadband_adoption_rate'], 'pct')}")
+    if recycling and recycling.get("diversion_rate_total"):
+        hood_lines.append(f" Recycling rate: {fmt(recycling['diversion_rate_total'], 'pct')}")
+
+    _section_or_empty(lines, hood_label, hood_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━ SAFETY ━━━━━━━━━━━━━━━━━━━━━━━━━
     crimes = _get(results, "safety_crimes")
     shootings = _get(results, "safety_shootings")
     crashes = _get(results, "safety_crashes")
-    has_safety = crimes or shootings or crashes
 
-    if has_safety and precinct:
-        pct_tag = f" (Precinct {precinct})"
-        pad = max(0, 41 - len(pct_tag))
-        lines.append(f"━━ SAFETY{pct_tag} {'━' * pad}")
+    safety_label = "SAFETY"
+    if precinct:
+        safety_label = f"SAFETY (Precinct {precinct})"
+
+    safety_lines: list[str] = []
+    if precinct:
         if crimes:
-            lines.append(f" Total crimes (YTD): {fmt(crimes.get('total'))}")
-            lines.append(
-                f"   Felonies: {fmt(crimes.get('felonies'))}  ·  "
-                f"Misdemeanors: {fmt(crimes.get('misdemeanors'))}"
+            safety_lines.append(f" Total crimes (YTD): {fmt(crimes.get('total'))}")
+            safety_lines.append(
+                f"   Felonies: {fmt(crimes.get('felonies'))}"
+                f"  ·  Misdemeanors: {fmt(crimes.get('misdemeanors'))}"
             )
         if shootings:
-            lines.append(
-                f" Shootings (12 mo): {fmt(shootings.get('total'))}  ·  "
-                f"fatal: {fmt(shootings.get('fatal'))}"
+            safety_lines.append(
+                f" Shootings (12 mo): {fmt(shootings.get('total'))}"
+                f"  ·  fatal: {fmt(shootings.get('fatal'))}"
             )
         if crashes:
-            lines.append(
-                f" Crashes (12 mo): {fmt(crashes.get('total'))}  ·  "
-                f"injured: {fmt(crashes.get('injured'))}  ·  "
-                f"killed: {fmt(crashes.get('killed'))}"
+            safety_lines.append(
+                f" Crashes (12 mo): {fmt(crashes.get('total'))}"
+                f"  ·  injured: {fmt(crashes.get('injured'))}"
+                f"  ·  killed: {fmt(crashes.get('killed'))}"
             )
-        lines.append("")
-    elif not precinct:
-        lines.append(f"━━ SAFETY {'━' * 42}")
-        lines.append(" Precinct not resolved — use safety(precinct) for details")
-        lines.append("")
+    else:
+        safety_lines.append(" Precinct not resolved — use safety(precinct) for details")
+
+    _section_or_empty(lines, safety_label, safety_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━ SCHOOLS ━━━━━━━━━━━━━━━━━━━━━━━━
     schools = _get_all(results, "school_nearest")
     ela = _get_all(results, "school_ela")
 
-    if schools or ela:
-        lines.append(f"━━ SCHOOLS {'━' * 41}")
-        if schools:
-            for s in schools[:3]:
-                name = s.get("school_name", "?")
-                dbn = s.get("dbn", "")
-                grades = f"{s.get('grade_span_min', '?')}–{s.get('grade_span_max', '?')}"
-                lines.append(f" {name} ({dbn})  grades {grades}")
-        if ela:
-            top = ela[0]
-            lines.append(
-                f" Top ELA: {top.get('school_name', '?')} — "
-                f"{fmt(top.get('level_3_4_pct'))}% proficient"
-            )
-        lines.append("")
+    school_lines: list[str] = []
+    if schools:
+        for s in schools[:3]:
+            name = s.get("school_name", "?")
+            dbn = s.get("dbn", "")
+            grades = f"{s.get('grade_span_min', '?')}–{s.get('grade_span_max', '?')}"
+            school_lines.append(f" {name} ({dbn})  grades {grades}")
+    if ela:
+        top = ela[0]
+        school_lines.append(
+            f" Top ELA: {top.get('school_name', '?')} — "
+            f"{fmt(top.get('level_3_4_pct'), 'pct')} proficient"
+        )
+
+    _section_or_empty(lines, "SCHOOLS", school_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━ HEALTH ━━━━━━━━━━━━━━━━━━━━━━━━━
     rats = _get(results, "health_rats")
     covid = _get(results, "health_covid")
     cdc = _get_all(results, "health_cdc")
-    has_health = rats or covid or cdc
 
-    if has_health:
-        lines.append(f"━━ HEALTH {'━' * 42}")
-        if rats and rats.get("inspections", 0) > 0:
-            inspections = rats["inspections"]
-            active = rats.get("active_rats", 0)
-            rat_pct = round(100 * active / inspections) if inspections else 0
-            lines.append(f" Rat activity: {rat_pct}% of inspections positive ({fmt(active)} of {fmt(inspections)})")
-        if covid:
-            lines.append(f" COVID case rate: {fmt(covid.get('covid_case_rate'))}/100K")
-            lines.append(f" COVID death rate: {fmt(covid.get('covid_death_rate'))}/100K")
-        if cdc:
-            for row in cdc[:3]:
-                lines.append(f" {row.get('measure', '?')}: {fmt(row.get('data_value'))}%")
-        lines.append("")
+    health_lines: list[str] = []
+    if rats and rats.get("inspections", 0) > 0:
+        inspections = rats["inspections"]
+        active = rats.get("active_rats", 0)
+        rat_pct = round(100 * active / inspections) if inspections else 0
+        health_lines.append(
+            f" Rat activity: {rat_pct}% of inspections positive"
+            f" ({fmt(active)} of {fmt(inspections)})"
+        )
+    if covid:
+        health_lines.append(f" COVID case rate: {fmt(covid.get('covid_case_rate'))}/100K")
+        health_lines.append(f" COVID death rate: {fmt(covid.get('covid_death_rate'))}/100K")
+    if cdc:
+        for row in cdc[:3]:
+            health_lines.append(f" {row.get('measure', '?')}: {fmt(row.get('data_value'), 'pct')}")
+
+    _section_or_empty(lines, "HEALTH", health_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━ ENVIRONMENT ━━━━━━━━━━━━━━━━━━━━━━
     flood = _get(results, "env_flood")
     heat = _get(results, "env_heat")
     air = _get(results, "env_air")
-    has_env = flood or heat or air or energy
 
-    if has_env:
-        lines.append(f"━━ ENVIRONMENT {'━' * 37}")
-        if flood:
-            lines.append(f" Flood zone: {flood.get('flood_zone', 'unknown')}")
-        if heat and heat.get("heat_vulnerability_index"):
-            lines.append(f" Heat vulnerability: {fmt(heat['heat_vulnerability_index'])}/5")
-        if air and air.get("pm25"):
-            lines.append(f" PM2.5 (fine particulate): {fmt(air['pm25'])} μg/m³")
-        if energy and energy.get("energy_star_score"):
-            lines.append(f" Energy Star: {fmt(energy['energy_star_score'])}  ·  EUI: {fmt(energy.get('source_eui_kbtu_ft2'))} kBtu/ft²")
-        lines.append("")
+    env_lines: list[str] = []
+    if flood:
+        env_lines.append(f" Flood zone: {flood.get('flood_zone', 'unknown')}")
+    if heat and heat.get("heat_vulnerability_index"):
+        env_lines.append(f" Heat vulnerability: {fmt(heat['heat_vulnerability_index'])}/5")
+    if air and air.get("pm25"):
+        env_lines.append(f" PM2.5 (fine particulate): {fmt(air['pm25'])} ug/m3")
+    if energy and energy.get("energy_star_score"):
+        env_lines.append(
+            f" Energy Star: {fmt(energy['energy_star_score'])}"
+            f"  ·  EUI: {fmt(energy.get('source_eui_kbtu_ft2'))} kBtu/ft2"
+        )
+
+    _section_or_empty(lines, "ENVIRONMENT", env_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━ CIVIC ━━━━━━━━━━━━━━━━━━━━━━━━━
     contracts = _get(results, "civic_contracts")
     fec = _get(results, "civic_fec")
-    has_civic = contracts or fec or council or cd
 
-    if has_civic:
-        lines.append(f"━━ CIVIC {'━' * 43}")
-        lines.append(f" Council District {council}  ·  Community Board {cd}")
-        if contracts and contracts.get("total_5yr"):
-            lines.append(f" City contracts to ZIP (5yr): ${fmt(contracts['total_5yr'])}")
-        if fec and fec.get("total"):
-            lines.append(f" FEC donations from ZIP: ${fmt(fec['total'])}")
-        lines.append("")
+    civic_lines: list[str] = []
+    civic_lines.append(f" Council District {council}  ·  Community Board {cd}")
+    if contracts and contracts.get("total_5yr"):
+        civic_lines.append(f" City contracts to ZIP (5yr): {fmt(contracts['total_5yr'], 'money')}")
+    if fec and fec.get("total"):
+        civic_lines.append(f" FEC donations from ZIP: {fmt(fec['total'], 'money')}")
+
+    _section_or_empty(lines, "CIVIC", civic_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━ SERVICES ━━━━━━━━━━━━━━━━━━━━━━━━
     subway = _get_all(results, "services_subway")
     pantries = _get(results, "services_food_pantries")
-    has_services = subway or pantries
 
-    if has_services:
-        lines.append(f"━━ SERVICES {'━' * 40}")
-        if subway:
-            for s in subway[:3]:
-                lines.append(f" {s.get('station_name', '?')} — {s.get('line', '?')} line")
-        if pantries and pantries.get("cnt", 0) > 0:
-            lines.append(f" Food pantries in ZIP: {fmt(pantries['cnt'])}")
-        lines.append("")
+    svc_lines: list[str] = []
+    if subway:
+        for s in subway[:3]:
+            svc_lines.append(f" {s.get('station_name', '?')} — {s.get('line', '?')} line")
+    if pantries and pantries.get("cnt", 0) > 0:
+        svc_lines.append(f" Food pantries in ZIP: {fmt(pantries['cnt'])}")
+
+    _section_or_empty(lines, "SERVICES", svc_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━ FUN FACTS ━━━━━━━━━━━━━━━━━━━━━━━━
     dogs = _get(results, "fun_dogs")
     babies = _get_all(results, "fun_baby_names")
     fishing = _get(results, "fun_fishing")
     corps = _get(results, "building_corps_at_address")
-    has_fun = dogs or babies or fishing or trees or films or corps
 
-    if has_fun:
-        lines.append(f"━━ FUN FACTS {'━' * 39}")
-        if dogs and dogs.get("breed_name"):
-            lines.append(f" Most popular dog breed ({zipcode}): {dogs['breed_name']}")
-        if trees:
-            lines.append(f" Most common street tree: {trees[0].get('species', '?')}")
-        if babies:
-            names = ", ".join(
-                f"{b.get('name', '?')} ({b.get('gender', '?')})"
-                for b in babies[:2]
-            )
-            lines.append(f" Top baby names ({borough}): {names}")
-        if films:
-            lines.append(f" Film shoots nearby: {len(films)} in last year")
-        if fishing:
-            lines.append(f" Nearest fishing: {fishing.get('waterbody', '?')}")
-        if corps and corps.get("cnt", 0) > 0:
-            lines.append(f" Corporations at this address: {fmt(corps['cnt'])}")
-        lines.append("")
+    fun_lines: list[str] = []
+    if dogs and dogs.get("breed_name"):
+        fun_lines.append(f" \U0001f415 Most popular dog: {dogs['breed_name']}")
+    if trees:
+        top_tree = trees[0].get("species", "?")
+        tree_count = sum(t.get("cnt", 0) for t in trees)
+        fun_lines.append(f" \U0001f333 Your street trees: {fmt(tree_count)} {top_tree}")
+    if films:
+        fun_lines.append(f" \U0001f3ac Film shoots nearby: {len(films)} this year")
+    if babies:
+        top_baby = babies[0]
+        fun_lines.append(
+            f" \U0001f476 Top baby name in {borough}: {top_baby.get('name', '?')}"
+        )
+    if fishing:
+        fun_lines.append(f" \U0001f3a3 Nearest fishing: {fishing.get('waterbody', '?')}")
+    if corps and corps.get("cnt", 0) > 0:
+        fun_lines.append(f" \U0001f3e2 Corporations at this address: {fmt(corps['cnt'])}")
+
+    _section_or_empty(lines, "FUN FACTS", fun_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━ FOOTER ━━━━━━━━━━━━━━━━━━━━━━━━━
-    lines.append(W)
+    lines.append(rule)
     lines.append(" Data: NYC Open Data, Census ACS, DOE, DOHMH, DEP, FEC")
     lines.append(" common-ground.nyc — 294 tables, 60M+ rows")
-    lines.append(W)
+    lines.append(rule)
     lines.append("")
     lines.append(" Drill deeper:")
     lines.append(f'   building("{bbl}", view="enforcement")')
