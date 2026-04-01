@@ -82,10 +82,18 @@ def _resolve_context(pool, address: str) -> dict:
         SELECT
             borocode || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0') AS bbl,
             address, borough, zipcode AS zip, zonedist1 AS zoning,
-            bldgclass, numfloors, unitsres, unitstotal, yearbuilt,
-            assesstot, assessland, ownername,
+            bldgclass,
+            TRY_CAST(numfloors AS INT) AS numfloors,
+            TRY_CAST(unitsres AS INT) AS unitsres,
+            TRY_CAST(unitstotal AS INT) AS unitstotal,
+            TRY_CAST(yearbuilt AS INT) AS yearbuilt,
+            TRY_CAST(assesstot AS BIGINT) AS assesstot,
+            TRY_CAST(assessland AS BIGINT) AS assessland,
+            ownername,
             cd AS community_district, council AS council_district,
-            tract2010 AS census_tract, lotarea, bldgarea
+            tract2010 AS census_tract,
+            TRY_CAST(lotarea AS INT) AS lotarea,
+            TRY_CAST(bldgarea AS INT) AS bldgarea
         FROM lake.city_government.pluto
         WHERE borocode || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0') = ?
         LIMIT 1

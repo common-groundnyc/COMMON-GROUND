@@ -178,9 +178,12 @@ def build_queries(
             SELECT bbl, COUNT(*) AS cnt
             FROM lake.housing.hpd_violations
             GROUP BY bbl
+        ),
+        ranked AS (
+            SELECT bbl, cnt, PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
+            FROM bbl_counts
         )
-        SELECT PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
-        FROM bbl_counts
+        SELECT pctile FROM ranked
         WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
     """, [bbl]))
 
@@ -189,9 +192,12 @@ def build_queries(
             SELECT bbl, COUNT(DISTINCT complaint_id) AS cnt
             FROM lake.housing.hpd_complaints
             GROUP BY bbl
+        ),
+        ranked AS (
+            SELECT bbl, cnt, PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
+            FROM bbl_counts
         )
-        SELECT PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
-        FROM bbl_counts
+        SELECT pctile FROM ranked
         WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
     """, [bbl]))
 
@@ -201,9 +207,12 @@ def build_queries(
                    TRY_CAST(energy_star_score AS DOUBLE) AS score
             FROM lake.environment.ll84_energy_2023
             WHERE energy_star_score IS NOT NULL
+        ),
+        ranked AS (
+            SELECT bbl, score, PERCENT_RANK() OVER (ORDER BY score) AS pctile
+            FROM scores
         )
-        SELECT PERCENT_RANK() OVER (ORDER BY score) AS pctile
-        FROM scores
+        SELECT pctile FROM ranked
         WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
     """, [bbl]))
 
@@ -213,9 +222,9 @@ def build_queries(
 
     queries.append(("block_buildings", f"""
         SELECT COUNT(*) AS cnt,
-               ROUND(AVG(TRY_CAST(numfloors AS INT))) AS avg_floors,
+               ROUND(AVG(TRY_CAST(numfloors AS INT)))::INT AS avg_floors,
                ROUND(AVG(TRY_CAST(yearbuilt AS INT))
-                     FILTER (WHERE TRY_CAST(yearbuilt AS INT) > 1800)) AS avg_year,
+                     FILTER (WHERE TRY_CAST(yearbuilt AS INT) > 1800))::INT AS avg_year,
                SUM(TRY_CAST(unitsres AS INT)) AS total_units
         FROM lake.city_government.pluto
         WHERE borocode || LPAD(block::VARCHAR, 5, '0') LIKE '{block_prefix}%'
@@ -263,8 +272,9 @@ def build_queries(
     # ══════════════════════════════════════════════════════════════════════
 
     queries.append(("neighborhood_acs", """
-        SELECT median_household_income, poverty_rate, total_population,
-               median_gross_rent, pct_renter_cost_burdened, pct_foreign_born
+        SELECT total_population, median_household_income, median_gross_rent,
+               median_home_value,
+               ROUND(100.0 * below_poverty / NULLIF(poverty_universe, 0), 1) AS poverty_rate
         FROM lake.federal.acs_zcta_demographics
         WHERE zcta = ?
         LIMIT 1
@@ -296,26 +306,28 @@ def build_queries(
 
     queries.append(("pctile_income", """
         WITH zips AS (
-            SELECT zcta,
-                   TRY_CAST(median_household_income AS DOUBLE) AS income
+            SELECT zcta, median_household_income AS income
             FROM lake.federal.acs_zcta_demographics
             WHERE median_household_income IS NOT NULL
+        ),
+        ranked AS (
+            SELECT zcta, PERCENT_RANK() OVER (ORDER BY income) AS pctile
+            FROM zips
         )
-        SELECT PERCENT_RANK() OVER (ORDER BY income) AS pctile
-        FROM zips
-        WHERE zcta = ?
+        SELECT pctile FROM ranked WHERE zcta = ?
     """, [zipcode]))
 
     queries.append(("pctile_rent", """
         WITH zips AS (
-            SELECT zcta,
-                   TRY_CAST(median_gross_rent AS DOUBLE) AS rent
+            SELECT zcta, median_gross_rent AS rent
             FROM lake.federal.acs_zcta_demographics
             WHERE median_gross_rent IS NOT NULL
+        ),
+        ranked AS (
+            SELECT zcta, PERCENT_RANK() OVER (ORDER BY rent) AS pctile
+            FROM zips
         )
-        SELECT PERCENT_RANK() OVER (ORDER BY rent) AS pctile
-        FROM zips
-        WHERE zcta = ?
+        SELECT pctile FROM ranked WHERE zcta = ?
     """, [zipcode]))
 
     queries.append(("pctile_311", """
@@ -324,10 +336,12 @@ def build_queries(
             FROM lake.social_services.n311_service_requests
             WHERE TRY_CAST(created_date AS DATE) >= CURRENT_DATE - INTERVAL '1 year'
             GROUP BY incident_zip
+        ),
+        ranked AS (
+            SELECT incident_zip, PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
+            FROM zip_counts
         )
-        SELECT PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
-        FROM zip_counts
-        WHERE incident_zip = ?
+        SELECT pctile FROM ranked WHERE incident_zip = ?
     """, [zipcode]))
 
     # ══════════════════════════════════════════════════════════════════════
@@ -381,10 +395,12 @@ def build_queries(
                 SELECT addr_pct_cd, COUNT(*) AS cnt
                 FROM lake.public_safety.nypd_complaints_ytd
                 GROUP BY addr_pct_cd
+            ),
+            ranked AS (
+                SELECT addr_pct_cd, PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
+                FROM pct_counts
             )
-            SELECT PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
-            FROM pct_counts
-            WHERE addr_pct_cd = ?
+            SELECT pctile FROM ranked WHERE addr_pct_cd = ?
         """, [pct_val]))
 
     # ══════════════════════════════════════════════════════════════════════
@@ -392,37 +408,37 @@ def build_queries(
     # ══════════════════════════════════════════════════════════════════════
 
     queries.append(("school_nearest", """
-        SELECT school_name, dbn, primary_address,
-               grade_span_min, grade_span_max
-        FROM lake.federal.urban_school_directory
-        WHERE zip = ?
+        SELECT DISTINCT school_name, dbn
+        FROM lake.education.quality_reports
+        WHERE dbn LIKE ? || '%'
+          AND school_name IS NOT NULL
         ORDER BY school_name
         LIMIT 3
-    """, [zipcode]))
+    """, [boro_code]))
 
     queries.append(("school_ela", """
-        SELECT s.school_name, e.mean_scale_score,
-               e.pct_level_3_and_4 AS level_3_4_pct
-        FROM lake.education.ela_results e
-        JOIN lake.federal.urban_school_directory s ON e.geographic_subdivision = s.dbn
-        WHERE s.zip = ?
-          AND e.report_category = 'School'
-          AND e.grade = 'All Grades'
-        ORDER BY e.pct_level_3_and_4 DESC NULLS LAST
+        SELECT school_name, mean_scale_score,
+               level_3_4_1 AS level_3_4_pct
+        FROM lake.education.ela_results
+        WHERE report_category = 'School'
+          AND grade = 'All Grades'
+          AND geographic_subdivision LIKE ? || '%'
+          AND year = (SELECT MAX(year) FROM lake.education.ela_results)
+        ORDER BY TRY_CAST(level_3_4_1 AS DOUBLE) DESC NULLS LAST
         LIMIT 3
-    """, [zipcode]))
+    """, [boro_code]))
 
     queries.append(("school_math", """
-        SELECT s.school_name, m.mean_scale_score,
-               m.pct_level_3_and_4 AS level_3_4_pct
-        FROM lake.education.math_results m
-        JOIN lake.federal.urban_school_directory s ON m.geographic_division = s.dbn
-        WHERE s.zip = ?
-          AND m.report_category = 'School'
-          AND m.grade = 'All Grades'
-        ORDER BY m.pct_level_3_and_4 DESC NULLS LAST
+        SELECT school_name, mean_scale_score,
+               level_3_4_1 AS level_3_4_pct
+        FROM lake.education.math_results
+        WHERE report_category = 'School'
+          AND grade = 'All Grades'
+          AND geographic_subdivision LIKE ? || '%'
+          AND year = (SELECT MAX(year) FROM lake.education.math_results)
+        ORDER BY TRY_CAST(level_3_4_1 AS DOUBLE) DESC NULLS LAST
         LIMIT 3
-    """, [zipcode]))
+    """, [boro_code]))
 
     # ══════════════════════════════════════════════════════════════════════
     # HEALTH (ZIP/UHF, ~5 queries)
@@ -457,10 +473,12 @@ def build_queries(
                    COUNT(*) FILTER (WHERE result ILIKE '%active%') AS active
             FROM lake.health.rodent_inspections
             GROUP BY zip_code
+        ),
+        ranked AS (
+            SELECT zip_code, PERCENT_RANK() OVER (ORDER BY active) AS pctile
+            FROM zip_rats
         )
-        SELECT PERCENT_RANK() OVER (ORDER BY active) AS pctile
-        FROM zip_rats
-        WHERE zip_code = ?
+        SELECT pctile FROM ranked WHERE zip_code = ?
     """, [zipcode]))
 
     queries.append(("health_asthma", """
@@ -476,24 +494,26 @@ def build_queries(
     # ══════════════════════════════════════════════════════════════════════
 
     queries.append(("env_flood", """
-        SELECT flood_zone
-        FROM lake.environment.flood_vulnerability
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        SELECT f.fshri
+        FROM lake.environment.flood_vulnerability f
+        JOIN lake.city_government.pluto p
+          ON f.geoid = '36' || LPAD(
+               CASE p.borocode
+                 WHEN '1' THEN '061' WHEN '2' THEN '005'
+                 WHEN '3' THEN '047' WHEN '4' THEN '081'
+                 WHEN '5' THEN '085' ELSE '000' END, 3, '0')
+             || LPAD(CAST(p.tract2010 AS VARCHAR), 6, '0')
+        WHERE p.borocode || LPAD(p.block::VARCHAR, 5, '0')
+                         || LPAD(p.lot::VARCHAR, 4, '0') = ?
         LIMIT 1
     """, [bbl]))
 
     queries.append(("env_heat", """
-        SELECT heat_vulnerability_index
+        SELECT hvi
         FROM lake.environment.heat_vulnerability
-        WHERE nta_code = (
-            SELECT nta
-            FROM lake.city_government.pluto
-            WHERE borocode || LPAD(block::VARCHAR, 5, '0')
-                           || LPAD(lot::VARCHAR, 4, '0') = ?
-            LIMIT 1
-        )
+        WHERE zcta20 = ?
         LIMIT 1
-    """, [bbl]))
+    """, [zipcode]))
 
     queries.append(("env_air", """
         SELECT name, AVG(TRY_CAST(data_value AS DOUBLE)) AS avg_val
@@ -585,21 +605,17 @@ def build_queries(
     # ══════════════════════════════════════════════════════════════════════
 
     queries.append(("fun_baby_names", """
-        SELECT child_s_first_name AS name, gender, COUNT(*) AS cnt
+        SELECT nm, gndr, TRY_CAST(cnt AS INT) AS cnt
         FROM lake.recreation.baby_names
-        WHERE UPPER(borough) = UPPER(?)
-        GROUP BY name, gender
-        ORDER BY cnt DESC
+        WHERE brth_yr = (SELECT MAX(brth_yr) FROM lake.recreation.baby_names)
+        ORDER BY TRY_CAST(cnt AS INT) DESC
         LIMIT 2
-    """, [borough]))
+    """, None))
 
     queries.append(("fun_dogs", """
-        SELECT breed_name, COUNT(*) AS cnt
+        SELECT COUNT(*) AS cnt
         FROM lake.recreation.canine_waste
-        WHERE zip_code = ?
-        GROUP BY breed_name
-        ORDER BY cnt DESC
-        LIMIT 1
+        WHERE zipcode = ?
     """, [zipcode]))
 
     queries.append(("fun_trees", """
@@ -621,7 +637,7 @@ def build_queries(
     """, [street]))
 
     queries.append(("fun_fishing", """
-        SELECT waterbody, species
+        SELECT site
         FROM lake.recreation.fishing_sites
         ORDER BY RANDOM()
         LIMIT 1

@@ -57,8 +57,11 @@ def fmt(n: object, kind: str = "auto") -> str:
             return str(n)
         return f"{n:,}"
     if isinstance(n, float):
-        if n == int(n) and 1800 <= int(n) <= 2100:
-            return str(int(n))
+        if n == int(n):
+            i = int(n)
+            if 1800 <= i <= 2100:
+                return str(i)
+            return f"{i:,}"
         return f"{n:,.1f}"
     return str(n)
 
@@ -252,10 +255,11 @@ def assemble_report(ctx: dict, results: dict) -> str:
     if acs:
         hood_lines.append(f" Population: {fmt(acs.get('total_population'))}")
         hood_lines.append(f" Median income: {fmt(acs.get('median_household_income'), 'money')}")
-        hood_lines.append(f" Poverty rate: {fmt(acs.get('poverty_rate'), 'pct')}")
+        poverty_rate = acs.get("poverty_rate")
+        if poverty_rate is not None:
+            hood_lines.append(f" Poverty rate: {fmt(poverty_rate, 'pct')}")
         hood_lines.append(f" Median rent: {fmt(acs.get('median_gross_rent'), 'money')}")
-        hood_lines.append(f" Rent-burdened: {fmt(acs.get('pct_renter_cost_burdened'), 'pct')}")
-        hood_lines.append(f" Foreign-born: {fmt(acs.get('pct_foreign_born'), 'pct')}")
+        hood_lines.append(f" Median home value: {fmt(acs.get('median_home_value'), 'money')}")
     if n311:
         top = n311[0]
         hood_lines.append(
@@ -350,10 +354,14 @@ def assemble_report(ctx: dict, results: dict) -> str:
     air = _get(results, "env_air")
 
     env_lines: list[str] = []
-    if flood:
-        env_lines.append(f" Flood zone: {flood.get('flood_zone', 'unknown')}")
-    if heat and heat.get("heat_vulnerability_index"):
-        env_lines.append(f" Heat vulnerability: {fmt(heat['heat_vulnerability_index'])}/5")
+    if flood and flood.get("fshri"):
+        score = flood["fshri"]
+        level = {"1": "Minimal", "2": "Low", "3": "Moderate", "4": "High", "5": "Very High"}.get(
+            str(score), str(score)
+        )
+        env_lines.append(f" Flood risk: {level} ({score}/5)")
+    if heat and heat.get("hvi"):
+        env_lines.append(f" Heat vulnerability: {fmt(heat['hvi'])}/5")
     if air and air.get("pm25"):
         env_lines.append(f" PM2.5 (fine particulate): {fmt(air['pm25'])} ug/m3")
     if energy and energy.get("energy_star_score"):
@@ -397,23 +405,23 @@ def assemble_report(ctx: dict, results: dict) -> str:
     corps = _get(results, "building_corps_at_address")
 
     fun_lines: list[str] = []
-    if dogs and dogs.get("breed_name"):
-        fun_lines.append(f" \U0001f415 Most popular dog: {dogs['breed_name']}")
+    if dogs and dogs.get("cnt", 0) > 0:
+        fun_lines.append(f" Dog bag dispensers in ZIP: {fmt(dogs['cnt'])}")
     if trees:
         top_tree = trees[0].get("species", "?")
         tree_count = sum(t.get("cnt", 0) for t in trees)
-        fun_lines.append(f" \U0001f333 Your street trees: {fmt(tree_count)} {top_tree}")
+        fun_lines.append(f" Your street trees: {fmt(tree_count)} {top_tree}")
     if films:
-        fun_lines.append(f" \U0001f3ac Film shoots nearby: {len(films)} this year")
+        fun_lines.append(f" Film shoots nearby: {len(films)} this year")
     if babies:
         top_baby = babies[0]
         fun_lines.append(
-            f" \U0001f476 Top baby name in {borough}: {top_baby.get('name', '?')}"
+            f" Top baby name: {top_baby.get('nm', '?')} ({top_baby.get('cnt', '?')} born)"
         )
-    if fishing:
-        fun_lines.append(f" \U0001f3a3 Nearest fishing: {fishing.get('waterbody', '?')}")
+    if fishing and fishing.get("site"):
+        fun_lines.append(f" Nearest fishing: {fishing['site']}")
     if corps and corps.get("cnt", 0) > 0:
-        fun_lines.append(f" \U0001f3e2 Corporations at this address: {fmt(corps['cnt'])}")
+        fun_lines.append(f" Corporations at this address: {fmt(corps['cnt'])}")
 
     _section_or_empty(lines, "FUN FACTS", fun_lines)
 
