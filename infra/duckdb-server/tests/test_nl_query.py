@@ -57,3 +57,12 @@ def test_build_schema_context_multiple_tables():
     result = build_schema_context(tables)
     assert "hpd_violations" in result
     assert "hpd_complaints" in result
+
+
+def test_format_examples_returns_pairs():
+    from shared.nl_examples import format_examples, NL_SQL_EXAMPLES
+    result = format_examples(3)
+    assert "Question:" in result
+    assert "SQL:" in result
+    assert result.count("Question:") == 3
+    assert len(NL_SQL_EXAMPLES) >= 8
