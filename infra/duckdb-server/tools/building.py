@@ -33,8 +33,9 @@ _ORDINAL_MAP = {
 }
 
 _ABBREV_MAP = {
-    "AVE": "AVENUE", "ST": "STREET", "BLVD": "BOULEVARD", "DR": "DRIVE",
-    "PL": "PLACE", "RD": "ROAD", "CT": "COURT", "LN": "LANE", "PKY": "PARKWAY",
+    "AVE": "AVENUE", "ST": "STREET", "BLVD": "BOULEVARD", "BL": "BOULEVARD",
+    "DR": "DRIVE", "PL": "PLACE", "RD": "ROAD", "CT": "COURT", "LN": "LANE",
+    "PKY": "PARKWAY", "PKWY": "PARKWAY", "TER": "TERRACE", "HWY": "HIGHWAY",
 }
 
 _BOROUGH_MAP = {
@@ -42,7 +43,7 @@ _BOROUGH_MAP = {
     "BRONX": "2", "BX": "2", "THE BRONX": "2",
     "BROOKLYN": "3", "BK": "3", "BKLYN": "3", "KINGS": "3",
     "QUEENS": "4", "QN": "4", "QNS": "4",
-    "STATEN ISLAND": "5", "SI": "5", "RICHMOND": "5",
+    "STATEN ISLAND": "5", "SI": "5", "RICHMOND": "5", "SHAOLIN": "5",
 }
 
 
@@ -58,6 +59,8 @@ def _normalize_address(raw: str) -> str:
     for boro in sorted(_BOROUGH_MAP.keys(), key=len, reverse=True):
         s = re.sub(rf',?\s*{re.escape(boro)}\s*$', '', s)
     s = s.strip().rstrip(',').strip()
+    # Strip apartment/unit/floor/suite suffixes
+    s = re.sub(r'\s*(APT|UNIT|FL|FLOOR|STE|SUITE|RM|ROOM|#)\s*\S+\s*$', '', s)
     # Strip ordinal suffixes: 5TH -> 5, 3RD -> 3
     s = re.sub(r'\b(\d+)(?:ST|ND|RD|TH)\b', r'\1', s)
     # Expand spelled-out ordinals: FIFTH -> 5

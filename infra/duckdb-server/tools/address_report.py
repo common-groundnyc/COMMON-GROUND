@@ -1,5 +1,6 @@
 """address_report() — 360-degree dossier for any NYC address."""
 
+import re
 from typing import Annotated
 
 from fastmcp import Context
@@ -33,10 +34,17 @@ def address_report(
     nearby services, and fun facts. Every metric ranked against the city.
     Use this as the first lookup for any address. For deeper investigation,
     use the drill-deeper suggestions at the end of the report."""
+    if not address or not address.strip():
+        raise ToolError("Please provide a NYC street address, e.g. '305 Linden Blvd, Brooklyn'")
+
     pool = ctx.lifespan_context["pool"]
 
-    # Step 1: resolve address -> BBL + derive all join keys
-    ctx_data = _resolve_context(pool, address)
+    # Step 1: detect BBL (10-digit number) or resolve address
+    stripped = address.strip()
+    if re.match(r'^\d{10}$', stripped):
+        ctx_data = _resolve_context_by_bbl(pool, stripped)
+    else:
+        ctx_data = _resolve_context(pool, address)
     bbl = ctx_data["bbl"]
 
     # Step 2: build and execute all queries in parallel
@@ -69,6 +77,54 @@ def address_report(
 # ---------------------------------------------------------------------------
 # Context resolution
 # ---------------------------------------------------------------------------
+
+
+def _resolve_context_by_bbl(pool, bbl: str) -> dict:
+    """Resolve a raw 10-digit BBL directly — skip address resolution."""
+    cols, rows = execute(pool, """
+        SELECT
+            borocode || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0') AS bbl,
+            address, borough, zipcode AS zip, zonedist1 AS zoning,
+            bldgclass,
+            TRY_CAST(numfloors AS INT) AS numfloors,
+            TRY_CAST(unitsres AS INT) AS unitsres,
+            TRY_CAST(unitstotal AS INT) AS unitstotal,
+            TRY_CAST(yearbuilt AS INT) AS yearbuilt,
+            TRY_CAST(assesstot AS BIGINT) AS assesstot,
+            TRY_CAST(assessland AS BIGINT) AS assessland,
+            ownername,
+            cd AS community_district, council AS council_district,
+            tract2010 AS census_tract,
+            TRY_CAST(lotarea AS INT) AS lotarea,
+            TRY_CAST(bldgarea AS INT) AS bldgarea
+        FROM lake.city_government.pluto
+        WHERE borocode || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0') = ?
+        LIMIT 1
+    """, [bbl])
+
+    if not rows:
+        raise ToolError(f"BBL {bbl} not found in PLUTO. Check the 10-digit BBL and try again.")
+
+    data = dict(zip(cols, rows[0]))
+    data["bbl"] = bbl
+
+    _, pct_rows = safe_query(pool, """
+        SELECT TRY_CAST(REGEXP_EXTRACT(incident_address, '(\\d+)\\s+PCT', 1) AS INT) AS pct
+        FROM lake.social_services.n311_service_requests
+        WHERE incident_zip = ? AND pct IS NOT NULL
+        GROUP BY pct ORDER BY COUNT(*) DESC LIMIT 1
+    """, [data.get("zip", "")])
+
+    if not pct_rows:
+        _, pct_rows = safe_query(pool, """
+            SELECT DISTINCT addr_pct_cd AS pct
+            FROM lake.public_safety.nypd_complaints_ytd
+            WHERE TRY_CAST(SUBSTR(?, 1, 1) AS INT) IS NOT NULL
+            LIMIT 1
+        """, [bbl])
+
+    data["precinct"] = str(pct_rows[0][0]) if pct_rows and pct_rows[0][0] else ""
+    return data
 
 
 def _resolve_context(pool, address: str) -> dict:
