@@ -196,6 +196,77 @@ def try_explain(pool, sql: str) -> str | None:
         return str(e)
 
 
+def nl_query(question, pool, emb_conn, embed_fn, api_key, format="text", ctx=None):
+    """Full NL-to-SQL pipeline: table selection -> SQL generation -> validation -> execution."""
+    from fastmcp.tools.tool import ToolResult
+
+    t0 = time.time()
+
+    # Step 1: Find relevant tables via vector similarity
+    relevant_tables = select_tables(emb_conn, embed_fn, question, top_k=5)
+    if not relevant_tables:
+        return ToolResult(
+            content="Could not find relevant tables for your question. "
+            "Try rephrasing or use mode='catalog' to explore available data."
+        )
+
+    # Step 2: Fetch full schemas for selected tables
+    table_schemas = fetch_table_schemas(pool, relevant_tables)
+    if not table_schemas:
+        return ToolResult(content="Could not load schema information for matched tables.")
+
+    schema_context = build_schema_context(table_schemas)
+
+    # Step 3: Generate SQL
+    sql = generate_sql(question, schema_context, api_key)
+
+    # Step 4: Validate
+    if not validate_generated_sql(sql):
+        return ToolResult(
+            content=f"Generated SQL failed validation. Try rephrasing your question.\n\nGenerated: {sql}"
+        )
+
+    # Step 5: EXPLAIN check + self-correction (max 2 retries)
+    explain_error = try_explain(pool, sql)
+    retries = 0
+    while explain_error and retries < 2:
+        retries += 1
+        correction = compose_correction_prompt(question, sql, explain_error, schema_context)
+        sql = generate_sql(correction, "", api_key)
+        if not validate_generated_sql(sql):
+            break
+        explain_error = try_explain(pool, sql)
+
+    if explain_error:
+        return ToolResult(
+            content=f"Could not generate valid SQL after {retries + 1} attempts.\n\n"
+            f"Last SQL: {sql}\nError: {explain_error}\n\n"
+            "Try rephrasing, or use mode='sql' to write SQL directly."
+        )
+
+    # Step 6: Execute
+    elapsed_gen = round((time.time() - t0) * 1000)
+
+    from tools.query import _sql as execute_sql
+    result = execute_sql(pool, sql, format, ctx)
+
+    gen_note = (
+        f"\n\n---\n*Generated from: \"{question}\"*\n"
+        f"*Tables used: {', '.join(relevant_tables)}*\n"
+        f"*Generation: {elapsed_gen}ms, {retries} retries*\n"
+        f"```sql\n{sql}\n```"
+    )
+
+    if isinstance(result, ToolResult):
+        return ToolResult(
+            content=result.content + gen_note,
+            structured_content=result.structured_content,
+            meta={**(result.meta or {}), "nl_generation_ms": elapsed_gen,
+                  "nl_retries": retries, "nl_tables": relevant_tables, "nl_sql": sql},
+        )
+    return result + gen_note
+
+
 def compose_correction_prompt(original_question: str, bad_sql: str, error: str, schema_context: str) -> str:
     """Compose a prompt for correcting a failed SQL query."""
     return f"""{_SYSTEM_PROMPT}

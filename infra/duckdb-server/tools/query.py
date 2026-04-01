@@ -472,10 +472,10 @@ def query(
         ],
     )],
     mode: Annotated[
-        Literal["sql", "catalog", "schemas", "tables", "describe", "health", "admin"],
+        Literal["sql", "nl", "catalog", "schemas", "tables", "describe", "health", "admin"],
         Field(
             default="sql",
-            description="'sql' executes read-only SQL against the lake. 'catalog' searches table names and descriptions by keyword. 'schemas' lists all schemas. 'tables' lists tables in a schema. 'describe' shows columns and types for a table. 'health' shows lake freshness and row counts. 'admin' executes DDL (CREATE OR REPLACE VIEW only).",
+            description="'sql' executes read-only SQL against the lake. 'nl' translates a natural language question into SQL and executes it (e.g., 'how many violations in Brooklyn?'). 'catalog' searches table names and descriptions by keyword. 'schemas' lists all schemas. 'tables' lists tables in a schema. 'describe' shows columns and types for a table. 'health' shows lake freshness and row counts. 'admin' executes DDL (CREATE OR REPLACE VIEW only).",
         )
     ] = "sql",
     format: Annotated[
@@ -487,12 +487,27 @@ def query(
     ] = "text",
     ctx: Context = None,
 ) -> ToolResult:
-    """Execute SQL queries, discover schemas, search the catalog, and export data from the NYC data lake. 294 tables across 14 schemas in the 'lake' database using lake.schema.table format. Common schemas: housing (violations, permits, ACRIS sales), public_safety (arrests, complaints), education (test scores), health (inspections, COVID), city_government (contracts, payroll). Start with limit=20 for exploration. Do NOT use for building, entity, or neighborhood lookups since the domain tools are faster and richer. Use query for custom analysis the domain tools do not cover."""
+    """Execute SQL queries, discover schemas, search the catalog, and export data from the NYC data lake. 294 tables across 14 schemas. Use mode='nl' for natural language questions (e.g., 'how many violations in Brooklyn?'). Use mode='sql' for raw SQL."""
     pool = ctx.lifespan_context["pool"]
     catalog = ctx.lifespan_context.get("catalog", {})
 
     if mode == "sql":
         return _sql(pool, input, format, ctx)
+    elif mode == "nl":
+        from tools.nl_query import nl_query
+        emb_conn = ctx.lifespan_context.get("emb_conn")
+        embed_fn = ctx.lifespan_context.get("embed_fn")
+        api_key = ""
+        try:
+            import embedder
+            api_key = embedder._GEMINI_KEYS[0] if embedder._GEMINI_KEYS else ""
+        except Exception:
+            pass
+        if not embed_fn or not emb_conn:
+            raise ToolError("Embeddings not available. NL query requires the embedding pipeline.")
+        if not api_key:
+            raise ToolError("No Gemini API key available for NL query generation.")
+        return nl_query(input, pool, emb_conn, embed_fn, api_key, format, ctx=ctx)
     elif mode == "admin":
         return _admin(pool, input, ctx)
     elif mode == "catalog":
@@ -507,4 +522,4 @@ def query(
     elif mode == "health":
         return _health(pool, input if input.strip() else None)
     else:
-        raise ToolError(f"Unknown mode '{mode}'. Use: sql, catalog, schemas, tables, describe, health, admin.")
+        raise ToolError(f"Unknown mode '{mode}'. Use: sql, nl, catalog, schemas, tables, describe, health, admin.")

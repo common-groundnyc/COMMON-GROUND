@@ -97,6 +97,30 @@ def safe_query(pool: CursorPool, sql: str, params: list | None = None) -> tuple[
         return [], []
 
 
+def parallel_queries(
+    pool: CursorPool,
+    queries: list[tuple[str, str, list | None]],
+) -> dict[str, tuple[list, list]]:
+    """Run multiple (name, sql, params) queries concurrently, return {name: (cols, rows)}."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results: dict[str, tuple[list, list]] = {}
+
+    def _run(name: str, sql: str, params: list | None) -> tuple[str, tuple[list, list]]:
+        return name, safe_query(pool, sql, params)
+
+    with ThreadPoolExecutor(max_workers=min(len(queries), 20)) as ex:
+        futures = {
+            ex.submit(_run, name, sql, params): name
+            for name, sql, params in queries
+        }
+        for fut in as_completed(futures):
+            name, result = fut.result()
+            results[name] = result
+
+    return results
+
+
 def build_catalog(conn) -> dict:
     """Build schema -> table -> {row_count, column_count} catalog from DuckLake."""
     catalog: dict = {}
