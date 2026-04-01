@@ -187,3 +187,34 @@ def test_build_entity_master_has_expected_columns(mock_lake):
         "member_ids",
     }
     assert expected == cols
+
+
+def test_entity_id_stability_across_rebuilds():
+    """Same cluster members produce same entity_id regardless of Splink's cluster labels."""
+    cluster_1_members = ["100", "200", "300"]
+    cluster_2_members = ["400", "500"]
+
+    run_1_ids = {
+        "cluster_a": generate_entity_id(cluster_1_members),
+        "cluster_b": generate_entity_id(cluster_2_members),
+    }
+
+    # Simulate second run — Splink assigns NEW cluster_ids but members are the same
+    run_2_ids = {
+        "cluster_x": generate_entity_id(cluster_1_members),
+        "cluster_y": generate_entity_id(cluster_2_members),
+    }
+
+    assert run_1_ids["cluster_a"] == run_2_ids["cluster_x"]
+    assert run_1_ids["cluster_b"] == run_2_ids["cluster_y"]
+
+
+def test_entity_id_changes_when_cluster_membership_changes():
+    """A new member joining a cluster produces a different entity_id."""
+    original_members = ["100", "200", "300"]
+    expanded_members = ["100", "200", "300", "400"]
+
+    original_id = generate_entity_id(original_members)
+    expanded_id = generate_entity_id(expanded_members)
+
+    assert original_id != expanded_id
