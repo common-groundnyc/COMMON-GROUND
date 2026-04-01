@@ -2215,6 +2215,53 @@ async def catalog_json(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
+# ---------------------------------------------------------------------------
+# Public HTTP API — explore endpoints for data explorer UI
+# ---------------------------------------------------------------------------
+
+from api.explore import handle_table_meta as _handle_table_meta
+from api.explore import handle_query as _handle_query
+
+
+@mcp.custom_route("/api/table-meta", methods=["GET", "OPTIONS"])
+async def table_meta_json(request: Request) -> JSONResponse:
+    """Return column metadata for a table."""
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+    if _shared_pool is None or not _shared_catalog:
+        return JSONResponse({"error": "Server starting up"}, status_code=503)
+    return await _handle_table_meta(request, _shared_pool, _shared_catalog, _cors_origin(request))
+
+
+@mcp.custom_route("/api/query", methods=["POST", "OPTIONS"])
+async def query_json(request: Request) -> JSONResponse:
+    """Execute a filtered query against a table."""
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+    if _shared_pool is None or not _shared_catalog:
+        return JSONResponse({"error": "Server starting up"}, status_code=503)
+    return await _handle_query(request, _shared_pool, _shared_catalog, _cors_origin(request))
+
+
 _well_known_routes = [
     Route("/.well-known/oauth-authorization-server", _oauth_stub, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server/{path:path}", _oauth_stub, methods=["GET"]),
