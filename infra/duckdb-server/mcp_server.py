@@ -927,367 +927,381 @@ async def app_lifespan(server):
                 conn.execute("CREATE OR REPLACE TABLE main.graph_epa_facilities (facility_name VARCHAR, street VARCHAR, city VARCHAR, zip VARCHAR, county VARCHAR, lat DOUBLE, lon DOUBLE, quarters_noncompliant INT, inspection_count INT, formal_actions INT, penalties INT)")
                 print(f"Warning: EPA facilities: {e}", flush=True)
 
-            print("Graph table build: core + extended tables complete", flush=True)
+            print("Graph table build: core tables complete", flush=True)
 
-            # --- Transaction network ---
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_tx_entities AS
-                    SELECT DISTINCT name AS entity_name, party_type
-                    FROM lake.housing.acris_parties
-                    WHERE name IS NOT NULL AND LENGTH(name) > 1
-                    AND party_type IN ('1', '2')
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_tx_edges AS
-                    SELECT
-                        p.name AS entity_name, p.party_type,
-                        (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
-                        m.document_id, TRY_CAST(m.document_date AS DATE) AS doc_date,
-                        TRY_CAST(m.document_amt AS DOUBLE) AS amount, m.doc_type
-                    FROM lake.housing.acris_parties p
-                    JOIN lake.housing.acris_master m ON p.document_id = m.document_id
-                    JOIN lake.housing.acris_legals l ON m.document_id = l.document_id
-                    WHERE p.name IS NOT NULL AND LENGTH(p.name) > 1
-                    AND m.doc_type IN ('DEED', 'DEEDO', 'DEED, RP', 'MTGE', 'AGMT', 'ASST')
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_tx_shared AS
-                    SELECT DISTINCT a.entity_name AS src, b.entity_name AS dst, a.document_id
-                    FROM main.graph_tx_edges a
-                    JOIN main.graph_tx_edges b ON a.document_id = b.document_id
-                    AND a.entity_name < b.entity_name
-                """)
-            except Exception as e:
-                for t in ["graph_tx_entities", "graph_tx_edges", "graph_tx_shared"]:
+            # Mark graph ready with core tables — extended tables build in background
+            graph_ready = True
+
+            # --- Extended graph tables (background thread — heavy ACRIS joins) ---
+            def _build_extended_graph():
+                try:
+                    # --- Transaction network ---
                     try:
-                        conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
-                    except Exception:
-                        pass
-                print(f"Warning: transaction network: {e}", flush=True)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_tx_entities AS
+                            SELECT DISTINCT name AS entity_name, party_type
+                            FROM lake.housing.acris_parties
+                            WHERE name IS NOT NULL AND LENGTH(name) > 1
+                            AND party_type IN ('1', '2')
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_tx_edges AS
+                            SELECT
+                                p.name AS entity_name, p.party_type,
+                                (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
+                                m.document_id, TRY_CAST(m.document_date AS DATE) AS doc_date,
+                                TRY_CAST(m.document_amt AS DOUBLE) AS amount, m.doc_type
+                            FROM lake.housing.acris_parties p
+                            JOIN lake.housing.acris_master m ON p.document_id = m.document_id
+                            JOIN lake.housing.acris_legals l ON m.document_id = l.document_id
+                            WHERE p.name IS NOT NULL AND LENGTH(p.name) > 1
+                            AND m.doc_type IN ('DEED', 'DEEDO', 'DEED, RP', 'MTGE', 'AGMT', 'ASST')
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_tx_shared AS
+                            SELECT DISTINCT a.entity_name AS src, b.entity_name AS dst, a.document_id
+                            FROM main.graph_tx_edges a
+                            JOIN main.graph_tx_edges b ON a.document_id = b.document_id
+                            AND a.entity_name < b.entity_name
+                        """)
+                    except Exception as e:
+                        for t in ["graph_tx_entities", "graph_tx_edges", "graph_tx_shared"]:
+                            try:
+                                conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
+                            except Exception:
+                                pass
+                        print(f"Warning: transaction network: {e}", flush=True)
 
-            # --- Corporate web ---
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_corps AS
-                    SELECT DISTINCT
-                        dos_id, current_entity_name AS corp_name,
-                        COALESCE(jurisdiction, '') AS jurisdiction,
-                        COALESCE(entity_formation_date, '') AS formed,
-                        COALESCE(dos_process_name, '') AS registered_agent
-                    FROM lake.business.nys_corporations
-                    WHERE current_entity_name IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_corp_people AS
-                    SELECT DISTINCT
-                        dos_id, COALESCE(name, '') AS person_name, COALESCE(title, '') AS title
-                    FROM lake.business.nys_corporation_contacts
-                    WHERE name IS NOT NULL AND LENGTH(name) > 1
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_corp_officer_edges AS
-                    SELECT DISTINCT a.dos_id AS corp_id, a.person_name, b.dos_id AS other_corp_id
-                    FROM main.graph_corp_people a
-                    JOIN main.graph_corp_people b ON UPPER(a.person_name) = UPPER(b.person_name)
-                    AND a.dos_id != b.dos_id
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_corp_shared_officer AS
-                    SELECT DISTINCT a.dos_id AS corp1, b.dos_id AS corp2, a.person_name
-                    FROM main.graph_corp_people a
-                    JOIN main.graph_corp_people b ON UPPER(a.person_name) = UPPER(b.person_name)
-                    AND a.dos_id < b.dos_id
-                """)
-            except Exception as e:
-                for t in ["graph_corps", "graph_corp_people", "graph_corp_officer_edges", "graph_corp_shared_officer"]:
+                    # --- Corporate web ---
                     try:
-                        conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
-                    except Exception:
-                        pass
-                print(f"Warning: corporate web: {e}", flush=True)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_corps AS
+                            SELECT DISTINCT
+                                dos_id, current_entity_name AS corp_name,
+                                COALESCE(jurisdiction, '') AS jurisdiction,
+                                COALESCE(entity_formation_date, '') AS formed,
+                                COALESCE(dos_process_name, '') AS registered_agent
+                            FROM lake.business.nys_corporations
+                            WHERE current_entity_name IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_corp_people AS
+                            SELECT DISTINCT
+                                dos_id, COALESCE(name, '') AS person_name, COALESCE(title, '') AS title
+                            FROM lake.business.nys_corporation_contacts
+                            WHERE name IS NOT NULL AND LENGTH(name) > 1
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_corp_officer_edges AS
+                            SELECT DISTINCT a.dos_id AS corp_id, a.person_name, b.dos_id AS other_corp_id
+                            FROM main.graph_corp_people a
+                            JOIN main.graph_corp_people b ON UPPER(a.person_name) = UPPER(b.person_name)
+                            AND a.dos_id != b.dos_id
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_corp_shared_officer AS
+                            SELECT DISTINCT a.dos_id AS corp1, b.dos_id AS corp2, a.person_name
+                            FROM main.graph_corp_people a
+                            JOIN main.graph_corp_people b ON UPPER(a.person_name) = UPPER(b.person_name)
+                            AND a.dos_id < b.dos_id
+                        """)
+                    except Exception as e:
+                        for t in ["graph_corps", "graph_corp_people", "graph_corp_officer_edges", "graph_corp_shared_officer"]:
+                            try:
+                                conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
+                            except Exception:
+                                pass
+                        print(f"Warning: corporate web: {e}", flush=True)
 
-            # --- Influence network ---
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_pol_entities AS
-                    SELECT DISTINCT COALESCE(name, '') AS entity_name, 'donor' AS role
-                    FROM lake.city_government.campaign_contributions WHERE name IS NOT NULL
-                    UNION
-                    SELECT DISTINCT COALESCE(recipname, '') AS entity_name, 'candidate' AS role
-                    FROM lake.city_government.campaign_contributions WHERE recipname IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_pol_donations AS
-                    SELECT COALESCE(name, '') AS donor, COALESCE(recipname, '') AS recipient,
-                           TRY_CAST(amnt AS DOUBLE) AS amount, TRY_CAST(date AS DATE) AS date
-                    FROM lake.city_government.campaign_contributions
-                    WHERE name IS NOT NULL AND recipname IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_pol_contracts AS
-                    SELECT DISTINCT
-                        vendorname AS vendor, agencyname AS agency,
-                        TRY_CAST(currentamount AS DOUBLE) AS amount
-                    FROM lake.city_government.contract_awards
-                    WHERE vendorname IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_pol_lobbying AS
-                    SELECT DISTINCT
-                        COALESCE(lobbyist_name, '') AS lobbyist,
-                        COALESCE(client_name, '') AS client,
-                        COALESCE(government_body, '') AS target
-                    FROM lake.city_government.nys_lobbyist
-                    WHERE lobbyist_name IS NOT NULL
-                """)
-            except Exception as e:
-                for t in ["graph_pol_entities", "graph_pol_donations", "graph_pol_contracts", "graph_pol_lobbying"]:
+                    # --- Influence network ---
                     try:
-                        conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
-                    except Exception:
-                        pass
-                print(f"Warning: influence network: {e}", flush=True)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_pol_entities AS
+                            SELECT DISTINCT COALESCE(name, '') AS entity_name, 'donor' AS role
+                            FROM lake.city_government.campaign_contributions WHERE name IS NOT NULL
+                            UNION
+                            SELECT DISTINCT COALESCE(recipname, '') AS entity_name, 'candidate' AS role
+                            FROM lake.city_government.campaign_contributions WHERE recipname IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_pol_donations AS
+                            SELECT COALESCE(name, '') AS donor, COALESCE(recipname, '') AS recipient,
+                                   TRY_CAST(amnt AS DOUBLE) AS amount, TRY_CAST(date AS DATE) AS date
+                            FROM lake.city_government.campaign_contributions
+                            WHERE name IS NOT NULL AND recipname IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_pol_contracts AS
+                            SELECT DISTINCT
+                                vendorname AS vendor, agencyname AS agency,
+                                TRY_CAST(currentamount AS DOUBLE) AS amount
+                            FROM lake.city_government.contract_awards
+                            WHERE vendorname IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_pol_lobbying AS
+                            SELECT DISTINCT
+                                COALESCE(lobbyist_name, '') AS lobbyist,
+                                COALESCE(client_name, '') AS client,
+                                COALESCE(government_body, '') AS target
+                            FROM lake.city_government.nys_lobbyist
+                            WHERE lobbyist_name IS NOT NULL
+                        """)
+                    except Exception as e:
+                        for t in ["graph_pol_entities", "graph_pol_donations", "graph_pol_contracts", "graph_pol_lobbying"]:
+                            try:
+                                conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
+                            except Exception:
+                                pass
+                        print(f"Warning: influence network: {e}", flush=True)
 
-            # --- Contractor network ---
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_contractors AS
-                    SELECT DISTINCT
-                        licensee_s_business_name AS name,
-                        license_number, license_type
-                    FROM lake.housing.dob_now_permits
-                    WHERE licensee_s_business_name IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_permit_edges AS
-                    SELECT
-                        licensee_s_business_name AS contractor,
-                        job_filing_number AS permit,
-                        (CASE WHEN borough = 'MANHATTAN' THEN '1'
-                              WHEN borough = 'BRONX' THEN '2'
-                              WHEN borough = 'BROOKLYN' THEN '3'
-                              WHEN borough = 'QUEENS' THEN '4'
-                              WHEN borough = 'STATEN ISLAND' THEN '5'
-                              ELSE '0' END) || LPAD(COALESCE(block, '00000'), 5, '0') || LPAD(COALESCE(lot, '0000'), 4, '0') AS bbl
-                    FROM lake.housing.dob_now_permits
-                    WHERE licensee_s_business_name IS NOT NULL AND block IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_contractor_shared AS
-                    SELECT DISTINCT a.contractor AS c1, b.contractor AS c2, a.permit
-                    FROM main.graph_permit_edges a
-                    JOIN main.graph_permit_edges b ON a.permit = b.permit AND a.contractor < b.contractor
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_contractor_building_shared AS
-                    SELECT DISTINCT a.contractor AS c1, b.contractor AS c2, a.bbl
-                    FROM main.graph_permit_edges a
-                    JOIN main.graph_permit_edges b ON a.bbl = b.bbl AND a.contractor < b.contractor
-                """)
-            except Exception as e:
-                for t in ["graph_contractors", "graph_permit_edges", "graph_contractor_shared", "graph_contractor_building_shared"]:
+                    # --- Contractor network ---
                     try:
-                        conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
-                    except Exception:
-                        pass
-                print(f"Warning: contractor network: {e}", flush=True)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_contractors AS
+                            SELECT DISTINCT
+                                licensee_s_business_name AS name,
+                                license_number, license_type
+                            FROM lake.housing.dob_now_permits
+                            WHERE licensee_s_business_name IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_permit_edges AS
+                            SELECT
+                                licensee_s_business_name AS contractor,
+                                job_filing_number AS permit,
+                                (CASE WHEN borough = 'MANHATTAN' THEN '1'
+                                      WHEN borough = 'BRONX' THEN '2'
+                                      WHEN borough = 'BROOKLYN' THEN '3'
+                                      WHEN borough = 'QUEENS' THEN '4'
+                                      WHEN borough = 'STATEN ISLAND' THEN '5'
+                                      ELSE '0' END) || LPAD(COALESCE(block, '00000'), 5, '0') || LPAD(COALESCE(lot, '0000'), 4, '0') AS bbl
+                            FROM lake.housing.dob_now_permits
+                            WHERE licensee_s_business_name IS NOT NULL AND block IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_contractor_shared AS
+                            SELECT DISTINCT a.contractor AS c1, b.contractor AS c2, a.permit
+                            FROM main.graph_permit_edges a
+                            JOIN main.graph_permit_edges b ON a.permit = b.permit AND a.contractor < b.contractor
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_contractor_building_shared AS
+                            SELECT DISTINCT a.contractor AS c1, b.contractor AS c2, a.bbl
+                            FROM main.graph_permit_edges a
+                            JOIN main.graph_permit_edges b ON a.bbl = b.bbl AND a.contractor < b.contractor
+                        """)
+                    except Exception as e:
+                        for t in ["graph_contractors", "graph_permit_edges", "graph_contractor_shared", "graph_contractor_building_shared"]:
+                            try:
+                                conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
+                            except Exception:
+                                pass
+                        print(f"Warning: contractor network: {e}", flush=True)
 
-            # --- FEC + litigation ---
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_fec_contributions AS
-                    SELECT
-                        COALESCE(contributor_name, '') AS donor_name,
-                        COALESCE(committee_name, '') AS committee,
-                        TRY_CAST(contribution_receipt_amount AS DOUBLE) AS amount,
-                        TRY_CAST(contribution_receipt_date AS DATE) AS date,
-                        COALESCE(contributor_city, '') AS city,
-                        COALESCE(contributor_state, '') AS state,
-                        COALESCE(contributor_employer, '') AS employer,
-                        COALESCE(contributor_occupation, '') AS occupation
-                    FROM lake.city_government.fec_contributions
-                    WHERE contributor_name IS NOT NULL
-                """)
-            except Exception as e:
-                conn.execute("CREATE OR REPLACE TABLE main.graph_fec_contributions (donor_name VARCHAR, committee VARCHAR, amount DOUBLE, date DATE, city VARCHAR, state VARCHAR, employer VARCHAR, occupation VARCHAR)")
-                print(f"Warning: FEC contributions: {e}", flush=True)
-
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_litigation_respondents AS
-                    SELECT DISTINCT
-                        COALESCE(respondentname, '') AS respondent_name,
-                        COALESCE(penaltyapplied, '') AS penalty,
-                        TRY_CAST(penaltybalancedue AS DOUBLE) AS balance_due,
-                        COALESCE(violationdate, '') AS violation_date
-                    FROM lake.city_government.oath_hearings
-                    WHERE respondentname IS NOT NULL AND LENGTH(respondentname) > 1
-                """)
-            except Exception as e:
-                conn.execute("CREATE OR REPLACE TABLE main.graph_litigation_respondents (respondent_name VARCHAR, penalty VARCHAR, balance_due DOUBLE, violation_date VARCHAR)")
-                print(f"Warning: litigation respondents: {e}", flush=True)
-
-            # --- Officer misconduct ---
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_officers AS
-                    SELECT DISTINCT
-                        COALESCE(first_name, '') || ' ' || COALESCE(last_name, '') AS officer_name,
-                        COALESCE(shield_no, 0) AS shield_no,
-                        COALESCE(rank_incident, '') AS rank,
-                        COALESCE(command_at_incident, '') AS command
-                    FROM lake.public_safety.ccrb_complaints
-                    WHERE last_name IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_officer_complaints AS
-                    SELECT
-                        COALESCE(first_name, '') || ' ' || COALESCE(last_name, '') AS officer_name,
-                        COALESCE(allegation, '') AS allegation,
-                        COALESCE(fado_type, '') AS category,
-                        COALESCE(board_disposition, '') AS disposition
-                    FROM lake.public_safety.ccrb_complaints
-                    WHERE last_name IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_officer_shared_command AS
-                    SELECT DISTINCT
-                        a.officer_name AS officer1, b.officer_name AS officer2, a.command
-                    FROM main.graph_officers a
-                    JOIN main.graph_officers b ON a.command = b.command AND a.officer_name < b.officer_name
-                    WHERE a.command != '' AND a.command IS NOT NULL
-                """)
-            except Exception as e:
-                for t in ["graph_officers", "graph_officer_complaints", "graph_officer_shared_command"]:
+                    # --- FEC + litigation ---
                     try:
-                        conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
-                    except Exception:
-                        pass
-                print(f"Warning: officer misconduct: {e}", flush=True)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_fec_contributions AS
+                            SELECT
+                                COALESCE(contributor_name, '') AS donor_name,
+                                COALESCE(committee_name, '') AS committee,
+                                TRY_CAST(contribution_receipt_amount AS DOUBLE) AS amount,
+                                TRY_CAST(contribution_receipt_date AS DATE) AS date,
+                                COALESCE(contributor_city, '') AS city,
+                                COALESCE(contributor_state, '') AS state,
+                                COALESCE(contributor_employer, '') AS employer,
+                                COALESCE(contributor_occupation, '') AS occupation
+                            FROM lake.city_government.fec_contributions
+                            WHERE contributor_name IS NOT NULL
+                        """)
+                    except Exception as e:
+                        conn.execute("CREATE OR REPLACE TABLE main.graph_fec_contributions (donor_name VARCHAR, committee VARCHAR, amount DOUBLE, date DATE, city VARCHAR, state VARCHAR, employer VARCHAR, occupation VARCHAR)")
+                        print(f"Warning: FEC contributions: {e}", flush=True)
 
-            # --- COIB pay-to-play ---
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_coib_donors AS
-                    SELECT
-                        donor_name,
-                        STRING_AGG(DISTINCT donation_type, ', ') AS donation_types,
-                        SUM(amount) AS total_donated,
-                        COUNT(*) AS donation_count,
-                        FIRST(city) AS city,
-                        FIRST(state) AS state
-                    FROM lake.city_government.coib_donations
-                    WHERE donor_name IS NOT NULL
-                    GROUP BY donor_name
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_coib_policymakers AS
-                    SELECT
-                        policymaker_name,
-                        FIRST(agency) AS agency,
-                        FIRST(title) AS title,
-                        MAX(year) AS latest_year,
-                        COUNT(DISTINCT year) AS years_active
-                    FROM lake.city_government.coib_donations
-                    WHERE policymaker_name IS NOT NULL
-                    GROUP BY policymaker_name
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_coib_donor_edges AS
-                    SELECT DISTINCT
-                        donor_name, policymaker_name AS recipient, donation_type, amount
-                    FROM lake.city_government.coib_donations
-                    WHERE donor_name IS NOT NULL AND policymaker_name IS NOT NULL
-                """)
-            except Exception as e:
-                for t in ["graph_coib_donors", "graph_coib_policymakers", "graph_coib_donor_edges"]:
                     try:
-                        conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
-                    except Exception:
-                        pass
-                print(f"Warning: COIB: {e}", flush=True)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_litigation_respondents AS
+                            SELECT DISTINCT
+                                COALESCE(respondentname, '') AS respondent_name,
+                                COALESCE(penaltyapplied, '') AS penalty,
+                                TRY_CAST(penaltybalancedue AS DOUBLE) AS balance_due,
+                                COALESCE(violationdate, '') AS violation_date
+                            FROM lake.city_government.oath_hearings
+                            WHERE respondentname IS NOT NULL AND LENGTH(respondentname) > 1
+                        """)
+                    except Exception as e:
+                        conn.execute("CREATE OR REPLACE TABLE main.graph_litigation_respondents (respondent_name VARCHAR, penalty VARCHAR, balance_due DOUBLE, violation_date VARCHAR)")
+                        print(f"Warning: litigation respondents: {e}", flush=True)
 
-            # --- BIC trade waste ---
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_bic_companies AS
-                    SELECT DISTINCT
-                        business_name, license_number,
-                        COALESCE(business_address, '') AS address,
-                        COALESCE(TRY_CAST(number_of_vehicles AS INT), 0) AS vehicles
-                    FROM lake.business.bic_trade_waste
-                    WHERE business_name IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_bic_violation_edges AS
-                    SELECT
-                        business_name, violation_type_code, violation_description,
-                        TRY_CAST(violation_date AS DATE) AS date,
-                        TRY_CAST(penalty_amount AS DOUBLE) AS penalty
-                    FROM lake.business.bic_trade_waste
-                    WHERE business_name IS NOT NULL AND violation_type_code IS NOT NULL
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_bic_shared_bbl AS
-                    SELECT DISTINCT a.business_name AS c1, b.business_name AS c2
-                    FROM main.graph_bic_companies a
-                    JOIN main.graph_bic_companies b ON a.address = b.address AND a.business_name < b.business_name
-                    WHERE a.address != ''
-                """)
-            except Exception as e:
-                for t in ["graph_bic_companies", "graph_bic_violation_edges", "graph_bic_shared_bbl"]:
+                    # --- Officer misconduct ---
                     try:
-                        conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
-                    except Exception:
-                        pass
-                print(f"Warning: BIC trade waste: {e}", flush=True)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_officers AS
+                            SELECT DISTINCT
+                                COALESCE(first_name, '') || ' ' || COALESCE(last_name, '') AS officer_name,
+                                COALESCE(shield_no, 0) AS shield_no,
+                                COALESCE(rank_incident, '') AS rank,
+                                COALESCE(command_at_incident, '') AS command
+                            FROM lake.public_safety.ccrb_complaints
+                            WHERE last_name IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_officer_complaints AS
+                            SELECT
+                                COALESCE(first_name, '') || ' ' || COALESCE(last_name, '') AS officer_name,
+                                COALESCE(allegation, '') AS allegation,
+                                COALESCE(fado_type, '') AS category,
+                                COALESCE(board_disposition, '') AS disposition
+                            FROM lake.public_safety.ccrb_complaints
+                            WHERE last_name IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_officer_shared_command AS
+                            SELECT DISTINCT
+                                a.officer_name AS officer1, b.officer_name AS officer2, a.command
+                            FROM main.graph_officers a
+                            JOIN main.graph_officers b ON a.command = b.command AND a.officer_name < b.officer_name
+                            WHERE a.command != '' AND a.command IS NOT NULL
+                        """)
+                    except Exception as e:
+                        for t in ["graph_officers", "graph_officer_complaints", "graph_officer_shared_command"]:
+                            try:
+                                conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
+                            except Exception:
+                                pass
+                        print(f"Warning: officer misconduct: {e}", flush=True)
 
-            # --- DOB violations (respondent-named) ---
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_dob_respondents AS
-                    SELECT DISTINCT
-                        respondent_name,
-                        COUNT(*) AS violation_count,
-                        SUM(TRY_CAST(penalty_balance_due AS DOUBLE)) AS total_penalties
-                    FROM lake.housing.dob_ecb_violations
-                    WHERE respondent_name IS NOT NULL AND LENGTH(respondent_name) > 2
-                    GROUP BY respondent_name
-                """)
-                conn.execute("""
-                    CREATE OR REPLACE TABLE main.graph_dob_respondent_bbl AS
-                    SELECT DISTINCT
-                        respondent_name,
-                        (CASE WHEN boro = '1' THEN '1'
-                              WHEN boro = 'MANHATTAN' THEN '1'
-                              WHEN boro = '2' THEN '2'
-                              WHEN boro = 'BRONX' THEN '2'
-                              WHEN boro = '3' THEN '3'
-                              WHEN boro = 'BROOKLYN' THEN '3'
-                              WHEN boro = '4' THEN '4'
-                              WHEN boro = 'QUEENS' THEN '4'
-                              WHEN boro = '5' THEN '5'
-                              WHEN boro = 'STATEN ISLAND' THEN '5'
-                              ELSE boro END) || LPAD(COALESCE(block, '00000'), 5, '0') || LPAD(COALESCE(lot, '0000'), 4, '0') AS bbl
-                    FROM lake.housing.dob_ecb_violations
-                    WHERE respondent_name IS NOT NULL AND LENGTH(respondent_name) > 2
-                      AND block IS NOT NULL AND lot IS NOT NULL
-                """)
-            except Exception as e:
-                for t in ["graph_dob_respondents", "graph_dob_respondent_bbl"]:
+                    # --- COIB pay-to-play ---
                     try:
-                        conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
-                    except Exception:
-                        pass
-                print(f"Warning: DOB respondents: {e}", flush=True)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_coib_donors AS
+                            SELECT
+                                donor_name,
+                                STRING_AGG(DISTINCT donation_type, ', ') AS donation_types,
+                                SUM(amount) AS total_donated,
+                                COUNT(*) AS donation_count,
+                                FIRST(city) AS city,
+                                FIRST(state) AS state
+                            FROM lake.city_government.coib_donations
+                            WHERE donor_name IS NOT NULL
+                            GROUP BY donor_name
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_coib_policymakers AS
+                            SELECT
+                                policymaker_name,
+                                FIRST(agency) AS agency,
+                                FIRST(title) AS title,
+                                MAX(year) AS latest_year,
+                                COUNT(DISTINCT year) AS years_active
+                            FROM lake.city_government.coib_donations
+                            WHERE policymaker_name IS NOT NULL
+                            GROUP BY policymaker_name
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_coib_donor_edges AS
+                            SELECT DISTINCT
+                                donor_name, policymaker_name AS recipient, donation_type, amount
+                            FROM lake.city_government.coib_donations
+                            WHERE donor_name IS NOT NULL AND policymaker_name IS NOT NULL
+                        """)
+                    except Exception as e:
+                        for t in ["graph_coib_donors", "graph_coib_policymakers", "graph_coib_donor_edges"]:
+                            try:
+                                conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
+                            except Exception:
+                                pass
+                        print(f"Warning: COIB: {e}", flush=True)
 
-            # Save graph to Parquet cache for fast restart
-            try:
-                _save_graph_to_cache(conn)
-                print("Graph tables saved to Parquet cache", flush=True)
-            except Exception as e:
-                print(f"Warning: graph cache save failed: {e}", flush=True)
+                    # --- BIC trade waste ---
+                    try:
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_bic_companies AS
+                            SELECT DISTINCT
+                                business_name, license_number,
+                                COALESCE(business_address, '') AS address,
+                                COALESCE(TRY_CAST(number_of_vehicles AS INT), 0) AS vehicles
+                            FROM lake.business.bic_trade_waste
+                            WHERE business_name IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_bic_violation_edges AS
+                            SELECT
+                                business_name, violation_type_code, violation_description,
+                                TRY_CAST(violation_date AS DATE) AS date,
+                                TRY_CAST(penalty_amount AS DOUBLE) AS penalty
+                            FROM lake.business.bic_trade_waste
+                            WHERE business_name IS NOT NULL AND violation_type_code IS NOT NULL
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_bic_shared_bbl AS
+                            SELECT DISTINCT a.business_name AS c1, b.business_name AS c2
+                            FROM main.graph_bic_companies a
+                            JOIN main.graph_bic_companies b ON a.address = b.address AND a.business_name < b.business_name
+                            WHERE a.address != ''
+                        """)
+                    except Exception as e:
+                        for t in ["graph_bic_companies", "graph_bic_violation_edges", "graph_bic_shared_bbl"]:
+                            try:
+                                conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
+                            except Exception:
+                                pass
+                        print(f"Warning: BIC trade waste: {e}", flush=True)
+
+                    # --- DOB violations (respondent-named) ---
+                    try:
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_dob_respondents AS
+                            SELECT DISTINCT
+                                respondent_name,
+                                COUNT(*) AS violation_count,
+                                SUM(TRY_CAST(penalty_balance_due AS DOUBLE)) AS total_penalties
+                            FROM lake.housing.dob_ecb_violations
+                            WHERE respondent_name IS NOT NULL AND LENGTH(respondent_name) > 2
+                            GROUP BY respondent_name
+                        """)
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_dob_respondent_bbl AS
+                            SELECT DISTINCT
+                                respondent_name,
+                                (CASE WHEN boro = '1' THEN '1'
+                                      WHEN boro = 'MANHATTAN' THEN '1'
+                                      WHEN boro = '2' THEN '2'
+                                      WHEN boro = 'BRONX' THEN '2'
+                                      WHEN boro = '3' THEN '3'
+                                      WHEN boro = 'BROOKLYN' THEN '3'
+                                      WHEN boro = '4' THEN '4'
+                                      WHEN boro = 'QUEENS' THEN '4'
+                                      WHEN boro = '5' THEN '5'
+                                      WHEN boro = 'STATEN ISLAND' THEN '5'
+                                      ELSE boro END) || LPAD(COALESCE(block, '00000'), 5, '0') || LPAD(COALESCE(lot, '0000'), 4, '0') AS bbl
+                            FROM lake.housing.dob_ecb_violations
+                            WHERE respondent_name IS NOT NULL AND LENGTH(respondent_name) > 2
+                              AND block IS NOT NULL AND lot IS NOT NULL
+                        """)
+                    except Exception as e:
+                        for t in ["graph_dob_respondents", "graph_dob_respondent_bbl"]:
+                            try:
+                                conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
+                            except Exception:
+                                pass
+                        print(f"Warning: DOB respondents: {e}", flush=True)
+
+                    # Save graph to Parquet cache for fast restart
+                    try:
+                        _save_graph_to_cache(conn)
+                        print("Graph tables saved to Parquet cache", flush=True)
+                    except Exception as e:
+                        print(f"Warning: graph cache save failed: {e}", flush=True)
+
+                    print("Extended graph tables complete", flush=True)
+                except Exception as e:
+                    print(f"Warning: extended graph build failed: {e}", flush=True)
+
+            extended_graph_thread = threading.Thread(target=_build_extended_graph, daemon=True)
+            extended_graph_thread.start()
+            print("Extended graph build started in background thread", flush=True)
 
             # --- END GRAPH TABLE BUILD ---
 
@@ -1468,7 +1482,7 @@ async def app_lifespan(server):
         except Exception as e:
             print(f"Warning: nyc_coib_network graph definition failed: {e}", flush=True)
 
-        graph_ready = True
+        # graph_ready already set after core tables — DuckPGQ definitions are optional
     except Exception as e:
         print(f"Warning: DuckPGQ property graph build failed: {e}", flush=True)
 
