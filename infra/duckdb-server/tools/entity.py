@@ -269,7 +269,7 @@ def _has_entity_master(pool) -> bool:
 def _lookup_entity_master(pool, cluster_ids: list) -> dict:
     """Look up entity_master rows for given cluster_ids.
 
-    Joins resolved_entities -> name_index -> entity_master via canonical name match.
+    Direct join on cluster_id — entity_master stores cluster_id from resolved_entities.
     Returns dict mapping cluster_id -> {entity_id, entity_type, confidence, ...}.
     Returns empty dict if entity_master unavailable.
     """
@@ -279,35 +279,27 @@ def _lookup_entity_master(pool, cluster_ids: list) -> dict:
         placeholders = ", ".join(["?"] * len(cluster_ids))
         cols, rows = execute(pool, f"""
             SELECT
-                re.cluster_id,
+                em.cluster_id,
                 em.entity_id,
                 em.canonical_last,
                 em.canonical_first,
                 em.entity_type,
                 em.confidence,
-                em.member_count,
+                em.record_count,
                 em.source_count
-            FROM (
-                SELECT cluster_id,
-                       MODE() WITHIN GROUP (ORDER BY last_name) AS top_last,
-                       MODE() WITHIN GROUP (ORDER BY first_name) AS top_first
-                FROM lake.federal.resolved_entities
-                WHERE cluster_id IN ({placeholders})
-                GROUP BY cluster_id
-            ) re
-            JOIN lake.foundation.entity_master em
-                ON em.canonical_last = re.top_last
-                AND em.canonical_first = re.top_first
+            FROM lake.foundation.entity_master em
+            WHERE em.cluster_id IN ({placeholders})
         """, list(cluster_ids))
         result = {}
         for r in rows:
             result[r[0]] = {
                 "entity_id": r[1], "canonical_last": r[2], "canonical_first": r[3],
                 "entity_type": r[4], "confidence": r[5],
-                "member_count": r[6], "source_count": r[7],
+                "record_count": r[6], "source_count": r[7],
             }
         return result
-    except Exception:
+    except Exception as e:
+        print(f"entity_master lookup failed: {e}", flush=True)
         return {}
 
 
@@ -1768,73 +1760,102 @@ def _top_crossrefs(name: str, pool, ctx) -> ToolResult:
     limit = 50
 
     try:
-        if prefix:
-            cols, rows = execute(pool, """
-                SELECT cluster_id,
-                       MIN(last_name) as last_name,
-                       MIN(first_name) as first_name,
-                       COUNT(DISTINCT source_table) as table_count,
-                       COUNT(*) as total_records,
-                       ARRAY_AGG(DISTINCT source_table ORDER BY source_table) as tables
-                FROM lake.federal.resolved_entities
-                WHERE last_name IS NOT NULL
-                  AND last_name LIKE ? || '%'
-                GROUP BY cluster_id
-                HAVING COUNT(DISTINCT source_table) >= ?
-                ORDER BY table_count DESC, total_records DESC
-                LIMIT ?
-            """, [prefix, min_tables, limit])
-        else:
-            cols, rows = execute(pool, """
-                SELECT cluster_id,
-                       MIN(last_name) as last_name,
-                       MIN(first_name) as first_name,
-                       COUNT(DISTINCT source_table) as table_count,
-                       COUNT(*) as total_records,
-                       ARRAY_AGG(DISTINCT source_table ORDER BY source_table) as tables
-                FROM lake.federal.resolved_entities
-                WHERE last_name IS NOT NULL
-                GROUP BY cluster_id
-                HAVING COUNT(DISTINCT source_table) >= ?
-                ORDER BY table_count DESC, total_records DESC
-                LIMIT ?
-            """, [min_tables, limit])
+        # Try entity_master first (fast, pre-aggregated)
+        use_em = _has_entity_master(pool)
+        rows = []
+
+        if use_em:
+            if prefix:
+                cols, rows = execute(pool, """
+                    SELECT entity_id, canonical_last, canonical_first, entity_type,
+                           confidence, source_count, record_count, source_tables
+                    FROM lake.foundation.entity_master
+                    WHERE canonical_last LIKE ? || '%'
+                      AND source_count >= ?
+                    ORDER BY source_count DESC, record_count DESC
+                    LIMIT ?
+                """, [prefix, min_tables, limit])
+            else:
+                cols, rows = execute(pool, """
+                    SELECT entity_id, canonical_last, canonical_first, entity_type,
+                           confidence, source_count, record_count, source_tables
+                    FROM lake.foundation.entity_master
+                    WHERE source_count >= ?
+                    ORDER BY source_count DESC, record_count DESC
+                    LIMIT ?
+                """, [min_tables, limit])
+
+        # Fallback to resolved_entities if entity_master unavailable or empty
+        if not rows:
+            if prefix:
+                cols, rows = safe_query(pool, """
+                    SELECT NULL as entity_id,
+                           MIN(last_name) as last_name,
+                           MIN(first_name) as first_name,
+                           NULL as entity_type,
+                           NULL as confidence,
+                           COUNT(DISTINCT source_table) as source_count,
+                           COUNT(*) as record_count,
+                           ARRAY_AGG(DISTINCT source_table ORDER BY source_table) as tables
+                    FROM lake.federal.resolved_entities
+                    WHERE last_name IS NOT NULL
+                      AND last_name LIKE ? || '%'
+                    GROUP BY cluster_id
+                    HAVING COUNT(DISTINCT source_table) >= ?
+                    ORDER BY source_count DESC, record_count DESC
+                    LIMIT ?
+                """, [prefix, min_tables, limit])
+            else:
+                cols, rows = safe_query(pool, """
+                    SELECT NULL as entity_id,
+                           MIN(last_name) as last_name,
+                           MIN(first_name) as first_name,
+                           NULL as entity_type,
+                           NULL as confidence,
+                           COUNT(DISTINCT source_table) as source_count,
+                           COUNT(*) as record_count,
+                           ARRAY_AGG(DISTINCT source_table ORDER BY source_table) as tables
+                    FROM lake.federal.resolved_entities
+                    WHERE last_name IS NOT NULL
+                    GROUP BY cluster_id
+                    HAVING COUNT(DISTINCT source_table) >= ?
+                    ORDER BY source_count DESC, record_count DESC
+                    LIMIT ?
+                """, [min_tables, limit])
 
         elapsed = int((time.time() - t0) * 1000)
 
         if not rows:
-            msg = f"No clusters found with {min_tables}+ tables"
+            msg = f"No entities found with {min_tables}+ source tables"
             if prefix:
                 msg += f" and last name starting with '{prefix}'"
             return ToolResult(content=msg + ".")
 
-        # Enrich with entity_master data
-        cluster_ids = [r[0] for r in rows if r[0] is not None]
-        em_lookup = _lookup_entity_master(pool, cluster_ids)
-
+        # Unified output — both paths produce same column order
         lines = [f"# Top Cross-Referenced Entities ({min_tables}+ tables)"]
         if prefix:
             lines[0] += f" — last name '{prefix}*'"
         lines.append("")
 
-        if em_lookup:
-            lines.append("| Last Name | First Name | Type | Confidence | Tables | Records | Source Tables |")
+        has_types = any(r[3] is not None for r in rows)
+        if has_types:
+            lines.append("| Last Name | First Name | Type | Confidence | Sources | Records | Source Tables |")
             lines.append("|---|---|---|---|---|---|---|")
         else:
-            lines.append("| Last Name | First Name | Tables | Records | Source Tables |")
+            lines.append("| Last Name | First Name | Sources | Records | Source Tables |")
             lines.append("|---|---|---|---|---|")
 
         for r in rows:
-            tables_str = ", ".join(r[5][:8]) if r[5] else ""
-            if r[5] and len(r[5]) > 8:
-                tables_str += f" (+{len(r[5]) - 8})"
-            em = em_lookup.get(r[0], {})
-            if em_lookup:
-                etype = em.get("entity_type", "?")
-                conf = f"{em['confidence']:.2f}" if em.get("confidence") is not None else "?"
-                lines.append(f"| {r[1]} | {r[2]} | {etype} | {conf} | {r[3]} | {r[4]} | {tables_str} |")
+            tables_list = r[7] if r[7] else []
+            tables_str = ", ".join(tables_list[:8])
+            if len(tables_list) > 8:
+                tables_str += f" (+{len(tables_list) - 8})"
+            if has_types:
+                etype = r[3] or "?"
+                conf = f"{r[4]:.2f}" if r[4] is not None else "?"
+                lines.append(f"| {r[1]} | {r[2]} | {etype} | {conf} | {r[5]} | {r[6]} | {tables_str} |")
             else:
-                lines.append(f"| {r[1]} | {r[2]} | {r[3]} | {r[4]} | {tables_str} |")
+                lines.append(f"| {r[1]} | {r[2]} | {r[5]} | {r[6]} | {tables_str} |")
 
         lines.append(f"\nTotal: {len(rows)} entities shown")
         lines.append(f"({elapsed}ms)")
@@ -1843,21 +1864,24 @@ def _top_crossrefs(name: str, pool, ctx) -> ToolResult:
             content="\n".join(lines),
             structured_content={
                 "people": [
-                    {"cluster_id": r[0], "last_name": r[1], "first_name": r[2],
-                     "table_count": r[3], "total_records": r[4],
-                     "tables": r[5] if r[5] else [],
-                     **(em_lookup.get(r[0], {}))}
+                    {"entity_id": str(r[0]) if r[0] else None,
+                     "last_name": r[1], "first_name": r[2],
+                     "entity_type": r[3], "confidence": r[4],
+                     "source_count": r[5], "record_count": r[6],
+                     "tables": r[7] if r[7] else []}
                     for r in rows
                 ],
             },
             meta={"result_count": len(rows), "min_tables": min_tables,
+                  "source": "entity_master" if use_em else "resolved_entities",
                   "query_time_ms": elapsed},
         )
 
     except Exception as e:
         elapsed = int((time.time() - t0) * 1000)
+        print(f"_top_crossrefs failed: {e}", flush=True)
         return ToolResult(
-            content=f"Top cross-refs lookup failed (resolved_entities may not exist): {e}",
+            content=f"Top cross-refs lookup failed: {e}",
         )
 
 

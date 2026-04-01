@@ -198,6 +198,7 @@ def build_entity_master(
     group_name="foundation",
     deps=[
         AssetKey(["federal", "resolved_entities"]),
+        AssetKey(["federal", "pairwise_probabilities"]),
     ],
     description="Canonical entity table with stable UUIDs, entity types, and confidence scores",
     compute_kind="duckdb",
