@@ -662,8 +662,8 @@ async def app_lifespan(server):
                     boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0') AS bbl,
                     boroid AS borough,
                     COALESCE(housenumber, '') || ' ' || COALESCE(streetname, '') AS address,
-                    COALESCE(TRY_CAST(numberofbuildings AS INT), 0) AS num_buildings,
-                    COALESCE(TRY_CAST(lifecyclestage AS VARCHAR), '') AS lifecycle,
+                    1 AS num_buildings,
+                    COALESCE(TRY_CAST(lifecycle AS VARCHAR), '') AS lifecycle,
                     0 AS stories, 0 AS units, 0 AS year_built
                 FROM lake.housing.hpd_jurisdiction
                 WHERE boroid IS NOT NULL AND block IS NOT NULL AND lot IS NOT NULL
