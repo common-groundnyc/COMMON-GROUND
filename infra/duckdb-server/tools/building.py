@@ -87,12 +87,23 @@ def _extract_borough(raw: str) -> str | None:
 
 
 def _resolve_bbl(pool, identifier: str) -> str:
-    """Resolve an address string to a 10-digit BBL via PLUTO lookup."""
+    """Resolve an address string to a 10-digit BBL via PLUTO lookup.
+
+    Three-tier search:
+    1. Exact prefix match (normalized, ordinals stripped)
+    2. Word-gap fuzzy match (% between words — handles PLUTO ordinal inconsistency)
+    3. Nearest lot on same street (when exact house number doesn't exist)
+    """
     search = _normalize_address(identifier)
     boro = _extract_borough(identifier)
 
+    # Word-gap pattern: "200 EAST 10 STREET" → "200%EAST%10%STREET%"
+    # Matches both "200 EAST 10 STREET" and "200 EAST 10TH STREET"
+    words = search.split()
+    fuzzy_pattern = '%'.join(words) + '%' if words else search + '%'
+
     try:
-        # Try with borough filter first (more precise)
+        # Tier 1: exact prefix match with borough
         if boro:
             _cols, _rows = execute(pool, """
                 SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
@@ -103,7 +114,7 @@ def _resolve_bbl(pool, identifier: str) -> str:
             if _rows:
                 return str(_rows[0][0]).rstrip('.')
 
-        # Fallback: search without borough filter
+        # Tier 1b: exact prefix match without borough
         _cols, _rows = execute(pool, """
             SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
             FROM lake.city_government.pluto
@@ -113,19 +124,39 @@ def _resolve_bbl(pool, identifier: str) -> str:
         if _rows:
             return str(_rows[0][0]).rstrip('.')
 
-        # Fuzzy fallback: strip house number and find nearest lot on street
+        # Tier 2: word-gap fuzzy match (handles ordinal mismatch)
+        if boro:
+            _cols, _rows = execute(pool, """
+                SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
+                FROM lake.city_government.pluto
+                WHERE borocode = ? AND UPPER(address) LIKE ?
+                ORDER BY assesstot DESC NULLS LAST LIMIT 1
+            """, [boro, fuzzy_pattern])
+            if _rows:
+                return str(_rows[0][0]).rstrip('.')
+
+        _cols, _rows = execute(pool, """
+            SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
+            FROM lake.city_government.pluto
+            WHERE UPPER(address) LIKE ?
+            ORDER BY assesstot DESC NULLS LAST LIMIT 1
+        """, [fuzzy_pattern])
+        if _rows:
+            return str(_rows[0][0]).rstrip('.')
+
+        # Tier 3: nearest lot on the same street
         street_match = re.match(r'^\d+[\-\d]*\s+(.+)$', search)
         house_match = re.match(r'^(\d+)', search)
         if street_match and house_match:
-            street_name = street_match.group(1)
+            street_words = street_match.group(1).split()
+            street_fuzzy = '%'.join(street_words) + '%'
             house_num = int(house_match.group(1))
             boro_filter = "AND borocode = ?" if boro else ""
-            params = [f"%{street_name}%"]
+            params = [street_fuzzy]
             if boro:
                 params.append(boro)
             _cols, _rows = execute(pool, f"""
-                SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl,
-                       address
+                SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl
                 FROM lake.city_government.pluto
                 WHERE UPPER(address) LIKE ? {boro_filter}
                 ORDER BY ABS(TRY_CAST(REGEXP_EXTRACT(address, '^(\\d+)', 1) AS INT) - {house_num}) NULLS LAST
