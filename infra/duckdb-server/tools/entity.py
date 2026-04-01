@@ -401,7 +401,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     # 1. NYS corps
     corp_cols, corp_rows = [], []
     if _should_query("nys_corporations"):
-        corp_cols, corp_rows = execute(pool, """
+        corp_cols, corp_rows = safe_query(pool, """
         SELECT current_entity_name, entity_type, initial_dos_filing_date,
                dos_process_name, registered_agent_name, chairman_name, county
         FROM lake.business.nys_corporations
@@ -415,20 +415,20 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     # 2. Business licenses
     biz_cols, biz_rows = [], []
     if _should_query("issued_licenses"):
-        biz_cols, biz_rows = execute(pool, """
-            SELECT business_name, dba_trade_name, business_category,
+        biz_cols, biz_rows = safe_query(pool, """
+            SELECT business_name, business_category,
                    license_type, license_status, bbl,
                    address_building || ' ' || address_street_name AS address,
                    address_zip
             FROM lake.business.issued_licenses
-            WHERE UPPER(business_name) LIKE ? OR UPPER(dba_trade_name) LIKE ?
+            WHERE UPPER(business_name) LIKE ?
             LIMIT 20
-        """, [f"%{search}%"] * 2)
+        """, [f"%{search}%"])
 
     # 3. Restaurant inspections
     rest_cols, rest_rows = [], []
     if _should_query("restaurant_inspections"):
-        rest_cols, rest_rows = execute(pool, """
+        rest_cols, rest_rows = safe_query(pool, """
             SELECT DISTINCT dba, cuisine_description, building || ' ' || street AS address,
                    boro, zipcode, grade, bbl
             FROM lake.health.restaurant_inspections
@@ -461,7 +461,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                 LIMIT 20
             """
             camp_params = [f"%{search}%"] * 2
-        camp_cols, camp_rows = execute(pool, camp_sql, camp_params)
+        camp_cols, camp_rows = safe_query(pool, camp_sql, camp_params)
 
     # 5. OATH hearings
     oath_cols, oath_rows = [], []
@@ -508,12 +508,12 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                 LIMIT 20
             """
             oath_params = [f"%{search}%"] * 2
-        oath_cols, oath_rows = execute(pool, oath_sql, oath_params)
+        oath_cols, oath_rows = safe_query(pool, oath_sql, oath_params)
 
     # 6. ACRIS property transactions
     acris_cols, acris_rows = [], []
     if _should_query("acris_parties"):
-        acris_cols, acris_rows = execute(pool, """
+        acris_cols, acris_rows = safe_query(pool, """
             SELECT p.name AS party_name, p.party_type,
                    m.doc_type, TRY_CAST(m.document_amt AS DOUBLE) AS amount,
                    m.document_date,
@@ -530,7 +530,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     # 7. PLUTO — property portfolio
     pluto_cols, pluto_rows = [], []
     if _should_query("pluto"):
-        pluto_cols, pluto_rows = execute(pool, """
+        pluto_cols, pluto_rows = safe_query(pool, """
             SELECT ownername, bbl, address, zonedist1,
                    TRY_CAST(assesstot AS DOUBLE) AS assessed_total,
                    TRY_CAST(unitsres AS INTEGER) AS res_units,
@@ -546,7 +546,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     # 8. Campaign expenditures
     expend_cols, expend_rows = [], []
     if _should_query("campaign_expenditures"):
-        expend_cols, expend_rows = execute(pool, """
+        expend_cols, expend_rows = safe_query(pool, """
             SELECT name, candlast || ', ' || candfirst AS candidate,
                    TRY_CAST(amnt AS DOUBLE) AS amount,
                    purpose, explain, date, city
@@ -563,7 +563,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
             dob_sql = """
                 SELECT owner_s_business_name, owner_s_first_name, owner_s_last_name,
                        permit_type, job_type, issuance_date,
-                       house || ' ' || street_name AS address,
+                       house__ || ' ' || street_name AS address,
                        (borough || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) AS bbl
                 FROM lake.housing.dob_permit_issuance
                 WHERE UPPER(owner_s_business_name) LIKE ?
@@ -577,7 +577,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
             dob_sql = """
                 SELECT owner_s_business_name, owner_s_first_name, owner_s_last_name,
                        permit_type, job_type, issuance_date,
-                       house || ' ' || street_name AS address,
+                       house__ || ' ' || street_name AS address,
                        (borough || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) AS bbl
                 FROM lake.housing.dob_permit_issuance
                 WHERE UPPER(owner_s_business_name) LIKE ?
@@ -586,19 +586,19 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                 LIMIT 15
             """
             dob_params = [f"%{search}%"] * 2
-        dob_cols, dob_rows = execute(pool, dob_sql, dob_params)
+        dob_cols, dob_rows = safe_query(pool, dob_sql, dob_params)
 
     # 10. DCWP consumer protection charges
     dcwp_cols, dcwp_rows = [], []
     if _should_query("dcwp_charges"):
-        dcwp_cols, dcwp_rows = execute(pool, """
-            SELECT business_name, dba_trade_name, business_category,
+        dcwp_cols, dcwp_rows = safe_query(pool, """
+            SELECT business_name, business_category,
                    charge, violation_date, outcome, charge_count
             FROM lake.business.dcwp_charges
-            WHERE UPPER(business_name) LIKE ? OR UPPER(dba_trade_name) LIKE ?
+            WHERE UPPER(business_name) LIKE ?
             ORDER BY violation_date DESC
             LIMIT 15
-        """, [f"%{search}%"] * 2)
+        """, [f"%{search}%"])
 
     # 11. SBS M/WBE certified businesses
     sbs_cols, sbs_rows = [], []
@@ -630,7 +630,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                 LIMIT 10
             """
             sbs_params = [f"%{search}%"] * 3
-        sbs_cols, sbs_rows = execute(pool, sbs_sql, sbs_params)
+        sbs_cols, sbs_rows = safe_query(pool, sbs_sql, sbs_params)
 
     # 12. Citywide payroll
     payroll_cols, payroll_rows = [], []
@@ -659,13 +659,13 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                 LIMIT 10
             """
             payroll_params = [f"%{search}%"]
-        payroll_cols, payroll_rows = execute(pool, payroll_sql, payroll_params)
+        payroll_cols, payroll_rows = safe_query(pool, payroll_sql, payroll_params)
 
     # 13. DOB Application Owners
     dob_app_cols, dob_app_rows = [], []
     if _should_query("graph_dob_owners"):
         try:
-            dob_app_cols, dob_app_rows = execute(pool, """
+            dob_app_cols, dob_app_rows = safe_query(pool, """
                 SELECT owner_name, business_name,
                        owner_address, owner_city, owner_state, owner_zip
                 FROM main.graph_dob_owners
@@ -679,7 +679,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     doing_biz_cols, doing_biz_rows = [], []
     if _should_query("graph_doing_business"):
         try:
-            doing_biz_cols, doing_biz_rows = execute(pool, """
+            doing_biz_cols, doing_biz_rows = safe_query(pool, """
                 SELECT entity_name, person_name, title, transaction_type,
                        entity_address, entity_city, entity_state
                 FROM main.graph_doing_business
@@ -693,7 +693,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     epa_cols, epa_rows = [], []
     if _should_query("graph_epa_facilities"):
         try:
-            epa_cols, epa_rows = execute(pool, """
+            epa_cols, epa_rows = safe_query(pool, """
                 SELECT facility_name, address, city, zip, county,
                        current_violation, total_penalties, inspection_count,
                        formal_action_count, last_penalty_amount
@@ -708,7 +708,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     atty_cols, atty_rows = [], []
     if _should_query("nys_attorney_registrations"):
         try:
-            atty_cols, atty_rows = execute(pool, """
+            atty_cols, atty_rows = safe_query(pool, """
                 SELECT first_name, last_name, registration_number, law_school,
                        company_name, status, year_admitted, city, state
                 FROM lake.financial.nys_attorney_registrations
@@ -722,7 +722,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     pp_cols, pp_rows = [], []
     if _should_query("acris_pp_parties"):
         try:
-            pp_cols, pp_rows = execute(pool, """
+            pp_cols, pp_rows = safe_query(pool, """
                 SELECT name, party_type, document_id, address_1, city, state, zip
                 FROM lake.business.acris_pp_parties
                 WHERE UPPER(name) LIKE ?
@@ -753,7 +753,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                     LIMIT 20
                 """
                 civil_params = [f"%{search}%"]
-            civil_cols, civil_rows = execute(pool, civil_sql, civil_params)
+            civil_cols, civil_rows = safe_query(pool, civil_sql, civil_params)
         except Exception:
             pass
 
@@ -761,7 +761,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     lobby_cols, lobby_rows = [], []
     if _should_query("nys_lobbyist_registration"):
         try:
-            lobby_cols, lobby_rows = execute(pool, """
+            lobby_cols, lobby_rows = safe_query(pool, """
                 SELECT principal_lobbyist_name, contractual_client_name,
                        lobbying_subjects, compensation_amount, reporting_year,
                        level_of_government, individual_lobbyist_s
@@ -798,7 +798,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                     LIMIT 20
                 """
                 death_params = [f"%{search}%"]
-            death_cols, death_rows = execute(pool, death_sql, death_params)
+            death_cols, death_rows = safe_query(pool, death_sql, death_params)
         except Exception:
             pass
 
@@ -806,7 +806,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     broker_cols, broker_rows = [], []
     if _should_query("nys_re_brokers"):
         try:
-            broker_cols, broker_rows = execute(pool, """
+            broker_cols, broker_rows = safe_query(pool, """
                 SELECT license_holder_name, business_name, license_type,
                        license_number, license_expiration_date, county,
                        business_city, business_state
@@ -821,7 +821,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     notary_cols, notary_rows = [], []
     if _should_query("nys_notaries"):
         try:
-            notary_cols, notary_rows = execute(pool, """
+            notary_cols, notary_rows = safe_query(pool, """
                 SELECT commission_holder_name, commissioned_county,
                        commission_type_traditional_or_electronic,
                        term_issue_date, term_expiration_date,
@@ -1057,7 +1057,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
             else:
                 mar_where = "UPPER(groom_surname) = ? OR UPPER(bride_surname) = ?"
                 mar_params = [search, search]
-            marriage_cols, marriage_rows = execute(pool, f"""
+            marriage_cols, marriage_rows = safe_query(pool, f"""
                 SELECT groom_first_name, groom_middle_name, groom_surname,
                        bride_first_name, bride_middle_name, bride_surname,
                        LICENSE_BOROUGH_ID AS license_borough, LICENSE_YEAR AS license_year
@@ -1074,7 +1074,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     if _should_query("marriage_certificates_1866_1937"):
         try:
             if len(words) > 1:
-                _, hist_marriage_rows = execute(pool, """
+                _, hist_marriage_rows = safe_query(pool, """
                     SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
                     FROM lake.city_government.marriage_certificates_1866_1937
                     WHERE (UPPER(last_name) = ? AND UPPER(first_name) LIKE ?)
@@ -1083,7 +1083,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                     LIMIT 10
                 """, [words[-1], words[0] + '%', words[0], words[-1] + '%'])
             else:
-                _, hist_marriage_rows = execute(pool, """
+                _, hist_marriage_rows = safe_query(pool, """
                     SELECT first_name, NULL, last_name, NULL, NULL, NULL, county, year
                     FROM lake.city_government.marriage_certificates_1866_1937
                     WHERE UPPER(last_name) = ?
@@ -1113,7 +1113,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
         try:
             variant_last = name_variants[0][0]
             variant_first = name_variants[0][1]
-            _, cid_rows = execute(pool, """
+            _, cid_rows = safe_query(pool, """
                 SELECT DISTINCT cluster_id
                 FROM lake.federal.resolved_entities
                 WHERE last_name = ? AND first_name = ?
@@ -1126,7 +1126,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
                 entity_info = _lookup_entity_master(pool, cluster_ids)
 
                 placeholders = ", ".join(["?"] * len(cluster_ids))
-                splink_cols, splink_cluster_rows = execute(pool, f"""
+                splink_cols, splink_cluster_rows = safe_query(pool, f"""
                     SELECT source_table, last_name, first_name,
                            city, zip, cluster_id
                     FROM lake.federal.resolved_entities
@@ -1172,7 +1172,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
             phonetic_sql, phonetic_params = phonetic_search_sql(
                 first_name=None, last_name=name, min_score=0.7, limit=20
             )
-        ph_cols, ph_rows = execute(pool, phonetic_sql, phonetic_params)
+        ph_cols, ph_rows = safe_query(pool, phonetic_sql, phonetic_params)
         phonetic_matches = [dict(zip(ph_cols, r)) for r in ph_rows]
     except Exception:
         pass
@@ -1270,7 +1270,7 @@ def _due_diligence(name: str, pool, ctx) -> ToolResult:
         ph_sql, ph_params = phonetic_search_sql(
             first_name=first_guess if len(parts) >= 2 else None,
             last_name=last_guess, min_score=0.8, limit=10)
-        ph_cols, ph_rows = execute(pool, ph_sql, ph_params)
+        ph_cols, ph_rows = safe_query(pool, ph_sql, ph_params)
         if ph_rows and not atty_rows and not broker_rows:
             phonetic_pro = [dict(zip(ph_cols, r)) for r in ph_rows]
             phonetic_pro = [m for m in phonetic_pro if any(s in m.get("source_table", "")
@@ -1625,7 +1625,7 @@ def _vitals(name: str, pool, ctx) -> ToolResult:
             first_col="groom_first_name", last_col="groom_surname",
             extra_cols="bride_first_name, bride_surname, LICENSE_BOROUGH_ID, LICENSE_YEAR",
             limit=30)
-        _, ph_rows = execute(pool, ph_sql, ph_params)
+        _, ph_rows = safe_query(pool, ph_sql, ph_params)
         if ph_rows:
             phonetic_results = list(ph_rows)
     except Exception:
@@ -1633,7 +1633,7 @@ def _vitals(name: str, pool, ctx) -> ToolResult:
 
     # Marriage index (1950-2017)
     if search_first:
-        mar_cols, mar_rows = execute(pool, """
+        mar_cols, mar_rows = safe_query(pool, """
             SELECT groom_first_name, groom_middle_name, groom_surname,
                    bride_first_name, bride_middle_name, bride_surname,
                    LICENSE_BOROUGH_ID AS license_borough, LICENSE_YEAR AS license_year
@@ -1644,7 +1644,7 @@ def _vitals(name: str, pool, ctx) -> ToolResult:
             LIMIT 50
         """, [search_last, f"{search_first}%", search_last, f"{search_first}%"])
     else:
-        mar_cols, mar_rows = execute(pool, """
+        mar_cols, mar_rows = safe_query(pool, """
             SELECT groom_first_name, groom_middle_name, groom_surname,
                    bride_first_name, bride_middle_name, bride_surname,
                    LICENSE_BOROUGH_ID AS license_borough, LICENSE_YEAR AS license_year
@@ -1658,7 +1658,7 @@ def _vitals(name: str, pool, ctx) -> ToolResult:
     hist_rows = []
     try:
         if search_first:
-            _, hist_rows = execute(pool, """
+            _, hist_rows = safe_query(pool, """
                 SELECT first_name, NULL AS middle_name, last_name,
                        NULL AS spouse_first, NULL AS spouse_middle, NULL AS spouse_last,
                        county, year
@@ -1668,7 +1668,7 @@ def _vitals(name: str, pool, ctx) -> ToolResult:
                 LIMIT 30
             """, [search_last, f"{search_first}%"])
         else:
-            _, hist_rows = execute(pool, """
+            _, hist_rows = safe_query(pool, """
                 SELECT first_name, NULL AS middle_name, last_name,
                        NULL AS spouse_first, NULL AS spouse_middle, NULL AS spouse_last,
                        county, year
