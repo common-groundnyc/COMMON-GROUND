@@ -12,9 +12,10 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
-from shared.db import execute, safe_query, fill_placeholders
+from shared.db import execute, safe_query, fill_placeholders, parallel_queries
 from shared.formatting import make_result, format_text_table
 from shared.types import MAX_LLM_ROWS, BBL_PATTERN
+from percentiles import lookup_percentiles, format_percentile
 
 # ---------------------------------------------------------------------------
 # Input patterns
@@ -1183,90 +1184,89 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
     block = bbl[1:6].lstrip("0") or "0"
     lot = bbl[6:10].lstrip("0") or "0"
 
-    # 1. HPD violations
-    hpd_cols, hpd_rows = execute(pool, """
-        SELECT
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE violationstatus = 'Open') AS open_v,
-            COUNT(*) FILTER (WHERE UPPER(class) = 'C') AS class_c,
-            COUNT(*) FILTER (WHERE UPPER(class) = 'B') AS class_b,
-            COUNT(*) FILTER (WHERE UPPER(class) = 'A') AS class_a,
-            MAX(TRY_CAST(novissueddate AS DATE)) AS latest,
-            MIN(TRY_CAST(novissueddate AS DATE)) AS earliest
-        FROM lake.housing.hpd_violations
-        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+    # Resolve BIN once — needed by queries 7 and 9
+    _bin_cols, _bin_rows = safe_query(pool, """
+        SELECT bin FROM lake.housing.hpd_jurisdiction
+        WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
+        LIMIT 1
     """, [bbl])
-    hpd = dict(zip(hpd_cols, hpd_rows[0])) if hpd_rows else {}
+    bin_number = _bin_rows[0][0] if _bin_rows else None
 
-    # 2. DOB ECB violations
-    dob_cols, dob_rows = execute(pool, """
-        SELECT
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE UPPER(violation_type) LIKE '%HAZARD%'
-                OR UPPER(severity) = 'HAZARDOUS') AS hazardous,
-            SUM(TRY_CAST(balance_due AS DOUBLE)) AS total_penalties_due,
-            SUM(TRY_CAST(penality_imposed AS DOUBLE)) AS total_paid,
-            MAX(TRY_CAST(issue_date AS DATE)) AS latest,
-            MIN(TRY_CAST(issue_date AS DATE)) AS earliest
-        FROM lake.housing.dob_ecb_violations
-        WHERE boro = ? AND block = ? AND lot = ?
-    """, [borough, block, lot])
-    dob = dict(zip(dob_cols, dob_rows[0])) if dob_rows else {}
-
-    # 3. FDNY violations
-    fdny_cols, fdny_rows = execute(pool, """
-        SELECT
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE UPPER(action) NOT IN ('CLOSED', 'DISMISSED')) AS open_v,
-            MAX(TRY_CAST(vio_date AS DATE)) AS latest,
-            MIN(TRY_CAST(vio_date AS DATE)) AS earliest
-        FROM lake.housing.fdny_violations
-        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
-    """, [bbl])
-    fdny = dict(zip(fdny_cols, fdny_rows[0])) if fdny_rows else {}
-
-    # 4. OATH hearings
-    oath_cols, oath_rows = execute(pool, """
-        SELECT
-            issuing_agency,
-            COUNT(*) AS total,
-            SUM(TRY_CAST(total_violation_amount AS DOUBLE)) AS total_penalty,
-            SUM(TRY_CAST(paid_amount AS DOUBLE)) AS total_paid,
-            SUM(TRY_CAST(balance_due AS DOUBLE)) AS amount_due,
-            COUNT(*) FILTER (WHERE UPPER(hearing_status) = 'DEFAULT') AS defaults,
-            MAX(TRY_CAST(hearing_date AS DATE)) AS latest
-        FROM lake.city_government.oath_hearings
-        WHERE violation_location_block_no = ? AND violation_location_lot_no = ?
-            AND violation_location_borough IS NOT NULL
-        GROUP BY issuing_agency
-        ORDER BY total_penalty DESC NULLS LAST
-    """, [block, lot])
-
-    # 5. Restaurant inspections
-    rest_cols, rest_rows = execute(pool, """
-        SELECT dba, cuisine_description, grade,
-               inspection_date, violation_code, violation_description,
-               critical_flag, score
-        FROM lake.health.restaurant_inspections
-        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
-        ORDER BY inspection_date DESC
-        LIMIT 20
-    """, [bbl])
-
-    # 6. HPD complaints summary
-    complaint_cols, complaint_rows = execute(pool, """
-        SELECT
-            COUNT(DISTINCT complaint_id) AS total_complaints,
-            COUNT(DISTINCT complaint_id) FILTER (WHERE UPPER(complaint_status) = 'OPEN') AS open_complaints,
-            MAX(TRY_CAST(received_date AS DATE)) AS latest
-        FROM lake.housing.hpd_complaints
-        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
-    """, [bbl])
-    complaints = dict(zip(complaint_cols, complaint_rows[0])) if complaint_rows else {}
-
-    # 7. DOB Complaints (construction)
-    try:
-        dob_comp_cols, dob_comp_rows = execute(pool, """
+    # Run all 10 queries in parallel
+    results = parallel_queries(pool, [
+        # 1. HPD violations
+        ("hpd", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE violationstatus = 'Open') AS open_v,
+                COUNT(*) FILTER (WHERE UPPER(class) = 'C') AS class_c,
+                COUNT(*) FILTER (WHERE UPPER(class) = 'B') AS class_b,
+                COUNT(*) FILTER (WHERE UPPER(class) = 'A') AS class_a,
+                MAX(TRY_CAST(novissueddate AS DATE)) AS latest,
+                MIN(TRY_CAST(novissueddate AS DATE)) AS earliest
+            FROM lake.housing.hpd_violations
+            WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        """, [bbl]),
+        # 2. DOB ECB violations
+        ("dob", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE UPPER(violation_type) LIKE '%HAZARD%'
+                    OR UPPER(severity) = 'HAZARDOUS') AS hazardous,
+                SUM(TRY_CAST(balance_due AS DOUBLE)) AS total_penalties_due,
+                SUM(TRY_CAST(penality_imposed AS DOUBLE)) AS total_paid,
+                MAX(TRY_CAST(issue_date AS DATE)) AS latest,
+                MIN(TRY_CAST(issue_date AS DATE)) AS earliest
+            FROM lake.housing.dob_ecb_violations
+            WHERE boro = ? AND block = ? AND lot = ?
+        """, [borough, block, lot]),
+        # 3. FDNY violations
+        ("fdny", """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE UPPER(action) NOT IN ('CLOSED', 'DISMISSED')) AS open_v,
+                MAX(TRY_CAST(vio_date AS DATE)) AS latest,
+                MIN(TRY_CAST(vio_date AS DATE)) AS earliest
+            FROM lake.housing.fdny_violations
+            WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        """, [bbl]),
+        # 4. OATH hearings
+        ("oath", """
+            SELECT
+                issuing_agency,
+                COUNT(*) AS total,
+                SUM(TRY_CAST(total_violation_amount AS DOUBLE)) AS total_penalty,
+                SUM(TRY_CAST(paid_amount AS DOUBLE)) AS total_paid,
+                SUM(TRY_CAST(balance_due AS DOUBLE)) AS amount_due,
+                COUNT(*) FILTER (WHERE UPPER(hearing_status) = 'DEFAULT') AS defaults,
+                MAX(TRY_CAST(hearing_date AS DATE)) AS latest
+            FROM lake.city_government.oath_hearings
+            WHERE violation_location_block_no = ? AND violation_location_lot_no = ?
+                AND violation_location_borough IS NOT NULL
+            GROUP BY issuing_agency
+            ORDER BY total_penalty DESC NULLS LAST
+        """, [block, lot]),
+        # 5. Restaurant inspections
+        ("rest", """
+            SELECT dba, cuisine_description, grade,
+                   inspection_date, violation_code, violation_description,
+                   critical_flag, score
+            FROM lake.health.restaurant_inspections
+            WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+            ORDER BY inspection_date DESC
+            LIMIT 20
+        """, [bbl]),
+        # 6. HPD complaints summary
+        ("complaints", """
+            SELECT
+                COUNT(DISTINCT complaint_id) AS total_complaints,
+                COUNT(DISTINCT complaint_id) FILTER (WHERE UPPER(complaint_status) = 'OPEN') AS open_complaints,
+                MAX(TRY_CAST(received_date AS DATE)) AS latest
+            FROM lake.housing.hpd_complaints
+            WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        """, [bbl]),
+        # 7. DOB complaints (needs BIN)
+        ("dob_comp", """
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE UPPER(status) = 'ACTIVE') AS active,
@@ -1274,61 +1274,56 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
                 MAX(TRY_CAST(date_entered AS DATE)) AS latest,
                 MIN(TRY_CAST(date_entered AS DATE)) AS earliest
             FROM lake.housing.dob_complaints
-            WHERE bin = (
-                SELECT bin FROM lake.housing.hpd_jurisdiction
-                WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
-                LIMIT 1
-            )
-        """, [bbl])
-        dob_comp = dict(zip(dob_comp_cols, dob_comp_rows[0])) if dob_comp_rows else {}
-    except Exception:
-        dob_comp = {}
-
-    # 8. DOB Safety Facades
-    try:
-        facade_cols, facade_rows = execute(pool, """
+            WHERE bin = ?
+        """, [bin_number]),
+        # 8. DOB safety facades
+        ("facades", """
             SELECT current_status, filing_status, cycle,
                    owner_name, exterior_wall_type_sx, comments
             FROM lake.housing.dob_safety_facades
             WHERE borough = ? AND block = ? AND lot = ?
             ORDER BY TRY_CAST(submitted_on AS DATE) DESC NULLS LAST
             LIMIT 5
-        """, [borough, block, lot])
-    except Exception:
-        facade_cols, facade_rows = [], []
-
-    # 9. DOB Safety Boilers
-    try:
-        boiler_cols, boiler_rows = execute(pool, """
+        """, [borough, block, lot]),
+        # 9. DOB safety boilers (needs BIN)
+        ("boilers", """
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE UPPER(defects_exist) = 'YES') AS with_defects,
                 MAX(TRY_CAST(inspection_date AS DATE)) AS latest_inspection,
                 owner_first_name || ' ' || owner_last_name AS owner
             FROM lake.housing.dob_safety_boiler
-            WHERE bin_number = (
-                SELECT bin FROM lake.housing.hpd_jurisdiction
-                WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
-                LIMIT 1
-            )
+            WHERE bin_number = ?
             GROUP BY owner
-        """, [bbl])
-    except Exception:
-        boiler_cols, boiler_rows = [], []
-
-    # 10. SRO Buildings
-    try:
-        sro_cols, sro_rows = execute(pool, """
+        """, [bin_number]),
+        # 10. SRO buildings
+        ("sro", """
             SELECT buildingid, managementprogram, legalclassa, legalclassb,
                    dobbuildingclass, legalstories
             FROM lake.housing.sro_buildings
             WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
             LIMIT 1
-        """, [bbl])
-        is_sro = len(sro_rows) > 0
-    except Exception:
-        sro_cols, sro_rows = [], []
-        is_sro = False
+        """, [bbl]),
+    ])
+
+    # Unpack results
+    hpd_cols, hpd_rows = results["hpd"]
+    dob_cols, dob_rows = results["dob"]
+    fdny_cols, fdny_rows = results["fdny"]
+    oath_cols, oath_rows = results["oath"]
+    rest_cols, rest_rows = results["rest"]
+    complaint_cols, complaint_rows = results["complaints"]
+    dob_comp_cols, dob_comp_rows = results["dob_comp"]
+    facade_cols, facade_rows = results["facades"]
+    boiler_cols, boiler_rows = results["boilers"]
+    sro_cols, sro_rows = results["sro"]
+
+    hpd = dict(zip(hpd_cols, hpd_rows[0])) if hpd_rows else {}
+    dob = dict(zip(dob_cols, dob_rows[0])) if dob_rows else {}
+    fdny = dict(zip(fdny_cols, fdny_rows[0])) if fdny_rows else {}
+    complaints = dict(zip(complaint_cols, complaint_rows[0])) if complaint_rows else {}
+    dob_comp = dict(zip(dob_comp_cols, dob_comp_rows[0])) if dob_comp_rows else {}
+    is_sro = len(sro_rows) > 0
 
     elapsed = int((time.time() - t0) * 1000)
 
