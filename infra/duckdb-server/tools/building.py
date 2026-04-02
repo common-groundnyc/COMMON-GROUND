@@ -130,7 +130,7 @@ def _resolve_bbl(pool, identifier: str) -> str:
             SELECT bbl FROM lake.foundation.address_lookup
             WHERE house_number <= ? AND house_number_high >= ?
               AND street_std LIKE ?
-              AND addr_type IN ('', 'V')
+              AND (addr_type IS NULL OR addr_type IN ('', 'V'))
               {boro_clause}
             LIMIT 1
         """, [house_num, house_num, street_part + "%"] + ([boro] if boro else []))
@@ -142,7 +142,7 @@ def _resolve_bbl(pool, identifier: str) -> str:
             SELECT bbl FROM lake.foundation.address_lookup
             WHERE house_number = ?
               AND street_std LIKE ?
-              AND addr_type IN ('', 'V')
+              AND (addr_type IS NULL OR addr_type IN ('', 'V'))
               {boro_clause}
             LIMIT 1
         """, [house_num, street_part + "%"] + ([boro] if boro else []))
@@ -155,7 +155,7 @@ def _resolve_bbl(pool, identifier: str) -> str:
         _cols, _rows = execute(pool, f"""
             SELECT bbl FROM lake.foundation.address_lookup
             WHERE street_std LIKE ?
-              AND addr_type IN ('', 'V')
+              AND (addr_type IS NULL OR addr_type IN ('', 'V'))
               {boro_clause}
             ORDER BY ABS(house_number - ?)
             LIMIT 1
