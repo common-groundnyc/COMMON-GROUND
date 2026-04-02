@@ -268,7 +268,7 @@ def _entity_search(name: str, limit: int, ctx: Context) -> ToolResult:
     capped = min(limit, 50)
     try:
         result = emb_conn.execute(
-            "SELECT source, name, "
+            "SELECT sources, name, "
             "GREATEST(0, 1.0 / (1.0 + array_cosine_distance(embedding, ?::FLOAT[]))) AS similarity "
             "FROM entity_names ORDER BY array_cosine_distance(embedding, ?::FLOAT[]) LIMIT ?",
             [vec.tolist(), vec.tolist(), capped],
@@ -290,7 +290,7 @@ def _entity_search(name: str, limit: int, ctx: Context) -> ToolResult:
     for i, row in enumerate(rows, 1):
         rec = dict(zip(cols, row))
         pct = round(rec["similarity"] * 100, 1)
-        lines.append(f"{i}. [{rec['source']}] {rec['name']} — {pct}% similarity")
+        lines.append(f"{i}. [{rec['sources']}] {rec['name']} — {pct}% similarity")
 
     lines.append(
         "\nUse entity_xray(name) to get the full X-ray for any matched entity."
