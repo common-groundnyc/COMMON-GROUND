@@ -1,5 +1,7 @@
 """Database helpers — CursorPool re-export, execute/safe_query wrappers, placeholders."""
 
+import datetime
+import decimal
 import os
 import re
 import threading
@@ -11,6 +13,30 @@ from fastmcp.exceptions import ToolError
 from cursor_pool import CursorPool  # re-export
 from sql_utils import sanitize_error
 from shared.types import MAX_QUERY_ROWS, RECONNECT_ERRORS
+
+
+def _normalize_cell(v: object) -> object:
+    """Coerce DuckDB-native types to JSON-safe Python primitives.
+
+    Prevents downstream issues like datetime.date vs str comparisons,
+    Decimal vs float mismatches, and UUID objects in sort keys.
+    """
+    if v is None:
+        return None
+    if isinstance(v, datetime.date):
+        return v.isoformat()  # date/datetime → "2026-04-01" / "2026-04-01T12:00:00"
+    if isinstance(v, datetime.timedelta):
+        return str(v)
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    if isinstance(v, bytes):
+        return v.hex()
+    return v
+
+
+def _normalize_rows(rows: list[tuple]) -> list[tuple]:
+    """Apply _normalize_cell to every value in every row."""
+    return [tuple(_normalize_cell(v) for v in row) for row in rows]
 
 __all__ = ["CursorPool", "execute", "safe_query", "fill_placeholders", "build_catalog"]
 
@@ -29,7 +55,7 @@ def execute(pool: CursorPool, sql: str, params: list | None = None, *, schema_de
         try:
             result = cur.execute(sql, params or [])
             cols = [d[0] for d in result.description] if result.description else []
-            rows = result.fetchmany(MAX_QUERY_ROWS)
+            rows = _normalize_rows(result.fetchmany(MAX_QUERY_ROWS))
             return cols, rows
         except duckdb.Error as e:
             err = str(e)
@@ -53,7 +79,7 @@ def execute(pool: CursorPool, sql: str, params: list | None = None, *, schema_de
                             with pool.cursor() as retry_cur:
                                 result = retry_cur.execute(sql, params or [])
                                 cols = [d[0] for d in result.description] if result.description else []
-                                rows = result.fetchmany(MAX_QUERY_ROWS)
+                                rows = _normalize_rows(result.fetchmany(MAX_QUERY_ROWS))
                                 return cols, rows
                         except Exception as reconnect_err:
                             print(f"Auto-reconnect failed: {reconnect_err}", flush=True)
