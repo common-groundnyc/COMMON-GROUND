@@ -38,18 +38,189 @@ def _normalize_rows(rows: list[tuple]) -> list[tuple]:
     """Apply _normalize_cell to every value in every row."""
     return [tuple(_normalize_cell(v) for v in row) for row in rows]
 
-__all__ = ["CursorPool", "execute", "safe_query", "fill_placeholders", "build_catalog"]
+__all__ = ["CursorPool", "execute", "safe_query", "fill_placeholders", "build_catalog",
+           "set_catalog_cache"]
 
 # ---------------------------------------------------------------------------
-# Module-level reconnect state (mirrors mcp_server.py globals)
+# Module-level state
 # ---------------------------------------------------------------------------
 
 _reconnect_lock = threading.Lock()
 _last_reconnect: float = 0
 
+# Catalog cache: set by mcp_server.py at startup via set_catalog_cache()
+# schema -> table -> {row_count, column_count}
+_catalog: dict[str, dict] = {}
+# Flat lookup: all "schema.table" names lowercase
+_all_tables: list[str] = []
+# Column cache: "schema.table" -> [col_name, ...]
+_column_cache: dict[str, list[str]] = {}
 
-def execute(pool: CursorPool, sql: str, params: list | None = None, *, schema_descriptions: dict | None = None) -> tuple[list, list]:
-    """Execute SQL via *pool*, return (cols, rows). Handles S3/DuckLake reconnect."""
+
+def set_catalog_cache(catalog: dict, conn=None) -> None:
+    """Called once at startup by mcp_server.py to populate the fuzzy-match index."""
+    global _catalog, _all_tables, _column_cache
+    _catalog = catalog
+    _all_tables = [
+        f"{schema}.{table}"
+        for schema, tables in catalog.items()
+        for table in tables
+    ]
+    # Cache column names per table for column-level correction
+    if conn is not None:
+        try:
+            rows = conn.execute("""
+                SELECT schema_name, table_name, column_name
+                FROM duckdb_columns()
+                WHERE database_name = 'lake'
+                  AND schema_name NOT IN ('information_schema', 'pg_catalog')
+                ORDER BY schema_name, table_name, column_index
+            """).fetchall()
+            for schema, table, col in rows:
+                key = f"{schema}.{table}"
+                _column_cache.setdefault(key, []).append(col)
+        except Exception as e:
+            print(f"Warning: column cache build failed: {e}", flush=True)
+    print(f"SQL corrector ready: {len(_all_tables)} tables, "
+          f"{sum(len(v) for v in _column_cache.values())} columns indexed", flush=True)
+
+
+def _fuzzy_match(bad_name: str, candidates: list[str], threshold: float = 0.5) -> str | None:
+    """Find the best fuzzy match for bad_name among candidates.
+
+    Uses substring matching + Levenshtein-like scoring without external deps.
+    Returns the best match or None if nothing is close enough.
+    """
+    bad = bad_name.lower()
+    best_score = 0.0
+    best_match = None
+
+    for candidate in candidates:
+        cand = candidate.lower()
+        # Exact match
+        if bad == cand:
+            return candidate
+        # Substring containment (strong signal)
+        if bad in cand or cand in bad:
+            # Score by length similarity
+            score = min(len(bad), len(cand)) / max(len(bad), len(cand))
+            score = score * 0.9 + 0.1  # boost substring matches
+        else:
+            # Token overlap (handles word reordering, extra/missing words)
+            bad_tokens = set(bad.replace("_", " ").split())
+            cand_tokens = set(cand.replace("_", " ").split())
+            if not bad_tokens or not cand_tokens:
+                continue
+            overlap = len(bad_tokens & cand_tokens)
+            score = overlap / max(len(bad_tokens), len(cand_tokens))
+
+        if score > best_score:
+            best_score = score
+            best_match = candidate
+
+    return best_match if best_score >= threshold else None
+
+
+def _try_fix_sql(sql: str, error_msg: str) -> str | None:
+    """Attempt to fix a SQL query based on the error message.
+
+    Returns corrected SQL or None if unfixable.
+    """
+    err = error_msg.lower()
+
+    # --- Table not found ---
+    # Pattern: Table with name X does not exist
+    table_match = re.search(
+        r'table with name "?(\w+)"? does not exist',
+        error_msg, re.IGNORECASE,
+    )
+    if table_match:
+        bad_table = table_match.group(1)
+        # Try to find which schema it was used with
+        schema_match = re.search(
+            rf'lake\.(\w+)\.{re.escape(bad_table)}',
+            sql, re.IGNORECASE,
+        )
+        if schema_match:
+            schema = schema_match.group(1)
+            # Match against tables in that schema
+            schema_tables = list(_catalog.get(schema, {}).keys())
+            fix = _fuzzy_match(bad_table, schema_tables)
+            if fix:
+                old = f"lake.{schema}.{bad_table}"
+                new = f"lake.{schema}.{fix}"
+                fixed = re.sub(re.escape(old), new, sql, flags=re.IGNORECASE)
+                print(f"SQL auto-correct: {old} → {new}", flush=True)
+                return fixed
+        else:
+            # No schema prefix — search all tables
+            all_table_names = [t.split(".")[-1] for t in _all_tables]
+            fix = _fuzzy_match(bad_table, all_table_names)
+            if fix:
+                fixed = re.sub(
+                    rf'\b{re.escape(bad_table)}\b', fix, sql, flags=re.IGNORECASE,
+                )
+                print(f"SQL auto-correct table: {bad_table} → {fix}", flush=True)
+                return fixed
+
+    # --- Column not found ---
+    # Pattern: Referenced column "X" not found
+    col_match = re.search(
+        r'(?:column|referenced column) "?(\w+)"? not found',
+        error_msg, re.IGNORECASE,
+    )
+    if col_match:
+        bad_col = col_match.group(1)
+        # Find which tables are in the query and check their columns
+        for schema, tables in _catalog.items():
+            for table in tables:
+                full = f"lake.{schema}.{table}"
+                if full.lower() in sql.lower() or table.lower() in sql.lower():
+                    cols = _column_cache.get(f"{schema}.{table}", [])
+                    if cols:
+                        fix = _fuzzy_match(bad_col, cols)
+                        if fix:
+                            fixed = re.sub(
+                                rf'\b{re.escape(bad_col)}\b', fix, sql,
+                                count=0, flags=re.IGNORECASE,
+                            )
+                            print(f"SQL auto-correct column: {bad_col} → {fix} "
+                                  f"(in {schema}.{table})", flush=True)
+                            return fixed
+
+    # --- Schema not found ---
+    schema_match = re.search(
+        r'schema "?(\w+)"? does not exist',
+        error_msg, re.IGNORECASE,
+    )
+    if schema_match:
+        bad_schema = schema_match.group(1)
+        real_schemas = list(_catalog.keys())
+        fix = _fuzzy_match(bad_schema, real_schemas)
+        if fix:
+            fixed = re.sub(
+                rf'lake\.{re.escape(bad_schema)}\.',
+                f"lake.{fix}.",
+                sql, flags=re.IGNORECASE,
+            )
+            print(f"SQL auto-correct schema: {bad_schema} → {fix}", flush=True)
+            return fixed
+
+    return None
+
+
+def execute(
+    pool: CursorPool,
+    sql: str,
+    params: list | None = None,
+    *,
+    schema_descriptions: dict | None = None,
+    _retried: bool = False,
+) -> tuple[list, list]:
+    """Execute SQL via *pool*, return (cols, rows).
+
+    Handles: S3/DuckLake reconnect, fuzzy SQL correction, row normalization.
+    """
     global _last_reconnect
     with pool.cursor() as cur:
         try:
@@ -75,7 +246,6 @@ def execute(pool: CursorPool, sql: str, params: list | None = None, *, schema_de
                                     AS lake (METADATA_SCHEMA 'lake')
                                 """)
                             print("Auto-reconnect: DuckLake re-attached successfully", flush=True)
-                            # Retry the original query
                             with pool.cursor() as retry_cur:
                                 result = retry_cur.execute(sql, params or [])
                                 cols = [d[0] for d in result.description] if result.description else []
@@ -84,7 +254,15 @@ def execute(pool: CursorPool, sql: str, params: list | None = None, *, schema_de
                         except Exception as reconnect_err:
                             print(f"Auto-reconnect failed: {reconnect_err}", flush=True)
 
-            # Improved error hints
+            # --- Fuzzy SQL correction (one retry) ---
+            if not _retried and ("does not exist" in err or "not found" in err):
+                fixed_sql = _try_fix_sql(sql, err)
+                if fixed_sql and fixed_sql != sql:
+                    return execute(pool, fixed_sql, params,
+                                   schema_descriptions=schema_descriptions,
+                                   _retried=True)
+
+            # Error hints for the LLM
             hint = ""
             schemas = schema_descriptions or {}
             if "does not exist" in err.lower():

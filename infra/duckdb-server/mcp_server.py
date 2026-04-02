@@ -19,7 +19,7 @@ from middleware.percentile_middleware import PercentileMiddleware
 
 from percentiles import build_percentile_tables, build_lake_percentile_tables
 from cursor_pool import CursorPool
-from shared.db import execute, build_catalog
+from shared.db import execute, build_catalog, set_catalog_cache
 from shared.types import READONLY, EMBEDDINGS_DB
 
 # ---------------------------------------------------------------------------
@@ -425,6 +425,7 @@ async def app_lifespan(server):
         pass
 
     catalog = build_catalog(conn)
+    set_catalog_cache(catalog, conn)
     schema_count = len(catalog)
     table_count = sum(len(t) for t in catalog.values())
     print(f"Catalog cached: {table_count} tables across {schema_count} schemas", flush=True)
