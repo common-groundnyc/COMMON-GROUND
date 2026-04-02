@@ -1539,7 +1539,7 @@ def _view_history(pool, bbl: str) -> ToolResult:
 
     if deeds:
         lines.append("--- OWNERSHIP TRANSFERS (DEEDS) ---")
-        for d in sorted(deeds, key=lambda x: x["date"] or "", reverse=True):
+        for d in sorted(deeds, key=lambda x: str(x["date"] or ""), reverse=True):
             amt_str = f"${d['amount']:,.0f}" if d['amount'] else "N/A"
             date_str = str(d["date"]) if d["date"] else "?"
             sellers = [p for p in d["parties"] if p["role"] == "GRANTOR"]
@@ -1553,7 +1553,7 @@ def _view_history(pool, bbl: str) -> ToolResult:
 
     if mortgages:
         lines.append(f"--- MORTGAGES ({len(mortgages)}) ---")
-        for d in sorted(mortgages, key=lambda x: x["date"] or "", reverse=True)[:10]:
+        for d in sorted(mortgages, key=lambda x: str(x["date"] or ""), reverse=True)[:10]:
             amt_str = f"${d['amount']:,.0f}" if d['amount'] else "N/A"
             date_str = str(d["date"]) if d["date"] else "?"
             lenders = [p["name"] for p in d["parties"] if p["role"] == "GRANTEE"]
@@ -1565,7 +1565,7 @@ def _view_history(pool, bbl: str) -> ToolResult:
             lines.append(f"  ... and {len(mortgages) - 10} more mortgages")
         lines.append("")
 
-    deed_prices = [(d["date"], d["amount"]) for d in sorted(deeds, key=lambda x: x["date"] or "")
+    deed_prices = [(d["date"], d["amount"]) for d in sorted(deeds, key=lambda x: str(x["date"] or ""))
                    if d["amount"] and d["amount"] > 10000]
     if len(deed_prices) >= 2:
         lines.append("--- PRICE HISTORY ---")
@@ -1595,7 +1595,7 @@ def _view_history(pool, bbl: str) -> ToolResult:
                     "amount": d["amount"],
                     "parties": d["parties"],
                 }
-                for d in sorted(doc_map.values(), key=lambda x: x["date"] or "", reverse=True)
+                for d in sorted(doc_map.values(), key=lambda x: str(x["date"] or ""), reverse=True)
             ],
         },
         meta={"total_documents": len(doc_map), "query_time_ms": elapsed},
