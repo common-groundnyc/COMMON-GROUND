@@ -17,14 +17,16 @@ def select_tables(emb_conn, embed_fn, question: str, top_k: int = 5) -> list[str
     query_vec = embed_fn(question)
     rows = emb_conn.execute(
         "SELECT schema_name, table_name, "
-        "array_cosine_distance(embedding, ?::FLOAT[]) AS distance "
+        "array_cosine_distance(embedding, ?::FLOAT[256]) AS distance "
         "FROM catalog_embeddings "
         "WHERE table_name != '__schema__' "
         "ORDER BY distance "
         "LIMIT ?",
         [query_vec.tolist(), top_k],
     ).fetchall()
-    return [f"{r[0]}.{r[1]}" for r in rows]
+    result = [f"{r[0]}.{r[1]}" for r in rows]
+    print(f"  NL: select_tables found {len(result)} tables: {result}", flush=True)
+    return result
 
 
 def fetch_table_schemas(pool, tables: list[str]) -> list[dict]:
@@ -45,17 +47,8 @@ def fetch_table_schemas(pool, tables: list[str]) -> list[dict]:
                 table_comment = tc_row[0] if tc_row and tc_row[0] else None
 
                 col_rows = cur.execute(
-                    "SELECT c.column_name, c.data_type, dc.comment "
-                    "FROM information_schema.columns c "
-                    "LEFT JOIN duckdb_columns() dc "
-                    "  ON dc.database_name = 'lake' "
-                    "  AND dc.schema_name = c.table_schema "
-                    "  AND dc.table_name = c.table_name "
-                    "  AND dc.column_name = c.column_name "
-                    "WHERE c.table_catalog = 'lake' "
-                    "  AND c.table_schema = ? AND c.table_name = ? "
-                    "ORDER BY c.ordinal_position",
-                    [schema, table],
+                    f"SELECT column_name, column_type, NULL AS comment "
+                    f"FROM (DESCRIBE lake.{schema}.{table})",
                 ).fetchall()
 
                 results.append({
@@ -67,7 +60,8 @@ def fetch_table_schemas(pool, tables: list[str]) -> list[dict]:
                         for r in col_rows
                     ],
                 })
-        except Exception:
+        except Exception as e:
+            print(f"  NL: fetch_table_schemas failed for {schema}.{table}: {e}", flush=True)
             continue
     return results
 
@@ -258,13 +252,15 @@ def nl_query(question, pool, emb_conn, embed_fn, api_key, format="text", ctx=Non
     )
 
     if isinstance(result, ToolResult):
+        # result.content may be str or list — normalize to str
+        base_content = result.content if isinstance(result.content, str) else str(result.content)
         return ToolResult(
-            content=result.content + gen_note,
+            content=base_content + gen_note,
             structured_content=result.structured_content,
             meta={**(result.meta or {}), "nl_generation_ms": elapsed_gen,
                   "nl_retries": retries, "nl_tables": relevant_tables, "nl_sql": sql},
         )
-    return result + gen_note
+    return str(result) + gen_note
 
 
 def compose_correction_prompt(original_question: str, bad_sql: str, error: str, schema_context: str) -> str:
