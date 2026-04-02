@@ -32,7 +32,7 @@ def build_queries(
                COUNT(*) FILTER (WHERE class = 'C') AS class_c,
                MAX(novissueddate) AS latest
         FROM lake.housing.hpd_violations
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl]))
 
     queries.append(("building_hpd_complaints", """
@@ -41,7 +41,7 @@ def build_queries(
                    WHERE complaint_status = 'OPEN') AS open_cnt,
                MODE() WITHIN GROUP (ORDER BY majorcategory) AS top_category
         FROM lake.housing.hpd_complaints
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl]))
 
     queries.append(("building_dob_violations", """
@@ -55,13 +55,13 @@ def build_queries(
     queries.append(("building_fdny", """
         SELECT COUNT(*) AS total
         FROM lake.housing.fdny_violations
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl]))
 
     queries.append(("building_evictions", """
         SELECT COUNT(*) AS total
         FROM lake.housing.evictions
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
           AND "residential_commercial_ind" = 'Residential'
     """, [bbl]))
 
@@ -82,14 +82,14 @@ def build_queries(
         SELECT energy_star_score, source_eui_kbtu_ft2,
                total_ghg_emissions_mtco2e
         FROM lake.environment.ll84_energy_2023
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
         LIMIT 1
     """, [bbl]))
 
     queries.append(("building_facade", """
         SELECT filing_status
         FROM lake.housing.dob_safety_facades
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
         ORDER BY last_filing_date DESC NULLS LAST
         LIMIT 1
     """, [bbl]))
@@ -97,7 +97,7 @@ def build_queries(
     queries.append(("building_boiler", """
         SELECT overall_status
         FROM lake.housing.dob_safety_boiler
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
         ORDER BY inspection_date DESC NULLS LAST
         LIMIT 1
     """, [bbl]))
@@ -105,14 +105,14 @@ def build_queries(
     queries.append(("building_aep", """
         SELECT 1 AS on_list
         FROM lake.housing.aep_buildings
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
         LIMIT 1
     """, [bbl]))
 
     queries.append(("building_tax_lien", """
         SELECT COUNT(*) AS cnt
         FROM lake.housing.tax_lien_sales
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl]))
 
     queries.append(("building_owner_portfolio", """
@@ -148,7 +148,7 @@ def build_queries(
     queries.append(("building_hpd_litigations", """
         SELECT COUNT(*) AS total
         FROM lake.housing.hpd_litigations
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl]))
 
     queries.append(("building_rent_stab", """
@@ -161,7 +161,7 @@ def build_queries(
     queries.append(("building_housing_court", """
         SELECT COUNT(*) AS total
         FROM lake.housing.oca_housing_court_cases
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl]))
 
     queries.append(("building_permits", """
@@ -186,7 +186,7 @@ def build_queries(
             FROM bbl_counts
         )
         SELECT pctile FROM ranked
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl]))
 
     queries.append(("pctile_complaints", """
@@ -200,7 +200,7 @@ def build_queries(
             FROM bbl_counts
         )
         SELECT pctile FROM ranked
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl]))
 
     queries.append(("pctile_energy", """
@@ -215,7 +215,7 @@ def build_queries(
             FROM scores
         )
         SELECT pctile FROM ranked
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl]))
 
     # ══════════════════════════════════════════════════════════════════════

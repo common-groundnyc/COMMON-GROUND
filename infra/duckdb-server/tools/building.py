@@ -182,7 +182,7 @@ SELECT bbl, address, zipcode AS zip, stories, total_units,
        dob_violations AS total_dob_violations,
        latest_dob AS latest_dob_date
 FROM lake.foundation.mv_building_hub
-WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
 """
 
 BUILDING_PROFILE_SQL = """
@@ -200,7 +200,7 @@ violation_counts AS (
         COUNT(*) FILTER (WHERE violationstatus = 'Open') AS open_violations,
         MAX(TRY_CAST(novissueddate AS DATE)) AS latest_violation_date
     FROM lake.housing.hpd_violations
-    WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?::VARCHAR
+    WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?::VARCHAR
 ),
 complaint_counts AS (
     SELECT
@@ -208,7 +208,7 @@ complaint_counts AS (
         COUNT(DISTINCT complaint_id) FILTER (WHERE complaint_status = 'OPEN') AS open_complaints,
         MAX(TRY_CAST(received_date AS DATE)) AS latest_complaint_date
     FROM lake.housing.hpd_complaints
-    WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?::VARCHAR
+    WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?::VARCHAR
 ),
 dob_counts AS (
     SELECT
@@ -238,7 +238,7 @@ WITH hpd AS (
            violationstatus AS status, novissueddate AS issue_date,
            currentstatus AS current_status, currentstatusdate AS status_date
     FROM lake.housing.hpd_violations
-    WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+    WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     ORDER BY TRY_CAST(novissueddate AS DATE) DESC NULLS LAST
     LIMIT 200
 ),
@@ -271,7 +271,7 @@ SELECT yearbuilt, numfloors, unitsres, unitstotal, bldgclass, bldgarea, lotarea,
        address, ownername, histdist, yearalter1, yearalter2,
        zonedist1, assesstot, borough, zipcode
 FROM lake.city_government.pluto
-WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
 LIMIT 1
 """
 
@@ -360,21 +360,21 @@ WHERE zipcode = ?
 # ---------------------------------------------------------------------------
 
 BLOCK_PLUTO_SQL = """
-SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl,
+SELECT LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') AS bbl,
        address, borough, zipcode, TRY_CAST(yearbuilt AS INT) AS yearbuilt,
        TRY_CAST(numfloors AS DOUBLE) AS numfloors, bldgclass
 FROM lake.city_government.pluto
-WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
 LIMIT 1
 """
 
 BLOCK_NEIGHBORS_SQL = """
-SELECT REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') AS bbl,
+SELECT LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') AS bbl,
        address, TRY_CAST(yearbuilt AS INT) AS yearbuilt,
        TRY_CAST(numfloors AS DOUBLE) AS numfloors, bldgclass,
        TRY_CAST(unitsres AS INT) AS unitsres
 FROM lake.city_government.pluto
-WHERE SUBSTRING(REPLACE(CAST(bbl AS VARCHAR), '.00000000', ''), 1, 6) = ?
+WHERE SUBSTRING(LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0'), 1, 6) = ?
   AND TRY_CAST(yearbuilt AS INT) > 1800
 ORDER BY address
 LIMIT 50
@@ -435,11 +435,11 @@ WITH target AS (
     SELECT bbl, yearbuilt, numfloors, unitsres, bldgclass, bldgarea, lotarea,
            address, borough, zipcode, assesstot
     FROM lake.city_government.pluto
-    WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+    WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     LIMIT 1
 )
 SELECT
-    REPLACE(CAST(p.bbl AS VARCHAR), '.00000000', '') AS twin_bbl,
+    LPAD(TRY_CAST(TRY_CAST(p.bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') AS twin_bbl,
     p.address, p.borough, p.zipcode,
     TRY_CAST(p.yearbuilt AS INT) AS yearbuilt,
     TRY_CAST(p.numfloors AS DOUBLE) AS numfloors,
@@ -453,7 +453,7 @@ SELECT
 FROM lake.city_government.pluto p
 CROSS JOIN target t
 WHERE p.bldgclass = t.bldgclass
-  AND REPLACE(CAST(p.bbl AS VARCHAR), '.00000000', '') != ?
+  AND LPAD(TRY_CAST(TRY_CAST(p.bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') != ?
   AND p.borough != t.borough
   AND TRY_CAST(p.yearbuilt AS INT) BETWEEN TRY_CAST(t.yearbuilt AS INT) - 5 AND TRY_CAST(t.yearbuilt AS INT) + 5
   AND TRY_CAST(p.numfloors AS DOUBLE) BETWEEN TRY_CAST(t.numfloors AS DOUBLE) - 2 AND TRY_CAST(t.numfloors AS DOUBLE) + 2
@@ -565,7 +565,7 @@ def _view_full(pool, bbl: str) -> ToolResult:
             _, pluto_rows = execute(pool, """
                 SELECT address, zipcode, ownername, yearbuilt, bldgclass, zonedist1
                 FROM lake.city_government.pluto
-                WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+                WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
                 LIMIT 1
             """, [bbl])
             if pluto_rows:
@@ -592,7 +592,7 @@ def _view_full(pool, bbl: str) -> ToolResult:
                 SELECT bbl, COUNT(*) AS cnt FROM lake.housing.hpd_violations GROUP BY bbl
             )
             SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE cnt <= (
-                SELECT cnt FROM bbl_counts WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+                SELECT cnt FROM bbl_counts WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
             )) / COUNT(*), 1) AS percentile
             FROM bbl_counts
         """, [bbl])
@@ -610,7 +610,7 @@ def _view_full(pool, bbl: str) -> ToolResult:
         _, landmark_rows = execute(pool, """
             SELECT lm_name, lm_type, hist_distr, status, desdate
             FROM lake.housing.designated_buildings
-            WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+            WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
             LIMIT 1
         """, [bbl])
     except Exception:
@@ -1032,7 +1032,7 @@ def _view_similar(pool, bbl: str, ctx=None) -> ToolResult:
         if not emb_conn:
             raise Exception("No embedding DB")
         target_rows = emb_conn.execute(
-            "SELECT features FROM building_vectors WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?", [bbl]
+            "SELECT features FROM building_vectors WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?", [bbl]
         ).fetchall()
 
         if target_rows:
@@ -1194,7 +1194,7 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
             MAX(TRY_CAST(novissueddate AS DATE)) AS latest,
             MIN(TRY_CAST(novissueddate AS DATE)) AS earliest
         FROM lake.housing.hpd_violations
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl])
     hpd = dict(zip(hpd_cols, hpd_rows[0])) if hpd_rows else {}
 
@@ -1221,7 +1221,7 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
             MAX(TRY_CAST(vio_date AS DATE)) AS latest,
             MIN(TRY_CAST(vio_date AS DATE)) AS earliest
         FROM lake.housing.fdny_violations
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl])
     fdny = dict(zip(fdny_cols, fdny_rows[0])) if fdny_rows else {}
 
@@ -1248,7 +1248,7 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
                inspection_date, violation_code, violation_description,
                critical_flag, score
         FROM lake.health.restaurant_inspections
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
         ORDER BY inspection_date DESC
         LIMIT 20
     """, [bbl])
@@ -1260,7 +1260,7 @@ def _view_enforcement(pool, bbl: str) -> ToolResult:
             COUNT(DISTINCT complaint_id) FILTER (WHERE UPPER(complaint_status) = 'OPEN') AS open_complaints,
             MAX(TRY_CAST(received_date AS DATE)) AS latest
         FROM lake.housing.hpd_complaints
-        WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
     """, [bbl])
     complaints = dict(zip(complaint_cols, complaint_rows[0])) if complaint_rows else {}
 
@@ -1455,7 +1455,7 @@ def _view_history(pool, bbl: str) -> ToolResult:
             SELECT document_id, doc_type, amount, doc_date, party_name AS name,
                    role, address_1, city, state
             FROM lake.foundation.mv_acris_deeds
-            WHERE REPLACE(CAST(bbl AS VARCHAR), '.00000000', '') = ?
+            WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
             ORDER BY doc_date DESC
             LIMIT 500
         """, [bbl])
