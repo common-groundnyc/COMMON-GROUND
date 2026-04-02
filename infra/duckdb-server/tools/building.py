@@ -268,7 +268,7 @@ ORDER BY sort_date DESC NULLS LAST
 
 STORY_PLUTO_SQL = """
 SELECT yearbuilt, numfloors, unitsres, unitstotal, bldgclass, bldgarea, lotarea,
-       address, ownername, histdist, yearalter1, yearalter2,
+       address, ownername, yearalter1, yearalter2,
        zonedist1, assesstot, borough, zipcode
 FROM lake.city_government.pluto
 WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
