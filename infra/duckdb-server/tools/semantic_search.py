@@ -10,7 +10,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
-from shared.db import execute, safe_query
+from shared.db import execute, parallel_queries, safe_query
 from shared.formatting import make_result
 from shared.lance import vector_expand_names, lance_route_entity
 from shared.types import VS_NAME_DISTANCE, VS_CATALOG_DISTANCE, MAX_LLM_ROWS
@@ -168,12 +168,11 @@ def _violation_search(query: str, limit: int, ctx: Context) -> ToolResult:
     pool = ctx.lifespan_context["pool"]
     t0 = time.time()
     pattern = f"%{query}%"
-    all_results: list[tuple] = []
+    cap = min(limit, 100)
 
-    # Restaurant inspection violations
-    try:
-        _, rows_r = execute(
-            pool,
+    results = parallel_queries(pool, [
+        (
+            "restaurant",
             """
             SELECT 'Restaurant' AS source,
                    camis AS id,
@@ -188,16 +187,10 @@ def _violation_search(query: str, limit: int, ctx: Context) -> ToolResult:
             ORDER BY inspection_date DESC
             LIMIT ?
             """,
-            [pattern, pattern, pattern, min(limit, 100)],
-        )
-        all_results.extend(rows_r)
-    except Exception:
-        pass
-
-    # HPD violations (keyword search)
-    try:
-        _, rows_hpd = execute(
-            pool,
+            [pattern, pattern, pattern, cap],
+        ),
+        (
+            "hpd",
             """
             SELECT 'HPD' AS source,
                    violationid AS id,
@@ -210,16 +203,10 @@ def _violation_search(query: str, limit: int, ctx: Context) -> ToolResult:
             ORDER BY inspectiondate DESC
             LIMIT ?
             """,
-            [pattern, min(limit, 100)],
-        )
-        all_results.extend(rows_hpd)
-    except Exception:
-        pass
-
-    # OATH/ECB hearings (keyword search)
-    try:
-        _, rows_oath = execute(
-            pool,
+            [pattern, cap],
+        ),
+        (
+            "oath",
             """
             SELECT 'OATH' AS source,
                    ticket_number AS id,
@@ -233,11 +220,14 @@ def _violation_search(query: str, limit: int, ctx: Context) -> ToolResult:
             ORDER BY violation_date DESC
             LIMIT ?
             """,
-            [pattern, pattern, min(limit, 100)],
-        )
-        all_results.extend(rows_oath)
-    except Exception:
-        pass
+            [pattern, pattern, cap],
+        ),
+    ])
+
+    all_results: list[tuple] = []
+    for name in ("restaurant", "hpd", "oath"):
+        _, rows = results.get(name, ([], []))
+        all_results.extend(rows)
 
     # Semantic enhancement via Lance
     semantic_suggestions = _semantic_enhance(query, ctx, source_filter="WHERE source IN ('restaurant', 'hpd', 'oath')")
