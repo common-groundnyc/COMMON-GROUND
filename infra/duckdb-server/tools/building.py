@@ -550,6 +550,7 @@ _FAMOUS_BUILDINGS = [
 
 def _view_full(pool, bbl: str) -> ToolResult:
     """Full building profile with violations, enrichments, and percentile."""
+    # --- Step 1: BBL resolution (sequential — everything depends on this) ---
     try:
         cols, rows = execute(pool, BUILDING_PROFILE_MV_SQL, [bbl])
     except Exception:
@@ -560,106 +561,115 @@ def _view_full(pool, bbl: str) -> ToolResult:
 
     row = dict(zip(cols, rows[0]))
 
-    # Backfill address/zip/owner from PLUTO when MV returns NULLs
-    if not row.get("address") or not row.get("zip"):
-        try:
-            _, pluto_rows = execute(pool, """
-                SELECT address, zipcode, ownername, yearbuilt, bldgclass, zonedist1
-                FROM lake.city_government.pluto
-                WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
-                LIMIT 1
-            """, [bbl])
-            if pluto_rows:
-                pr = pluto_rows[0]
-                if not row.get("address") and pr[0]:
-                    row["address"] = pr[0]
-                if not row.get("zip") and pr[1]:
-                    row["zip"] = pr[1]
-                if not row.get("ownername") and pr[2]:
-                    row["ownername"] = pr[2]
-                if not row.get("yearbuilt") and pr[3]:
-                    row["yearbuilt"] = pr[3]
-                if not row.get("bldgclass") and pr[4]:
-                    row["bldgclass"] = pr[4]
-                if not row.get("zoning") and pr[5]:
-                    row["zoning"] = pr[5]
-        except Exception:
-            pass
+    # Determine whether PLUTO backfill is needed before launching parallel queries
+    needs_pluto = not row.get("address") or not row.get("zip")
 
-    # City-wide violation percentile context
-    try:
-        _, pct_rows = execute(pool, """
-            WITH bbl_counts AS (
-                SELECT bbl, COUNT(*) AS cnt FROM lake.housing.hpd_violations GROUP BY bbl
-            )
-            SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE cnt <= (
-                SELECT cnt FROM bbl_counts WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
-            )) / COUNT(*), 1) AS percentile
-            FROM bbl_counts
-        """, [bbl])
-        if pct_rows and pct_rows[0][0] is not None:
-            row["violation_percentile"] = pct_rows[0][0]
-    except Exception:
-        pass
-
-    # Additional enrichments — landmark, tax exemptions, valuation, SRO, facades
     borough = bbl[0]
     block = bbl[1:6].lstrip("0") or "0"
     lot = bbl[6:10].lstrip("0") or "0"
 
-    try:
-        _, landmark_rows = execute(pool, """
+    # --- Step 2: All independent enrichment queries in parallel ---
+    enrichment_queries: list[tuple[str, str, list | None]] = [
+        (
+            "landmark",
+            """
             SELECT lm_name, lm_type, hist_distr, status, desdate
             FROM lake.housing.designated_buildings
             WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
             LIMIT 1
-        """, [bbl])
-    except Exception:
-        landmark_rows = []
-
-    try:
-        _, tax_rows = execute(pool, """
+            """,
+            [bbl],
+        ),
+        (
+            "tax",
+            """
             SELECT exmp_code, exname, year, curexmptot, benftstart
             FROM lake.housing.tax_exemptions
             WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
             ORDER BY year DESC
             LIMIT 5
-        """, [bbl])
-    except Exception:
-        tax_rows = []
-
-    try:
-        _, val_rows = execute(pool, """
+            """,
+            [bbl],
+        ),
+        (
+            "valuation",
+            """
             SELECT year, curmkttot, curacttot, curtxbtot, zoning, owner,
                    bldg_class, yrbuilt, units, gross_sqft
             FROM lake.housing.property_valuation
             WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
             ORDER BY year DESC
             LIMIT 1
-        """, [bbl])
-    except Exception:
-        val_rows = []
-
-    try:
-        _, sro_rows = execute(pool, """
+            """,
+            [bbl],
+        ),
+        (
+            "sro",
+            """
             SELECT dobbuildingclass, legalclassa, legalclassb, managementprogram
             FROM lake.housing.sro_buildings
             WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
             LIMIT 1
-        """, [bbl])
-    except Exception:
-        sro_rows = []
-
-    try:
-        _, facade_rows = execute(pool, """
+            """,
+            [bbl],
+        ),
+        (
+            "facade",
+            """
             SELECT current_status, filing_status, cycle, exterior_wall_type_sx
             FROM lake.housing.dob_safety_facades
             WHERE borough = ? AND block = ? AND lot = ?
             ORDER BY TRY_CAST(submitted_on AS DATE) DESC NULLS LAST
             LIMIT 1
-        """, [borough, block, lot])
-    except Exception:
-        facade_rows = []
+            """,
+            [borough, block, lot],
+        ),
+    ]
+
+    if needs_pluto:
+        enrichment_queries.append((
+            "pluto",
+            """
+            SELECT address, zipcode, ownername, yearbuilt, bldgclass, zonedist1
+            FROM lake.city_government.pluto
+            WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+            LIMIT 1
+            """,
+            [bbl],
+        ))
+
+    results = parallel_queries(pool, enrichment_queries)
+
+    # Unpack parallel results
+    landmark_rows = results.get("landmark", ([], []))[1]
+    tax_rows = results.get("tax", ([], []))[1]
+    val_rows = results.get("valuation", ([], []))[1]
+    sro_rows = results.get("sro", ([], []))[1]
+    facade_rows = results.get("facade", ([], []))[1]
+
+    # Backfill address/zip/owner from PLUTO when MV returns NULLs
+    if needs_pluto:
+        pluto_rows = results.get("pluto", ([], []))[1]
+        if pluto_rows:
+            pr = pluto_rows[0]
+            if not row.get("address") and pr[0]:
+                row["address"] = pr[0]
+            if not row.get("zip") and pr[1]:
+                row["zip"] = pr[1]
+            if not row.get("ownername") and pr[2]:
+                row["ownername"] = pr[2]
+            if not row.get("yearbuilt") and pr[3]:
+                row["yearbuilt"] = pr[3]
+            if not row.get("bldgclass") and pr[4]:
+                row["bldgclass"] = pr[4]
+            if not row.get("zoning") and pr[5]:
+                row["zoning"] = pr[5]
+
+    # Violation percentile — use pre-computed pctile_buildings (fast point lookup,
+    # replaces the full city-wide GROUP BY scan that ran on every call)
+    pctile_data = lookup_percentiles(pool, "building", bbl)
+    if pctile_data.get("violation_pctile") is not None:
+        row["violation_percentile"] = round(pctile_data["violation_pctile"] * 100, 1)
 
     summary = (
         f"BBL {row['bbl']}: {row['address']}, {row['zip']}\n"
