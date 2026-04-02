@@ -1510,28 +1510,36 @@ async def app_lifespan(server):
         except Exception as e:
             print(f"Warning: nyc_tradewaste_network graph definition failed: {e}", flush=True)
 
-        # COIB conflicts of interest network
-        try:
-            conn.execute("""
-                CREATE OR REPLACE PROPERTY GRAPH nyc_coib_network
-                VERTEX TABLES (
-                    main.graph_coib_donors
-                        PROPERTIES (donor_name, donation_types, total_donated, donation_count, city, state)
-                        LABEL COIBDonor,
-                    main.graph_coib_policymakers
-                        PROPERTIES (policymaker_name, agency, title, latest_year, years_active)
-                        LABEL Policymaker
-                )
-                EDGE TABLES (
-                    main.graph_coib_donor_edges
-                        SOURCE KEY (donor_name) REFERENCES main.graph_coib_donors (donor_name)
-                        DESTINATION KEY (recipient) REFERENCES main.graph_coib_policymakers (policymaker_name)
-                        LABEL DonatesTo
-                )
-            """)
-            print("Property graph nyc_coib_network created", flush=True)
-        except Exception as e:
-            print(f"Warning: nyc_coib_network graph definition failed: {e}", flush=True)
+        # COIB conflicts of interest network — skip if tables missing (hangs otherwise)
+        coib_tables = ["graph_coib_donors", "graph_coib_policymakers", "graph_coib_donor_edges"]
+        coib_ok = all(
+            conn.execute(f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{t}'").fetchone()[0] > 0
+            for t in coib_tables
+        )
+        if coib_ok:
+            try:
+                conn.execute("""
+                    CREATE OR REPLACE PROPERTY GRAPH nyc_coib_network
+                    VERTEX TABLES (
+                        main.graph_coib_donors
+                            PROPERTIES (donor_name, donation_types, total_donated, donation_count, city, state)
+                            LABEL COIBDonor,
+                        main.graph_coib_policymakers
+                            PROPERTIES (policymaker_name, agency, title, latest_year, years_active)
+                            LABEL Policymaker
+                    )
+                    EDGE TABLES (
+                        main.graph_coib_donor_edges
+                            SOURCE KEY (donor_name) REFERENCES main.graph_coib_donors (donor_name)
+                            DESTINATION KEY (recipient) REFERENCES main.graph_coib_policymakers (policymaker_name)
+                            LABEL DonatesTo
+                    )
+                """)
+                print("Property graph nyc_coib_network created", flush=True)
+            except Exception as e:
+                print(f"Warning: nyc_coib_network graph definition failed: {e}", flush=True)
+        else:
+            print("Warning: nyc_coib_network skipped — COIB graph tables not built yet", flush=True)
 
         # graph_ready already set after core tables — DuckPGQ definitions are optional
     except Exception as e:
