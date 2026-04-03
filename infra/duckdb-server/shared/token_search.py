@@ -1,8 +1,11 @@
-"""Token-based name search against foundation.name_tokens."""
+"""Token-based name routing against local name_token_routes table.
+
+Uses the persistent local DuckDB (emb_conn) for instant lookups,
+not DuckLake on S3. The table is synced from lake.foundation.name_tokens
+at server startup (incremental — only rebuilds when data changes).
+"""
 
 import time
-
-from shared.db import safe_query
 
 
 STOPWORDS = frozenset({
@@ -20,79 +23,56 @@ def tokenize_query(name: str) -> list[str]:
 
 
 def token_search(
-    pool,
+    ctx,
     name: str,
     source_filter: set[str] | None = None,
-    limit: int = 500,
-) -> dict[str, list[tuple[str, str]]]:
-    """Search name_tokens by token equality.
+) -> set[str]:
+    """Find which source tables contain a name, using local token index.
 
-    Returns {source_table: [(source_id, full_name), ...]}.
-    For multi-word names, requires all tokens to match on the same source_id.
+    Returns a set of source_table strings, e.g. {'housing.acris_parties', 'city_government.pluto'}.
+    Queries the local emb_conn DuckDB (not DuckLake S3) for instant results.
+
+    For multi-word names, returns tables that have ALL tokens (intersection).
     """
+    emb_conn = ctx.lifespan_context.get("emb_conn")
+    if not emb_conn:
+        return set()
+
     tokens = tokenize_query(name)
     if not tokens:
-        return {}
+        return set()
 
     t0 = time.time()
 
-    if len(tokens) == 1:
-        source_clause = ""
-        params: list = [tokens[0]]
+    try:
+        if len(tokens) == 1:
+            rows = emb_conn.execute(
+                "SELECT DISTINCT source_table FROM name_token_routes WHERE token = ?",
+                [tokens[0]],
+            ).fetchall()
+            sources = {r[0] for r in rows}
+
+        else:
+            # Multi-token: intersect — only tables that have ALL tokens
+            sets = []
+            for token in tokens:
+                rows = emb_conn.execute(
+                    "SELECT DISTINCT source_table FROM name_token_routes WHERE token = ?",
+                    [token],
+                ).fetchall()
+                sets.append({r[0] for r in rows})
+            sources = sets[0].intersection(*sets[1:]) if sets else set()
+
         if source_filter:
-            placeholders = ", ".join(["?"] * len(source_filter))
-            source_clause = f"AND source_table IN ({placeholders})"
-            params.extend(sorted(source_filter))
+            sources = sources & source_filter
 
-        _, rows = safe_query(pool, f"""
-            SELECT source_table, source_id, full_name
-            FROM lake.foundation.name_tokens
-            WHERE token = ?
-            {source_clause}
-            LIMIT ?
-        """, params + [limit])
+        elapsed = round((time.time() - t0) * 1000)
+        if sources:
+            print(f"[token_search] '{name}' → {len(sources)} tables ({elapsed}ms)",
+                  flush=True)
 
-    else:
-        joins = []
-        conditions = []
-        params = []
-        for i, token in enumerate(tokens):
-            alias = f"t{i}"
-            if i == 0:
-                joins.append(f"lake.foundation.name_tokens {alias}")
-            else:
-                joins.append(
-                    f"JOIN lake.foundation.name_tokens {alias} "
-                    f"ON t0.source_table = {alias}.source_table "
-                    f"AND t0.source_id = {alias}.source_id"
-                )
-            conditions.append(f"{alias}.token = ?")
-            params.append(token)
+        return sources
 
-        source_clause = ""
-        if source_filter:
-            placeholders = ", ".join(["?"] * len(source_filter))
-            source_clause = f"AND t0.source_table IN ({placeholders})"
-            params.extend(sorted(source_filter))
-
-        sql = f"""
-            SELECT t0.source_table, t0.source_id, t0.full_name
-            FROM {' '.join(joins)}
-            WHERE {' AND '.join(conditions)}
-            {source_clause}
-            LIMIT ?
-        """
-        params.append(limit)
-        _, rows = safe_query(pool, sql, params)
-
-    result: dict[str, list[tuple[str, str]]] = {}
-    for row in rows:
-        source = row[0]
-        result.setdefault(source, []).append((row[1], row[2]))
-
-    elapsed = round((time.time() - t0) * 1000)
-    if rows:
-        print(f"[token_search] '{name}' -> {len(rows)} matches across "
-              f"{len(result)} tables ({elapsed}ms)", flush=True)
-
-    return result
+    except Exception as e:
+        print(f"[token_search] error: {e}", flush=True)
+        return set()

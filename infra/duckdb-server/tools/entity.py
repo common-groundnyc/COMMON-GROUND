@@ -376,9 +376,8 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     # Splink probabilistic name resolution
     name_variants = _resolve_name_variants(pool, name)
 
-    # Token-based routing — instant lookup of which tables have this name
-    token_matches = token_search(pool, search)
-    token_sources = set(token_matches.keys())
+    # Token-based routing — instant local lookup of which tables have this name
+    token_sources = token_search(ctx, search)
 
     # Lance as fuzzy fallback (catches misspellings, similar names)
     lance_route = lance_route_entity(ctx, search)
@@ -621,20 +620,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
         queries.append(("camp", camp_sql, camp_params))
     if _should_query("oath_hearings"):
         queries.append(("oath", oath_sql, oath_params))
-    acris_token_hits = token_matches.get("housing.acris_parties", [])
-    if acris_token_hits and _should_query("acris_parties"):
-        # Use token results — query by exact name match (fast)
-        unique_names = list(set(hit[1] for hit in acris_token_hits))[:50]
-        placeholders = ", ".join(["?"] * len(unique_names))
-        queries.append(("acris", f"""
-            SELECT party_name, party_type, doc_type, amount,
-                   document_date, bbl, street_name, unit
-            FROM lake.foundation.mv_entity_acris
-            WHERE party_name IN ({placeholders})
-            ORDER BY document_date DESC
-            LIMIT 20
-        """, unique_names))
-    elif _should_query("acris_parties"):
+    if _should_query("acris_parties"):
         # Fallback: LIKE scan on MV
         queries.append(("acris", """
             SELECT party_name, party_type, doc_type, amount,
