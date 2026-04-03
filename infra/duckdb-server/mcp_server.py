@@ -1626,6 +1626,19 @@ async def app_lifespan(server):
         Incremental and resume-safe. Checkpoints every 50K names.
         Joins entity_master (when available) to attach entity_id."""
 
+        # Fast early exit: if embeddings are already populated, skip the expensive scan.
+        # The scan loads 2.9M names into memory and holds the main conn for minutes.
+        existing_count = 0
+        try:
+            existing_count = emb_conn.execute("SELECT COUNT(*) FROM entity_names").fetchone()[0]
+        except Exception:
+            pass
+
+        if existing_count > 100_000:
+            print(f"  Entity names: {existing_count:,} already embedded — skipping scan", flush=True)
+            print(f"  (To force rebuild, run: DELETE FROM entity_names)", flush=True)
+            return
+
         existing = set()
         try:
             existing = {r[0] for r in emb_conn.execute("SELECT name FROM entity_names").fetchall()}
