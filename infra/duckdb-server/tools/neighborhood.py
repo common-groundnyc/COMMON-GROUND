@@ -855,7 +855,9 @@ def _view_full(pool, zipcode: str) -> ToolResult:
     portrait = _view_portrait(pool, zipcode)
     complaints = _view_complaints(pool, zipcode)
 
-    merged_text = portrait.content + "\n\n" + complaints.content
+    p_text = portrait.content if isinstance(portrait.content, str) else "\n".join(str(c) for c in portrait.content)
+    c_text = complaints.content if isinstance(complaints.content, str) else "\n".join(str(c) for c in complaints.content)
+    merged_text = p_text + "\n\n" + c_text
     merged_structured = {
         **(portrait.structured_content or {}),
         "complaints": complaints.structured_content,
