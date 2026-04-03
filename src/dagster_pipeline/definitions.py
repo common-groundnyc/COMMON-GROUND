@@ -22,6 +22,7 @@ from dagster_pipeline.defs.materialized_view_assets import (
 )
 from dagster_pipeline.defs.spatial_views_asset import spatial_views
 from dagster_pipeline.defs.address_lookup_asset import address_lookup
+from dagster_pipeline.defs.name_tokens_asset import name_tokens
 from dagster_pipeline.resources.ducklake import DuckLakeResource
 
 all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, *election_assets, name_index, resolved_entities,
@@ -29,7 +30,7 @@ all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, *election_
               entity_master, address_lookup,
               mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
               mv_entity_acris, mv_city_averages, mv_pctile_violations, mv_pctile_311,
-              spatial_views]
+              name_tokens, spatial_views]
 
 # --- Jobs (manual trigger only — automation is sensor/schedule-driven) ---
 
