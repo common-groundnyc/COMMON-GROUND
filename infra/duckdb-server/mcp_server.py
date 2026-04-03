@@ -1874,6 +1874,15 @@ WORKFLOWS -- chain tools for deep investigations:
 * School comparison: school("02M475,02M001")
 * Health equity: health("10456") -> services("10456") -> neighborhood("10456")
 
+PRESENTATION -- how to show Common Ground data to users:
+* Every tool returns a complete, pre-formatted report. Present ALL sections to the user.
+* Do NOT summarize, compress, or omit sections. Each section has independent data the user needs.
+* Use interactive visualizations (charts, tables) when data contains numeric comparisons, rankings, or percentiles.
+* Percentile bars and rankings should be shown visually, not described in prose.
+* Preserve the tool's section headers and structure — they are designed for readability.
+* When a report has a "Drill deeper" footer, show it — those are actionable tool calls the user can request.
+* If the response includes a PRESENTATION directive, follow it exactly.
+
 This is NYC-only data. Do not query for national/federal statistics."""
 
 
