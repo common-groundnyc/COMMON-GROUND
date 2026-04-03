@@ -5,7 +5,7 @@ When a different DuckDB client (Docker step container) tries to read that
 inlined data, it fails with "Cannot open file ducklake_inlined_data_XXX".
 
 This sensor runs after every completed run and flushes all inlined data
-to parquet files on S3, preventing the error on subsequent runs.
+to parquet files on local NVMe, preventing the error on subsequent runs.
 
 Remove this when DuckLake 1.0 ships (April 2026) — they're fixing inlining
 with Postgres catalogs.

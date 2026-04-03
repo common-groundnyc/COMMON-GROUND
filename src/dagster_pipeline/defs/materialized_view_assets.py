@@ -1,11 +1,11 @@
 """Materialized view assets — pre-joined/pre-aggregated tables for MCP tool performance.
 
 These assets create foundation.mv_* tables in DuckLake that replace expensive
-S3 full-table scans with pre-computed results. Each auto-refreshes when its
+full-table scans with pre-computed results. Each auto-refreshes when its
 upstream ingestion assets complete via AutomationCondition.eager().
 
 Consumed by: MCP server tools (building_profile, landlord_watchdog, etc.)
-Stored in: lake.foundation.mv_* (DuckLake Parquet on MinIO)
+Stored in: lake.foundation.mv_* (DuckLake Parquet on local NVMe)
 """
 import logging
 import time
