@@ -107,15 +107,6 @@ defs = dg.Definitions(
                 "DESTINATION__DUCKLAKE__CREDENTIALS__CATALOG",
                 "ducklake:postgres:dbname=ducklake user=dagster password=test host=178.156.228.119 port=5432",
             ),
-            s3_endpoint=os.environ.get("S3_ENDPOINT", "178.156.228.119:9000"),
-            s3_access_key=os.environ.get(
-                "DESTINATION__DUCKLAKE__CREDENTIALS__STORAGE__CREDENTIALS__AWS_ACCESS_KEY_ID",
-                "minioadmin",
-            ),
-            s3_secret_key=os.environ.get(
-                "DESTINATION__DUCKLAKE__CREDENTIALS__STORAGE__CREDENTIALS__AWS_SECRET_ACCESS_KEY",
-                "minioadmin",
-            ),
         ),
     },
     executor=dg.multiprocess_executor.configured({

@@ -12,11 +12,6 @@ _conn_cache: duckdb.DuckDBPyConnection | None = None
 
 class DuckLakeResource(dg.ConfigurableResource):
     catalog_url: str
-    s3_endpoint: str
-    s3_access_key: str
-    s3_secret_key: str
-    s3_use_ssl: bool = False
-    s3_skip_cert_verify: bool = True
     memory_limit: str = "2GB"
     threads: int = 4
 
@@ -32,18 +27,8 @@ class DuckLakeResource(dg.ConfigurableResource):
         conn = duckdb.connect(":memory:", config={"allow_unsigned_extensions": "true"})
         conn.execute("LOAD ducklake")
         conn.execute("LOAD postgres")
-        try:
-            conn.execute("INSTALL curl_httpfs; LOAD curl_httpfs")
-        except Exception:
-            conn.execute("INSTALL httpfs; LOAD httpfs")
 
-        conn.execute(f"SET s3_endpoint='{self.s3_endpoint}'")
-        conn.execute(f"SET s3_access_key_id='{self.s3_access_key}'")
-        conn.execute(f"SET s3_secret_access_key='{self.s3_secret_key}'")
-        conn.execute(f"SET s3_use_ssl={'true' if self.s3_use_ssl else 'false'}")
-        conn.execute("SET s3_url_style='path'")
         conn.execute("SET preserve_insertion_order=false")
-        conn.execute("SET http_timeout=300000")
         conn.execute(f"SET memory_limit='{self.memory_limit}'")
         conn.execute(f"SET threads={self.threads}")
 
@@ -52,14 +37,6 @@ class DuckLakeResource(dg.ConfigurableResource):
         conn.execute("SET ducklake_max_retry_count=200")
         conn.execute("SET ducklake_retry_wait_ms=200")
         conn.execute("SET ducklake_retry_backoff=2.0")
-
-        if self.s3_skip_cert_verify:
-            for opt in ["enable_server_cert_verification",
-                        "enable_curl_server_cert_verification"]:
-                try:
-                    conn.execute(f"SET {opt}=false")
-                except Exception:
-                    pass
 
         url = self._build_attach_url()
         conn.execute(f"ATTACH '{url}' AS lake (METADATA_SCHEMA 'lake')")

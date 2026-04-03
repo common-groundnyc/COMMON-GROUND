@@ -19,20 +19,35 @@ logger = logging.getLogger(__name__)
 
 
 def _connect_ducklake() -> duckdb.DuckDBPyConnection:
-    """Create a DuckDB connection attached to the DuckLake catalog.
-    Uses DuckLakeResource's connection logic via env vars.
-    """
-    from dagster_pipeline.resources.ducklake import DuckLakeResource
+    """Create a DuckDB connection attached to the DuckLake catalog."""
     import os
+
+    from dagster_pipeline.resources.ducklake import DuckLakeResource
     resource = DuckLakeResource(
         catalog_url=os.environ.get("DESTINATION__DUCKLAKE__CREDENTIALS__CATALOG", ""),
-        s3_endpoint=os.environ.get("S3_ENDPOINT", "178.156.228.119:9000"),
-        s3_access_key=os.environ.get(
-            "DESTINATION__DUCKLAKE__CREDENTIALS__STORAGE__CREDENTIALS__AWS_ACCESS_KEY_ID", ""),
-        s3_secret_key=os.environ.get(
-            "DESTINATION__DUCKLAKE__CREDENTIALS__STORAGE__CREDENTIALS__AWS_SECRET_ACCESS_KEY", ""),
     )
     return resource.get_connection()
+
+
+def _read_ducklake_creds() -> dict:
+    """Return Postgres catalog credentials parsed from the catalog env var."""
+    import os
+    import re
+
+    catalog = os.environ.get(
+        "DESTINATION__DUCKLAKE__CREDENTIALS__CATALOG",
+        "ducklake:postgres:dbname=ducklake user=dagster password=test host=178.156.228.119 port=5432",
+    )
+    # Strip ducklake:postgres: prefix if present
+    raw = re.sub(r"^ducklake:postgres:", "", catalog).strip()
+    pairs = dict(kv.split("=", 1) for kv in raw.split() if "=" in kv)
+    return {
+        "pg_db": pairs.get("dbname", "ducklake"),
+        "pg_user": pairs.get("user", "dagster"),
+        "pg_pass": pairs.get("password", ""),
+        "pg_host": pairs.get("host", "localhost"),
+        "pg_port": pairs.get("port", "5432"),
+    }
 
 
 def _build_union_sql(conn=None) -> tuple[str, int]:

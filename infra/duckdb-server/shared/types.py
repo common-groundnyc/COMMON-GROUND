@@ -68,7 +68,7 @@ _UNSAFE_FUNCTIONS = re.compile(
 # Reconnect error signatures
 # ---------------------------------------------------------------------------
 
-RECONNECT_ERRORS = ("HTTP 403", "HTTP 400", "HTTP 301", "Bad Request", "s3://ducklake")
+RECONNECT_ERRORS = ("HTTP 403", "HTTP 400", "HTTP 301", "Bad Request")
 
 # ---------------------------------------------------------------------------
 # Graph cache directory
