@@ -370,24 +370,14 @@ def main():
     import duckdb
 
     catalog_url = os.environ.get("DUCKLAKE_CATALOG_URL", "")
-    s3_endpoint = os.environ.get("S3_ENDPOINT", "")
-    minio_user = os.environ.get("MINIO_ROOT_USER", "")
-    minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "")
 
     if not catalog_url:
         print("ERROR: DUCKLAKE_CATALOG_URL not set")
         sys.exit(1)
 
     conn = duckdb.connect(":memory:", config={"allow_unsigned_extensions": "true"})
-    conn.execute("INSTALL curl_httpfs FROM community")
-    conn.execute("LOAD curl_httpfs")
     conn.execute("LOAD ducklake")
     conn.execute("LOAD postgres")
-    conn.execute(f"SET s3_endpoint='{s3_endpoint}'")
-    conn.execute(f"SET s3_access_key_id='{minio_user}'")
-    conn.execute(f"SET s3_secret_access_key='{minio_pass}'")
-    conn.execute("SET s3_use_ssl=false")
-    conn.execute("SET s3_url_style='path'")
     conn.execute("SET http_timeout=300000")
     conn.execute("SET memory_limit='2GB'")
     conn.execute("SET threads=4")

@@ -17,18 +17,11 @@ def main():
     conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs")
 
     pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "")
-    minio_user = os.environ.get("MINIO_ROOT_USER", "minioadmin")
-    minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "")
 
     if not pg_pass:
         raise RuntimeError("No DuckLake credentials — run inside Docker")
 
-    conn.execute("INSTALL ducklake; LOAD ducklake; INSTALL httpfs; LOAD httpfs; INSTALL postgres; LOAD postgres")
-    conn.execute(f"SET s3_region='us-east-1'")
-    conn.execute(f"SET s3_endpoint='minio:9000'")
-    conn.execute(f"SET s3_access_key_id='{minio_user}'")
-    conn.execute(f"SET s3_secret_access_key='{minio_pass}'")
-    conn.execute("SET s3_use_ssl=false; SET s3_url_style='path'")
+    conn.execute("INSTALL ducklake; LOAD ducklake; INSTALL postgres; LOAD postgres")
     conn.execute(f"ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres port=5432' AS lake (METADATA_SCHEMA 'lake')")
 
     print("Sampling 1M rows for training...", flush=True)

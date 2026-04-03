@@ -30,16 +30,7 @@ EPOCH_CURSOR = "1970-01-01T00:00:00.000Z"
 
 def connect():
     conn = duckdb.connect()
-    conn.execute("INSTALL ducklake; LOAD ducklake; INSTALL httpfs; LOAD httpfs")
-    conn.execute("SET s3_region='us-east-1'")
-    conn.execute("SET s3_endpoint='178.156.228.119:9000'")
-    conn.execute("SET s3_access_key_id='minioadmin'")
-    conn.execute("SET s3_secret_access_key='mn_cg_2026_qW5xRtK3pL'")
-    conn.execute("SET s3_use_ssl=true")
-    conn.execute("SET s3_url_style='path'")
-    # Disable certificate verification for self-signed MinIO cert
-    conn.execute("SET enable_server_cert_verification=false")
-    conn.execute("SET enable_curl_server_cert_verification=false")
+    conn.execute("INSTALL ducklake; LOAD ducklake")
     conn.execute("SET http_timeout=300000")
     conn.execute(
         "ATTACH 'ducklake:postgres:dbname=ducklake user=dagster "
