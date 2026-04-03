@@ -1791,27 +1791,36 @@ async def app_lifespan(server):
             except Exception:
                 existing = 0
 
-            # Only rebuild if local is empty — avoid scanning 246M row DuckLake table on every start
-            needs_rebuild = existing == 0
+            # Rebuild if fewer than 100K routes (incomplete previous build)
+            needs_rebuild = existing < 100_000
 
             if needs_rebuild:
                 try:
-                    print("Building name_token_routes from DuckLake (first run)...", flush=True)
+                    print(f"Building name_token_routes ({existing:,} existing, rebuilding)...", flush=True)
                     t_tok = time.time()
-                    route_rows = conn.execute(
-                        "SELECT DISTINCT token, source_table FROM lake.foundation.name_tokens"
-                    ).fetchall()
+                    # Write distinct routes to a temp parquet on local disk, then bulk-load
+                    tmp_path = "/data/common-ground/lake/_tmp_routes.parquet"
+                    conn.execute(f"""
+                        COPY (
+                            SELECT DISTINCT token, source_table
+                            FROM lake.foundation.name_tokens
+                        ) TO '{tmp_path}' (FORMAT PARQUET)
+                    """)
+                    print(f"  Routes exported to parquet in {time.time() - t_tok:.1f}s", flush=True)
                     emb_conn.execute("DROP TABLE IF EXISTS name_token_routes")
-                    emb_conn.execute(
-                        "CREATE TABLE name_token_routes (token VARCHAR, source_table VARCHAR)"
-                    )
-                    emb_conn.executemany(
-                        "INSERT INTO name_token_routes VALUES (?, ?)", route_rows
-                    )
+                    emb_conn.execute(f"""
+                        CREATE TABLE name_token_routes AS
+                        SELECT * FROM read_parquet('{tmp_path}')
+                    """)
+                    import pathlib
+                    pathlib.Path(tmp_path).unlink(missing_ok=True)
                 except Exception as e:
                     print(f"Warning: name_token_routes build failed: {e}", flush=True)
-                tok_count = emb_conn.execute("SELECT COUNT(*) FROM name_token_routes").fetchone()[0]
-                print(f"name_token_routes: {tok_count:,} routes in {time.time() - t_tok:.1f}s", flush=True)
+                try:
+                    tok_count = emb_conn.execute("SELECT COUNT(*) FROM name_token_routes").fetchone()[0]
+                    print(f"name_token_routes: {tok_count:,} routes in {time.time() - t_tok:.1f}s", flush=True)
+                except Exception:
+                    pass
             elif existing > 0:
                 print(f"name_token_routes: {existing:,} routes (up to date)", flush=True)
             else:
