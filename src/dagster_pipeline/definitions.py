@@ -7,6 +7,7 @@ import dagster as dg
 
 from dagster_pipeline.defs.socrata_direct_assets import all_socrata_direct_assets
 from dagster_pipeline.defs.federal_direct_assets import all_federal_direct_assets
+from dagster_pipeline.defs.election_assets import election_assets
 from dagster_pipeline.defs.name_index_asset import name_index
 from dagster_pipeline.defs.resolved_entities_asset import resolved_entities
 from dagster_pipeline.defs.flush_sensor import flush_ducklake_sensor
@@ -23,38 +24,20 @@ from dagster_pipeline.defs.spatial_views_asset import spatial_views
 from dagster_pipeline.defs.address_lookup_asset import address_lookup
 from dagster_pipeline.resources.ducklake import DuckLakeResource
 
-all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, name_index, resolved_entities,
+all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, *election_assets, name_index, resolved_entities,
               h3_index, phonetic_index, row_fingerprints, data_health, entity_name_embeddings,
               entity_master, address_lookup,
               mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
               mv_entity_acris, mv_city_averages, mv_pctile_violations, mv_pctile_311,
               spatial_views]
 
-from dagster_pipeline.sources.datasets import (
-    STATIC_DATASETS, MONTHLY_DATASETS, SOCRATA_DATASETS,
-)
+# --- Jobs (manual trigger only — automation is sensor/schedule-driven) ---
 
-# Build exclusion keys from actual dataset→schema mapping (not cross-product)
-_skip_daily = STATIC_DATASETS | MONTHLY_DATASETS
-_skip_keys = []
-_monthly_keys = []
-for schema, datasets in SOCRATA_DATASETS.items():
-    for table_name, _dataset_id, _domain in datasets:
-        if table_name in _skip_daily:
-            _skip_keys.append(dg.AssetKey([schema, table_name]))
-        if table_name in MONTHLY_DATASETS:
-            _monthly_keys.append(dg.AssetKey([schema, table_name]))
-
-# --- Jobs ---
-
-# Daily: only live/frequently-updated datasets (~67 Socrata + federal API sources)
-daily_live_job = dg.define_asset_job(
-    name="daily_live",
+# Federal: 50 assets from BLS, Census, HUD, FEC, EPA, CourtListener, etc.
+federal_daily_job = dg.define_asset_job(
+    name="federal_daily",
     selection=(
-        dg.AssetSelection.groups("business", "city_government", "education",
-                    "environment", "financial", "health", "housing", "public_safety",
-                    "recreation", "social_services", "transportation", "federal")
-        - dg.AssetSelection.assets(*_skip_keys)
+        dg.AssetSelection.groups("federal")
         - dg.AssetSelection.assets(
             dg.AssetKey(["federal", "name_index"]),
             dg.AssetKey(["federal", "resolved_entities"]),
@@ -62,19 +45,7 @@ daily_live_job = dg.define_asset_job(
     ),
 )
 
-# Monthly: annual/quarterly datasets that don't need daily refresh
-monthly_refresh_job = dg.define_asset_job(
-    name="monthly_refresh",
-    selection=dg.AssetSelection.assets(*_monthly_keys),
-)
-
-# Full: everything (initial load, or manual trigger)
-all_assets_job = dg.define_asset_job(
-    name="all_assets_full",
-    selection=dg.AssetSelection.all(),
-)
-
-# Entity resolution only
+# Entity resolution: name_index + resolved_entities (heavy, manual only)
 entity_resolution_job = dg.define_asset_job(
     name="entity_resolution",
     selection=dg.AssetSelection.assets(
@@ -89,22 +60,6 @@ foundation_job = dg.define_asset_job(
     selection=dg.AssetSelection.groups("foundation"),
 )
 
-# Materialized views: rebuild pre-joined analytical views
-materialized_views_job = dg.define_asset_job(
-    name="materialized_views_rebuild",
-    selection=dg.AssetSelection.assets(
-        dg.AssetKey(["foundation", "mv_building_hub"]),
-        dg.AssetKey(["foundation", "mv_acris_deeds"]),
-        dg.AssetKey(["foundation", "mv_zip_stats"]),
-        dg.AssetKey(["foundation", "mv_crime_precinct"]),
-        dg.AssetKey(["foundation", "mv_corp_network"]),
-        dg.AssetKey(["foundation", "mv_entity_acris"]),
-        dg.AssetKey(["foundation", "mv_city_averages"]),
-        dg.AssetKey(["foundation", "mv_pctile_violations"]),
-        dg.AssetKey(["foundation", "mv_pctile_311"]),
-    ),
-)
-
 # Entity embeddings: rebuild Lance vector index
 entity_embeddings_job = dg.define_asset_job(
     name="entity_embeddings",
@@ -113,48 +68,38 @@ entity_embeddings_job = dg.define_asset_job(
     ),
 )
 
+# Full: everything (initial load or recovery)
+all_assets_job = dg.define_asset_job(
+    name="all_assets_full",
+    selection=dg.AssetSelection.all(),
+)
+
 # --- Schedules ---
-daily_schedule = dg.ScheduleDefinition(
-    job=daily_live_job,
+
+# Federal assets have no Socrata count API — need a schedule.
+federal_schedule = dg.ScheduleDefinition(
+    job=federal_daily_job,
     cron_schedule="0 6 * * *",  # 6 AM daily
     default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 
-monthly_schedule = dg.ScheduleDefinition(
-    job=monthly_refresh_job,
-    cron_schedule="0 3 1 * *",  # 3 AM, 1st of month
-    default_status=dg.DefaultScheduleStatus.RUNNING,
-)
-
+# Lance embeddings rebuild — expensive, monthly is enough.
 entity_embeddings_schedule = dg.ScheduleDefinition(
     job=entity_embeddings_job,
     cron_schedule="0 12 1 * *",  # noon on 1st of month
     default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 
-# AutomationCondition.eager() on MVs requires this sensor to evaluate conditions
-mv_automation_sensor = dg.AutomationConditionSensorDefinition(
-    name="mv_auto_materialize",
-    target=dg.AssetSelection.assets(
-        dg.AssetKey(["foundation", "mv_building_hub"]),
-        dg.AssetKey(["foundation", "mv_acris_deeds"]),
-        dg.AssetKey(["foundation", "mv_zip_stats"]),
-        dg.AssetKey(["foundation", "mv_crime_precinct"]),
-        dg.AssetKey(["foundation", "mv_corp_network"]),
-        dg.AssetKey(["foundation", "mv_entity_acris"]),
-        dg.AssetKey(["foundation", "mv_city_averages"]),
-        dg.AssetKey(["foundation", "mv_pctile_violations"]),
-        dg.AssetKey(["foundation", "mv_pctile_311"]),
-    ),
-    minimum_interval_seconds=300,
-    default_status=dg.DefaultSensorStatus.RUNNING,
-)
+# --- Sensors ---
+# data_freshness_sensor: hourly, triggers Socrata assets when source > lake (replaces daily/monthly schedules)
+# flush_ducklake_sensor: post-run, flushes DuckLake inlined data to parquet
+# MVs use AutomationCondition.eager() — evaluated by Dagster's built-in default_automation_condition_sensor
 
 defs = dg.Definitions(
     assets=all_assets,
-    jobs=[daily_live_job, monthly_refresh_job, all_assets_job, entity_resolution_job, foundation_job, materialized_views_job, entity_embeddings_job],
-    schedules=[daily_schedule, monthly_schedule, entity_embeddings_schedule],
-    sensors=[flush_ducklake_sensor, data_freshness_sensor, mv_automation_sensor],
+    jobs=[federal_daily_job, entity_resolution_job, foundation_job, entity_embeddings_job, all_assets_job],
+    schedules=[federal_schedule, entity_embeddings_schedule],
+    sensors=[flush_ducklake_sensor, data_freshness_sensor],
     resources={
         "ducklake": DuckLakeResource(
             catalog_url=os.environ.get(
