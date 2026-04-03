@@ -1145,7 +1145,7 @@ def safety(
             raise ToolError(f"Unknown view: {view}")
 
     return ToolResult(
-        content=directive + (result.content or ""),
+        content=directive + (result.content if isinstance(result.content, str) else "\n".join(str(c) for c in result.content) if result.content else ""),
         structured_content=result.structured_content,
         meta=result.meta,
     )

@@ -1881,7 +1881,7 @@ def entity(
     result = handler(name, pool, ctx)
     directive = "PRESENTATION: Show all entity matches in a table. Each row is a distinct data source appearance. Do not summarize — show every match with source attribution.\n\n"
     return ToolResult(
-        content=directive + (result.content or ""),
+        content=directive + (result.content if isinstance(result.content, str) else "\n".join(str(c) for c in result.content) if result.content else ""),
         structured_content=result.structured_content,
         meta=result.meta,
     )

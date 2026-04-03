@@ -645,7 +645,7 @@ def transit(
     directive = "PRESENTATION: Show this complete transit report. Use tables for ticket data and ridership stats. Do not omit any section.\n\n"
     result = handler(pool, loc)
     return ToolResult(
-        content=directive + (result.content or ""),
+        content=directive + (result.content if isinstance(result.content, str) else "\n".join(str(c) for c in result.content) if result.content else ""),
         structured_content=result.structured_content,
         meta=result.meta,
     )
