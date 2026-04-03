@@ -9,7 +9,7 @@ from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
 from fastmcp.exceptions import ToolError
 
-from shared.db import execute, safe_query, fill_placeholders
+from shared.db import execute, safe_query, fill_placeholders, parallel_queries
 from shared.formatting import make_result, format_text_table
 from shared.types import MAX_LLM_ROWS, ZIP_PATTERN
 
@@ -394,21 +394,37 @@ def _report(pool: object, dbn: str) -> ToolResult:
     """Full school report by DBN."""
     t0 = time.time()
 
-    _, dir_rows = safe_query(pool, SCHOOL_DIRECTORY_SQL, [dbn])
-    _, perf_rows = safe_query(pool, SCHOOL_PERFORMANCE_SQL, [dbn])
-    _, ela_rows = safe_query(pool, SCHOOL_ELA_SQL, [dbn])
-    _, math_rows = safe_query(pool, SCHOOL_MATH_SQL, [dbn])
-    _, qual_rows = safe_query(pool, SCHOOL_QUALITY_SQL, [dbn])
+    results = parallel_queries(pool, [
+        ("directory",   SCHOOL_DIRECTORY_SQL,       [dbn]),
+        ("performance", SCHOOL_PERFORMANCE_SQL,     [dbn]),
+        ("ela",         SCHOOL_ELA_SQL,             [dbn]),
+        ("math",        SCHOOL_MATH_SQL,            [dbn]),
+        ("quality",     SCHOOL_QUALITY_SQL,         [dbn]),
+        ("demo",        SCHOOL_DEMOGRAPHICS_SQL,    [dbn]),
+        ("attend",      SCHOOL_ATTENDANCE_SQL,      [dbn]),
+        ("class_size",  SCHOOL_CLASS_SIZE_SQL,      [dbn]),
+        ("survey",      SCHOOL_SURVEY_SQL,          [dbn]),
+        ("safety",      SCHOOL_SAFETY_DETAIL_SQL,   [dbn]),
+        ("regents",     SCHOOL_REGENTS_SQL,         [dbn]),
+        ("cafe",        SCHOOL_CAFETERIA_SQL,       [dbn]),
+        ("shsat",       SCHOOL_SPECIALIZED_HS_SQL,  [dbn]),
+        ("discharge",   SCHOOL_DISCHARGE_SQL,       [dbn]),
+    ])
 
-    _, demo_rows = safe_query(pool, SCHOOL_DEMOGRAPHICS_SQL, [dbn])
-    _, attend_rows = safe_query(pool, SCHOOL_ATTENDANCE_SQL, [dbn])
-    _, class_rows = safe_query(pool, SCHOOL_CLASS_SIZE_SQL, [dbn])
-    _, survey_rows = safe_query(pool, SCHOOL_SURVEY_SQL, [dbn])
-    _, safety_rows = safe_query(pool, SCHOOL_SAFETY_DETAIL_SQL, [dbn])
-    _, regents_rows = safe_query(pool, SCHOOL_REGENTS_SQL, [dbn])
-    _, cafe_rows = safe_query(pool, SCHOOL_CAFETERIA_SQL, [dbn])
-    _, shsat_rows = safe_query(pool, SCHOOL_SPECIALIZED_HS_SQL, [dbn])
-    _, discharge_rows = safe_query(pool, SCHOOL_DISCHARGE_SQL, [dbn])
+    _, dir_rows      = results.get("directory",   ([], []))
+    _, perf_rows     = results.get("performance", ([], []))
+    _, ela_rows      = results.get("ela",         ([], []))
+    _, math_rows     = results.get("math",        ([], []))
+    _, qual_rows     = results.get("quality",     ([], []))
+    _, demo_rows     = results.get("demo",        ([], []))
+    _, attend_rows   = results.get("attend",      ([], []))
+    _, class_rows    = results.get("class_size",  ([], []))
+    _, survey_rows   = results.get("survey",      ([], []))
+    _, safety_rows   = results.get("safety",      ([], []))
+    _, regents_rows  = results.get("regents",     ([], []))
+    _, cafe_rows     = results.get("cafe",        ([], []))
+    _, shsat_rows    = results.get("shsat",       ([], []))
+    _, discharge_rows = results.get("discharge",  ([], []))
 
     if not dir_rows and not perf_rows and not ela_rows and not demo_rows and not safety_rows:
         raise ToolError(f"No school found for DBN {dbn}. Try a name search instead.")
