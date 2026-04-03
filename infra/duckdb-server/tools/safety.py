@@ -18,7 +18,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
-from shared.db import execute, safe_query
+from shared.db import execute, safe_query, parallel_queries
 from shared.formatting import make_result, format_text_table
 from shared.types import MAX_LLM_ROWS, ZIP_PATTERN, COORDS_PATTERN
 
@@ -534,11 +534,30 @@ def _view_full(pool, pct: str, parsed: dict) -> ToolResult:
     if not mv_crime_ok:
         _, crime_rows = execute(pool, CRIME_SQL, [pct, pct])
 
-    _, arrest_rows = execute(pool, ARRESTS_SQL, [pct, pct])
-    _, shoot_rows = execute(pool, SHOOTINGS_YEARLY_SQL, [pct])
-    _, summ_rows = execute(pool, SUMMONS_SQL, [pct])
-    _, hate_rows = execute(pool, HATE_SQL, [pct])
-    _, avg_rows = execute(pool, CITY_AVERAGES_SQL, [])
+    _pq = parallel_queries(pool, [
+        ("arrests", ARRESTS_SQL, [pct, pct]),
+        ("shootings", SHOOTINGS_YEARLY_SQL, [pct]),
+        ("summons", SUMMONS_SQL, [pct]),
+        ("hate", HATE_SQL, [pct]),
+        ("city_avg", CITY_AVERAGES_SQL, []),
+        ("ccrb", CCRB_SQL, [pct]),
+        ("ccrb_fado", CCRB_ALLEGATIONS_SQL, [pct]),
+        ("ccrb_victim_race", CCRB_VICTIM_RACE_SQL, [pct]),
+        ("uof", UOF_SQL, [pct]),
+        ("uof_subj", UOF_SUBJECT_SQL, [pct]),
+        ("uof_avg", UOF_CITY_AVG_SQL, []),
+    ])
+    _, arrest_rows = _pq.get("arrests", ([], []))
+    _, shoot_rows = _pq.get("shootings", ([], []))
+    _, summ_rows = _pq.get("summons", ([], []))
+    _, hate_rows = _pq.get("hate", ([], []))
+    _, avg_rows = _pq.get("city_avg", ([], []))
+    _, ccrb_rows = _pq.get("ccrb", ([], []))
+    _, fado_rows = _pq.get("ccrb_fado", ([], []))
+    _, victim_race_rows = _pq.get("ccrb_victim_race", ([], []))
+    _, uof_rows = _pq.get("uof", ([], []))
+    _, uof_subj_rows = _pq.get("uof_subj", ([], []))
+    _, uof_avg_rows = _pq.get("uof_avg", ([], []))
 
     # Parse crime data
     crime_years = [
@@ -652,10 +671,6 @@ def _view_full(pool, pct: str, parsed: dict) -> ToolResult:
         lines.append("\nHATE CRIMES: None reported in this precinct recently")
 
     # CCRB misconduct
-    _, ccrb_rows = safe_query(pool, CCRB_SQL, [pct])
-    _, fado_rows = safe_query(pool, CCRB_ALLEGATIONS_SQL, [pct])
-    _, victim_race_rows = safe_query(pool, CCRB_VICTIM_RACE_SQL, [pct])
-
     ccrb_years = [(r[1], int(r[2])) for r in ccrb_rows if r[0] == "ccrb_by_year"]
     ccrb_dispositions = [(r[1], int(r[2])) for r in ccrb_rows if r[0] == "ccrb_disposition"]
     ccrb_reasons = [(r[1], int(r[2])) for r in ccrb_rows if r[0] == "ccrb_reason"]
@@ -684,10 +699,6 @@ def _view_full(pool, pct: str, parsed: dict) -> ToolResult:
                 lines.append(f"    {reason}: {cnt}")
 
     # Use of Force
-    _, uof_rows = safe_query(pool, UOF_SQL, [pct])
-    _, uof_subj_rows = safe_query(pool, UOF_SUBJECT_SQL, [pct])
-    _, uof_avg_rows = safe_query(pool, UOF_CITY_AVG_SQL, [])
-
     if uof_rows:
         total_uof = sum(int(r[1]) for r in uof_rows)
         lines.append(f"\nUSE OF FORCE: {total_uof:,} incidents")
