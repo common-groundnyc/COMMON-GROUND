@@ -173,6 +173,166 @@ def build_queries(
     """, [boro_code, bbl[1:6] if len(bbl) >= 6 else "",
           bbl[6:] if len(bbl) >= 6 else ""]))
 
+    # ── BUILDING DANGER SIGNALS ──────────────────────────────────────────
+
+    queries.append(("building_dob_complaints", """
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE UPPER(status) = 'ACTIVE') AS active
+        FROM lake.housing.dob_complaints
+        WHERE zip_code = ? AND house_number || ' ' || house_street ILIKE '%' || ? || '%'
+    """, [zipcode, address.split(",")[0].strip() if address else ""]))
+
+    queries.append(("building_dob_violations_direct", """
+        SELECT COUNT(*) AS total,
+               COUNT(DISTINCT violation_type_code) AS types
+        FROM lake.housing.dob_violations
+        WHERE boro = ? AND block = ? AND lot = ?
+    """, [boro_code, bbl[1:6] if len(bbl) >= 6 else "",
+          bbl[6:] if len(bbl) >= 6 else ""]))
+
+    queries.append(("building_landmark", """
+        SELECT lm_name, lm_type, hist_distr, status
+        FROM lake.housing.designated_buildings
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        LIMIT 1
+    """, [bbl]))
+
+    queries.append(("building_emergency_repair", """
+        SELECT COUNT(*) AS total,
+               SUM(TRY_CAST(hwoapprovedamount AS DOUBLE)) AS total_cost
+        FROM lake.housing.emergency_repair_hwo
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+    """, [bbl]))
+
+    queries.append(("building_vacate_hpd", """
+        SELECT vacate_type, primary_vacate_reason, vacate_effective_date
+        FROM lake.housing.hpd_repair_vacate
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        ORDER BY vacate_effective_date DESC NULLS LAST
+        LIMIT 1
+    """, [bbl]))
+
+    queries.append(("building_vacate_reloc", """
+        SELECT vacateagency, vacatereason, monthlyrelocationtotal
+        FROM lake.housing.vacate_relocation
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        ORDER BY monthlyrelocationtotal DESC NULLS LAST
+        LIMIT 1
+    """, [bbl]))
+
+    queries.append(("building_fdny_vacate", """
+        SELECT description, vac_date, status_change_date, ocpcy_desc
+        FROM lake.housing.fdny_vacate_list
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        ORDER BY vac_date DESC NULLS LAST
+        LIMIT 1
+    """, [bbl]))
+
+    queries.append(("building_oath", """
+        SELECT COUNT(*) AS total,
+               SUM(TRY_CAST(REPLACE(penalty_imposed, '$', '') AS DOUBLE)) AS total_penalties,
+               MAX(violation_date) AS latest
+        FROM lake.city_government.oath_hearings
+        WHERE violation_location_block_no = ? AND violation_location_lot_no = ?
+    """, [bbl[1:6] if len(bbl) >= 6 else "",
+          bbl[6:] if len(bbl) >= 6 else ""]))
+
+    queries.append(("building_e_designation", """
+        SELECT hazmat_code, air_code, noise_code, description
+        FROM lake.environment.e_designations
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        LIMIT 1
+    """, [bbl]))
+
+    queries.append(("building_oer_cleanup", """
+        SELECT project_name, oer_program, class, phase
+        FROM lake.environment.oer_cleanup
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        LIMIT 1
+    """, [bbl]))
+
+    # ── BUILDING MONEY & OWNERSHIP ───────────────────────────────────────
+
+    queries.append(("building_tax_exemptions", """
+        SELECT exmp_code, exname, curexmptot, year
+        FROM lake.housing.tax_exemptions
+        WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+        ORDER BY year DESC
+        LIMIT 3
+    """, [bbl]))
+
+    queries.append(("building_abatement", """
+        SELECT tccode, taxyr, appliedabt, net_taxes
+        FROM lake.housing.property_abatement_detail
+        WHERE (SUBSTR(parid, 1, 1) || LPAD(SUBSTR(parid, 2, 5), 5, '0')
+               || LPAD(SUBSTR(parid, 7, 4), 4, '0')) = ?
+        ORDER BY taxyr DESC
+        LIMIT 1
+    """, [bbl]))
+
+    queries.append(("building_charges", """
+        SELECT SUM(TRY_CAST(sum_bal AS DOUBLE)) AS outstanding_balance,
+               MAX(taxyear) AS latest_year
+        FROM lake.housing.property_charges
+        WHERE (SUBSTR(parid, 1, 1) || LPAD(id_block::VARCHAR, 5, '0')
+               || LPAD(id_lot::VARCHAR, 4, '0')) = ?
+    """, [bbl]))
+
+    queries.append(("building_affordable", """
+        SELECT project_name, extremely_low_income_units, very_low_income_units,
+               low_income_units, moderate_income_units, all_counted_units
+        FROM lake.housing.affordable_housing
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        LIMIT 1
+    """, [bbl]))
+
+    queries.append(("building_lottery", """
+        SELECT lottery_name, development_type
+        FROM lake.housing.housing_connect_buildings
+        WHERE LPAD(TRY_CAST(TRY_CAST(address_bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        LIMIT 3
+    """, [bbl]))
+
+    queries.append(("building_sro", """
+        SELECT managementprogram, dobbuildingclass, legalclassa, legalclassb
+        FROM lake.housing.sro_buildings
+        WHERE (boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?
+        LIMIT 1
+    """, [bbl]))
+
+    queries.append(("building_comps", """
+        SELECT address, sale_price, sale_date, building_class_category,
+               land_square_feet, gross_square_feet, year_built
+        FROM lake.housing.rolling_sales
+        WHERE borough = ? AND block = ? AND lot != ?
+          AND TRY_CAST(sale_price AS DOUBLE) > 10000
+        ORDER BY sale_date DESC
+        LIMIT 3
+    """, [boro_code, bbl[1:6].lstrip('0') if len(bbl) >= 6 else "",
+          bbl[6:].lstrip('0') if len(bbl) >= 6 else ""]))
+
+    queries.append(("building_acris_parties", """
+        SELECT p.name, p.party_type,
+               TRY_CAST(m.document_date AS DATE) AS doc_date,
+               m.doc_type
+        FROM lake.housing.acris_parties p
+        JOIN lake.housing.acris_master m ON p.document_id = m.document_id
+        JOIN lake.housing.acris_legals l ON m.document_id = l.document_id
+        WHERE (l.borough || LPAD(l.block::VARCHAR, 5, '0')
+                          || LPAD(l.lot::VARCHAR, 4, '0')) = ?
+          AND m.doc_type IN ('DEED', 'DEEDO', 'MTGE')
+        ORDER BY m.document_date DESC
+        LIMIT 5
+    """, [bbl]))
+
+    queries.append(("building_licenses", """
+        SELECT business_name, business_category, license_type, license_status
+        FROM lake.business.issued_licenses
+        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+          AND UPPER(license_status) = 'ACTIVE'
+        LIMIT 5
+    """, [bbl]))
+
     # ── BUILDING PERCENTILES ─────────────────────────────────────────────
 
     queries.append(("pctile_violations", """
@@ -316,6 +476,84 @@ def build_queries(
         SELECT complaint_pctile AS pctile FROM lake.foundation.mv_pctile_311 WHERE zipcode = ?
     """, [zipcode]))
 
+    # ── NEIGHBORHOOD LIVABILITY ──────────────────────────────────────────
+
+    queries.append(("neighborhood_restaurants", """
+        SELECT grade, COUNT(*) AS cnt
+        FROM lake.health.restaurant_inspections
+        WHERE zipcode = ?
+          AND grade IS NOT NULL AND grade != ''
+        GROUP BY grade
+        ORDER BY cnt DESC
+    """, [zipcode]))
+
+    queries.append(("neighborhood_health_facilities", """
+        SELECT facility_name, description
+        FROM lake.health.health_facilities
+        WHERE fac_zip = ?
+        LIMIT 5
+    """, [zipcode]))
+
+    queries.append(("neighborhood_childcare", """
+        SELECT COUNT(*) AS total,
+               SUM(TRY_CAST(capacity AS INT)) AS total_capacity
+        FROM lake.health.childcare_programs
+        WHERE zipcode = ?
+    """, [zipcode]))
+
+    queries.append(("neighborhood_lead_pipes", """
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE UPPER(sl_category) = 'LEAD') AS confirmed_lead
+        FROM lake.environment.lead_service_lines
+        WHERE zip_code = ?
+    """, [zipcode]))
+
+    queries.append(("neighborhood_solar", """
+        SELECT COUNT(*) AS installations,
+               SUM(TRY_CAST(totalnameplatekwdc AS DOUBLE)) AS total_kw,
+               SUM(TRY_CAST(expected_kwh_annual_production AS DOUBLE)) AS annual_kwh
+        FROM lake.environment.nys_solar
+        WHERE zip_code = ?
+          AND UPPER(project_status) = 'COMPLETED'
+    """, [zipcode]))
+
+    queries.append(("neighborhood_gardens", """
+        SELECT gardenname, address
+        FROM lake.social_services.community_gardens
+        WHERE zipcode = ?
+        LIMIT 5
+    """, [zipcode]))
+
+    queries.append(("neighborhood_farmers_markets", """
+        SELECT marketname, daysoperation, hoursoperations, accepts_ebt
+        FROM lake.social_services.farmers_markets
+        WHERE community_district = ?
+        LIMIT 3
+    """, [cd]))
+
+    queries.append(("neighborhood_child_care", """
+        SELECT COUNT(*) AS providers,
+               SUM(TRY_CAST(total_capacity AS INT)) AS total_slots
+        FROM lake.social_services.nys_child_care
+        WHERE zip_code = ?
+    """, [zipcode]))
+
+    queries.append(("neighborhood_liquor", """
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE UPPER(class) ILIKE '%ON%PREMISES%'
+                                   OR UPPER(type) ILIKE '%ON%PREMISES%') AS bars_restaurants
+        FROM lake.business.nys_liquor_authority
+        WHERE zipcode = ?
+    """, [zipcode]))
+
+    queries.append(("neighborhood_cafes", """
+        SELECT COUNT(*) AS total,
+               SUM(TRY_CAST(swc_tables AS INT)) AS total_tables,
+               SUM(TRY_CAST(swc_chairs AS INT)) AS total_chairs
+        FROM lake.business.sidewalk_cafe
+        WHERE zip = ?
+    """, [zipcode]))
+
     # ══════════════════════════════════════════════════════════════════════
     # SAFETY (precinct, ~5 queries)
     # ══════════════════════════════════════════════════════════════════════
@@ -362,6 +600,28 @@ def build_queries(
             LIMIT 1
         """, [zipcode]))
 
+        queries.append(("safety_arrests", """
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE law_cat_cd = 'F') AS felony_arrests,
+                   COUNT(*) FILTER (WHERE law_cat_cd = 'M') AS misdemeanor_arrests
+            FROM lake.public_safety.nypd_arrests_ytd
+            WHERE arrest_precinct = ?
+        """, [pct_val]))
+
+        queries.append(("safety_hate_crimes", """
+            SELECT COUNT(*) AS total
+            FROM lake.public_safety.hate_crimes
+            WHERE complaint_precinct_code = ?
+              AND TRY_CAST(record_create_date AS DATE) >= CURRENT_DATE - INTERVAL '2 years'
+        """, [pct_val]))
+
+        queries.append(("safety_summons", """
+            SELECT COUNT(*) AS total
+            FROM lake.public_safety.criminal_court_summons
+            WHERE precinct_of_occur = ?
+              AND TRY_CAST(summons_date AS DATE) >= CURRENT_DATE - INTERVAL '1 year'
+        """, [pct_val]))
+
         queries.append(("pctile_crime", """
             WITH pct_counts AS (
                 SELECT addr_pct_cd, COUNT(*) AS cnt
@@ -374,6 +634,13 @@ def build_queries(
             )
             SELECT pctile FROM ranked WHERE addr_pct_cd = ?
         """, [pct_val]))
+
+    queries.append(("transit_parking", """
+        SELECT COUNT(*) AS total
+        FROM lake.transportation.parking_violations
+        WHERE violation_precinct = ?
+          AND TRY_CAST(issue_date AS DATE) >= CURRENT_DATE - INTERVAL '1 year'
+    """, [int(precinct) if precinct and precinct.isdigit() else 0]))
 
     # ══════════════════════════════════════════════════════════════════════
     # SCHOOLS (nearest + district, ~3 queries)
@@ -413,6 +680,18 @@ def build_queries(
           AND SUBSTR(geographic_subdivision, 3, 1) = ?
           AND year = (SELECT MAX(year) FROM lake.education.math_results)
         ORDER BY TRY_CAST(level_3_4_1 AS DOUBLE) DESC NULLS LAST
+        LIMIT 3
+    """, [boro_letter]))
+
+    queries.append(("school_safety", """
+        SELECT location_name, register,
+               TRY_CAST(major_n AS INT) AS major_incidents,
+               TRY_CAST(vio_n AS INT) AS violent_incidents,
+               TRY_CAST(prop_n AS INT) AS property_incidents
+        FROM lake.education.school_safety
+        WHERE SUBSTR(dbn, 3, 1) = ?
+          AND school_year = (SELECT MAX(school_year) FROM lake.education.school_safety)
+        ORDER BY TRY_CAST(major_n AS INT) DESC NULLS LAST
         LIMIT 3
     """, [boro_letter]))
 
@@ -575,6 +854,15 @@ def build_queries(
         SELECT COUNT(*) AS cnt
         FROM lake.recreation.play_areas
         WHERE zipcode = ?
+    """, [zipcode]))
+
+    queries.append(("neighborhood_nycha", """
+        SELECT PROJECT_NAME, TOTAL_UNITS, TOTAL_OCCUPIED,
+               TRY_CAST(RENT_PER_MONTH AS DOUBLE) AS avg_rent,
+               TRY_CAST(PCT_OCCUPIED AS DOUBLE) AS occupancy_pct
+        FROM lake.federal.hud_public_housing_developments
+        WHERE STD_ZIP5 = ?
+        LIMIT 3
     """, [zipcode]))
 
     # ══════════════════════════════════════════════════════════════════════
