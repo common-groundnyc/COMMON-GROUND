@@ -619,6 +619,20 @@ def assemble_report(ctx: dict, results: dict) -> str:
     if fec and fec.get("total"):
         civic_lines.append(f" FEC donations from ZIP: {fmt(fec['total'], 'money')}")
 
+    # Election results (borough-level)
+    prez = _get_all(results, "civic_election_president")
+    if prez:
+        civic_lines.append("")
+        civic_lines.append(" 2024 Presidential (borough):")
+        for p in prez[:3]:
+            civic_lines.append(f"   {p.get('candidate', '?')}: {fmt(p.get('votes', 0))}")
+
+    mayor = _get_all(results, "civic_election_mayor")
+    if mayor:
+        civic_lines.append(" 2025 Mayoral (borough):")
+        for m in mayor[:3]:
+            civic_lines.append(f"   {m.get('candidate', '?')}: {fmt(m.get('votes', 0))}")
+
     _section_or_empty(lines, "CIVIC", civic_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━ SERVICES ━━━━━━━━━━━━━━━━━━━━━━━━

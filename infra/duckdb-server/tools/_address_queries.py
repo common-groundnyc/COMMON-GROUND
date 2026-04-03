@@ -828,6 +828,43 @@ def build_queries(
         LIMIT 1
     """, [zipcode]))
 
+    # ── ELECTION RESULTS (borough-level) ────────────────────────────────
+
+    _BORO_TO_COUNTY = {
+        "MN": "New York", "BK": "Kings", "BX": "Bronx",
+        "QN": "Queens", "SI": "Richmond",
+    }
+    election_county = _BORO_TO_COUNTY.get(borough, "")
+
+    if election_county:
+        queries.append(("civic_election_president", f"""
+            SELECT unit_name AS candidate, SUM(tally) AS votes
+            FROM lake.city_government.election_2024_president
+            WHERE county = ?
+              AND unit_name NOT IN (
+                  'Public Counter', 'Manually Counted Emergency',
+                  'Absentee / Military', 'Federal', 'Affidavit', 'Scattered'
+              )
+              AND tally > 0
+            GROUP BY unit_name
+            ORDER BY votes DESC
+            LIMIT 4
+        """, [election_county]))
+
+        queries.append(("civic_election_mayor", f"""
+            SELECT unit_name AS candidate, SUM(tally) AS votes
+            FROM lake.city_government.election_2025_mayor
+            WHERE county = ?
+              AND unit_name NOT IN (
+                  'Public Counter', 'Manually Counted Emergency',
+                  'Absentee / Military', 'Federal', 'Affidavit', 'Scattered'
+              )
+              AND tally > 0
+            GROUP BY unit_name
+            ORDER BY votes DESC
+            LIMIT 5
+        """, [election_county]))
+
     # ══════════════════════════════════════════════════════════════════════
     # SERVICES (~3 queries)
     # ══════════════════════════════════════════════════════════════════════
