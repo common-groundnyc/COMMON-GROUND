@@ -14,33 +14,24 @@ _GEMINI_DIMS = 256
 _GEMINI_BATCH_SIZE = 250  # Vertex AI max: 250. AI Studio max: 100. Auto-adjusted below.
 _MAX_RPM_PER_KEY = 12     # Tier 1: ~15 RPM per key for batchEmbedContents. 12 RPM = safe zero-429 rate
 
-# Round-robin keys — each has its own quota. 4 keys × 2 RPS = ~800 names/sec
-_GEMINI_KEYS = [
-    "AIzaSyC7SJE_PwSqf0wMdYBzm3do5FAbHAvVjP4",
-    "AIzaSyBMiNSMmaoIuA6Y_KYG8lpU3mhjL8fWQek",
-    "AIzaSyCPuPAhiUdNZPSh7txKyv-dcjFXW5Ve4K4",
-    "AIzaSyB5hqOaNDQdSaQNE4oqKgTelg7ZoyM9iwk",
-    "AIzaSyAJTXOcAS2RUtjpp-UkLfUGbm3pNbXwGIc",
-    "AIzaSyDQXj4igQiguYwdq5oQ8qye51kppCrG8p8",
-    "AIzaSyDEIGd8ACrTG44eSb01I0Pt0R_SyDxcahM",
-    "AIzaSyA5M1AqjPJhvQ3Jtb3Kus2SUy1QNV01j8k",
-    "AIzaSyBfoyvCnrs_aOVMjXz8pFR9JqClPT2Xsyk",
-    "AIzaSyD59gMUZmNw4mSM4yiz3YPdFUdPDxXXs1k",
-    "AIzaSyAReUNRD_WgqLKM_VUsBWRqgSUp_Br0qYU",
-    "AIzaSyDMtW4G3BwR_e_O3Cfz67BRmAIwoltTFv0",
-    "AIzaSyDUlJnWYHyHdGX0oIHTvVI8xigm5prpkWU",
-    "AIzaSyC5VRoCt-RfMEu3zB6odrIBLH_cvjbmS30",
-]
+def _load_gemini_keys() -> list[str]:
+    """Load Gemini API keys from environment. GEMINI_API_KEYS (comma-separated) takes
+    precedence; falls back to single GEMINI_API_KEY."""
+    multi = os.environ.get("GEMINI_API_KEYS", "")
+    if multi:
+        return [k.strip() for k in multi.split(",") if k.strip()]
+    single = os.environ.get("GEMINI_API_KEY", "")
+    if single:
+        return [single]
+    return []
 
 
 def create_embedder(model_dir: Path = _DEFAULT_MODEL_DIR, api_key: str | None = None):
     """Return (embed, embed_batch, dims)."""
-    # Use multi-key pool if available
-    keys = [k for k in _GEMINI_KEYS if k]
-    if not keys:
-        env_key = api_key or os.environ.get("GEMINI_API_KEY", "")
-        if env_key:
-            keys = [env_key]
+    # Load keys from env (multi-key pool for rate-limit rotation)
+    keys = _load_gemini_keys()
+    if not keys and api_key:
+        keys = [api_key]
     if keys:
         return _create_gemini_embedder(keys)
 
