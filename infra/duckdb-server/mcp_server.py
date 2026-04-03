@@ -1751,7 +1751,7 @@ async def app_lifespan(server):
         embed_thread.start()
         print("Embedding pipeline started in background", flush=True)
 
-    pool = CursorPool(conn, size=32)
+    pool = CursorPool(conn, size=24)
     _shared_pool = pool
     _shared_catalog = catalog
     try:

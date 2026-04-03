@@ -316,7 +316,7 @@ def parallel_queries(
         elapsed = (time.time() - t) * 1000
         return name, result, elapsed
 
-    with ThreadPoolExecutor(max_workers=min(len(queries), 20)) as ex:
+    with ThreadPoolExecutor(max_workers=min(len(queries), 16)) as ex:
         futures = {
             ex.submit(_run, name, sql, params): name
             for name, sql, params in queries
