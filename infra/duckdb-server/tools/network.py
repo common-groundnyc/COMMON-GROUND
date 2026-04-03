@@ -11,7 +11,9 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
-from shared.db import execute, safe_query, fill_placeholders
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from shared.db import execute, safe_query, fill_placeholders, parallel_queries
 from shared.formatting import make_result, format_text_table
 from shared.graph import require_graph
 from shared.lance import vector_expand_names
@@ -294,47 +296,36 @@ def _all_types(name: str, depth: int, borough: str, top_n: int, ctx: Context) ->
     structured: dict = {"name": name, "type": "all"}
     is_bbl = bool(_BBL_PATTERN.match(name))
 
-    # --- Ownership ---
-    try:
-        if is_bbl:
-            ownership_text, ownership_data = _ownership_for_bbl(name, depth, ctx)
-        else:
-            ownership_text, ownership_data = _ownership_for_name(name, depth, ctx)
-        if ownership_text:
-            sections.append(ownership_text)
-            structured["ownership"] = ownership_data
-    except (ToolError, Exception):
-        pass
+    # Build list of independent calls to run in parallel
+    if is_bbl:
+        calls = [("ownership", _ownership_for_bbl, (name, depth, ctx))]
+    else:
+        calls = [
+            ("ownership", _ownership_for_name, (name, depth, ctx)),
+            ("corporate", _corporate_core, (name, ctx)),
+            ("political", _political_core, (name, ctx)),
+            ("property", _property_core, (name, ctx)),
+        ]
 
-    # --- Corporate ---
-    if not is_bbl:
-        try:
-            corporate_text, corporate_data = _corporate_core(name, ctx)
-            if corporate_text:
-                sections.append(corporate_text)
-                structured["corporate"] = corporate_data
-        except (ToolError, Exception):
-            pass
+    results: dict[str, tuple | Exception] = {}
+    with ThreadPoolExecutor(max_workers=len(calls)) as ex:
+        futures = {ex.submit(fn, *args): key for key, fn, args in calls}
+        for fut in as_completed(futures):
+            key = futures[fut]
+            try:
+                results[key] = fut.result()
+            except Exception as exc:
+                results[key] = exc
 
-    # --- Political ---
-    if not is_bbl:
-        try:
-            political_text, political_data = _political_core(name, ctx)
-            if political_text:
-                sections.append(political_text)
-                structured["political"] = political_data
-        except (ToolError, Exception):
-            pass
-
-    # --- Property transactions ---
-    if not is_bbl:
-        try:
-            property_text, property_data = _property_core(name, ctx)
-            if property_text:
-                sections.append(property_text)
-                structured["property"] = property_data
-        except (ToolError, Exception):
-            pass
+    # Merge results in a stable order
+    for key in ["ownership", "corporate", "political", "property"]:
+        result = results.get(key)
+        if result is None or isinstance(result, Exception):
+            continue
+        text, data = result
+        if text:
+            sections.append(text)
+            structured[key] = data
 
     elapsed = round((time.time() - t0) * 1000)
 
@@ -412,10 +403,30 @@ def _ownership_for_bbl(bbl: str, depth: int, ctx: Context) -> tuple[str, dict]:
         int(r[8] or 0) + int(r[9] or 0) for r in portfolio_buildings
     ) if portfolio_buildings else total_units_target
 
-    # Violations
+    # All remaining queries are independent — run in parallel
     v_sql = fill_placeholders(WATCHDOG_VIOLATIONS_SQL, portfolio_bbls)
-    _, v_rows = execute(pool, v_sql, portfolio_bbls)
+    c_sql = fill_placeholders(WATCHDOG_COMPLAINTS_SQL, portfolio_bbls)
+    tc_sql = fill_placeholders(WATCHDOG_TOP_COMPLAINTS_SQL, portfolio_bbls)
+    e_sql = fill_placeholders(WATCHDOG_EVICTIONS_SQL, portfolio_bbls)
+    d_sql = fill_placeholders(WATCHDOG_DOB_SQL, portfolio_bbls)
+    aep_sql = fill_placeholders(WATCHDOG_AEP_SQL, portfolio_bbls)
+    conh_sql = fill_placeholders(WATCHDOG_CONH_SQL, portfolio_bbls)
+    und_sql = fill_placeholders(WATCHDOG_UNDERLYING_SQL, portfolio_bbls)
 
+    batch = parallel_queries(pool, [
+        ("violations",      v_sql,                     portfolio_bbls),
+        ("complaints",      c_sql,                     portfolio_bbls),
+        ("top_complaints",  tc_sql,                    portfolio_bbls),
+        ("evictions",       e_sql,                     portfolio_bbls),
+        ("dob",             d_sql,                     portfolio_bbls),
+        ("aep",             aep_sql,                   portfolio_bbls),
+        ("conh",            conh_sql,                  portfolio_bbls),
+        ("underlying",      und_sql,                   portfolio_bbls),
+        ("city_averages",   WATCHDOG_CITY_AVERAGES_SQL, []),
+    ])
+
+    # Violations
+    v_rows = batch["violations"][1]
     total_violations = sum(int(r[1] or 0) for r in v_rows)
     total_open = sum(int(r[2] or 0) for r in v_rows)
     total_class_c = sum(int(r[3] or 0) for r in v_rows)
@@ -430,46 +441,32 @@ def _ownership_for_bbl(bbl: str, depth: int, ctx: Context) -> tuple[str, dict]:
     target_open_c = int(target_v[6] or 0) if target_v else 0
 
     # Complaints
-    c_sql = fill_placeholders(WATCHDOG_COMPLAINTS_SQL, portfolio_bbls)
-    _, c_rows = execute(pool, c_sql, portfolio_bbls)
+    c_rows = batch["complaints"][1]
     total_complaints = sum(int(r[1] or 0) for r in c_rows)
     total_open_complaints = sum(int(r[2] or 0) for r in c_rows)
-
-    tc_sql = fill_placeholders(WATCHDOG_TOP_COMPLAINTS_SQL, portfolio_bbls)
-    _, tc_rows = execute(pool, tc_sql, portfolio_bbls)
+    tc_rows = batch["top_complaints"][1]
 
     # Evictions
-    e_sql = fill_placeholders(WATCHDOG_EVICTIONS_SQL, portfolio_bbls)
-    _, e_rows = execute(pool, e_sql, portfolio_bbls)
+    e_rows = batch["evictions"][1]
     eviction_count = int(e_rows[0][0] or 0) if e_rows else 0
 
     # DOB violations
-    d_sql = fill_placeholders(WATCHDOG_DOB_SQL, portfolio_bbls)
-    _, d_rows = execute(pool, d_sql, portfolio_bbls)
+    d_rows = batch["dob"][1]
     dob_violations = int(d_rows[0][0] or 0) if d_rows else 0
     dob_unpaid = int(d_rows[0][1] or 0) if d_rows else 0
 
     # Enforcement flags
-    aep_buildings = []
-    aep_sql = fill_placeholders(WATCHDOG_AEP_SQL, portfolio_bbls)
-    _, aep_rows = safe_query(pool, aep_sql, portfolio_bbls)
-    if aep_rows:
-        aep_buildings = [(r[0], r[1], r[2]) for r in aep_rows]
+    aep_rows = batch["aep"][1]
+    aep_buildings = [(r[0], r[1], r[2]) for r in aep_rows] if aep_rows else []
 
-    conh_buildings = []
-    conh_sql = fill_placeholders(WATCHDOG_CONH_SQL, portfolio_bbls)
-    _, conh_rows = safe_query(pool, conh_sql, portfolio_bbls)
-    if conh_rows:
-        conh_buildings = [(r[0], r[1]) for r in conh_rows]
+    conh_rows = batch["conh"][1]
+    conh_buildings = [(r[0], r[1]) for r in conh_rows] if conh_rows else []
 
-    underlying_buildings = []
-    und_sql = fill_placeholders(WATCHDOG_UNDERLYING_SQL, portfolio_bbls)
-    _, und_rows = safe_query(pool, und_sql, portfolio_bbls)
-    if und_rows:
-        underlying_buildings = [(r[0], r[1]) for r in und_rows]
+    und_rows = batch["underlying"][1]
+    underlying_buildings = [(r[0], r[1]) for r in und_rows] if und_rows else []
 
     # City averages
-    _, avg_rows = execute(pool, WATCHDOG_CITY_AVERAGES_SQL, [])
+    avg_rows = batch["city_averages"][1]
     city_avg_violations = float(avg_rows[0][0] or 0) if avg_rows else 0
 
     violations_per_bldg = total_violations / portfolio_size if portfolio_size else 0
