@@ -1781,7 +1781,7 @@ async def app_lifespan(server):
         embed_thread.start()
         print("Embedding pipeline started in background", flush=True)
 
-    pool = CursorPool(conn, size=16)
+    pool = CursorPool(conn, size=32)
     _shared_pool = pool
     _shared_catalog = catalog
     try:
@@ -1811,6 +1811,47 @@ async def app_lifespan(server):
             print(f"Pipeline state loaded: {len(pipeline_state)} datasets", flush=True)
         except Exception:
             pass  # _pipeline_state may not exist yet
+
+        # --- Name token routes (persistent local table for instant name→table routing) ---
+        if emb_conn:
+            try:
+                existing = emb_conn.execute(
+                    "SELECT COUNT(*) FROM name_token_routes"
+                ).fetchone()[0]
+            except Exception:
+                existing = 0
+
+            # Check if DuckLake has a newer version
+            try:
+                lake_count = conn.execute(
+                    "SELECT COUNT(*) FROM lake.foundation.name_tokens"
+                ).fetchone()[0]
+                # Rebuild if empty, or if DuckLake has >1% more distinct routes
+                lake_routes = conn.execute(
+                    "SELECT COUNT(DISTINCT token || '|' || source_table) FROM lake.foundation.name_tokens"
+                ).fetchone()[0]
+                needs_rebuild = existing == 0 or abs(existing - lake_routes) > max(1000, existing * 0.01)
+            except Exception:
+                needs_rebuild = False
+                lake_routes = 0
+
+            if needs_rebuild and lake_routes > 0:
+                print(f"Building name_token_routes: {existing:,} local → {lake_routes:,} from DuckLake...", flush=True)
+                t_tok = time.time()
+                emb_conn.execute("DROP TABLE IF EXISTS name_token_routes")
+                emb_conn.execute("""
+                    CREATE TABLE name_token_routes AS
+                    SELECT DISTINCT token, source_table
+                    FROM lake.foundation.name_tokens
+                """)
+                # Note: ART index not needed — DuckDB scans small tables fast,
+                # and the table is typically <5M rows which fits in memory
+                tok_count = emb_conn.execute("SELECT COUNT(*) FROM name_token_routes").fetchone()[0]
+                print(f"name_token_routes: {tok_count:,} routes in {time.time() - t_tok:.1f}s", flush=True)
+            elif existing > 0:
+                print(f"name_token_routes: {existing:,} routes (up to date)", flush=True)
+            else:
+                print("name_token_routes: skipped (no DuckLake name_tokens table)", flush=True)
 
         try:
             yield {
