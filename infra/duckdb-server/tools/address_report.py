@@ -1,6 +1,7 @@
 """address_report() — 360-degree dossier for any NYC address."""
 
 import re
+import threading
 from typing import Annotated
 
 from fastmcp import Context
@@ -11,6 +12,14 @@ from pydantic import Field
 from shared.db import execute, parallel_queries, safe_query
 from tools._address_format import assemble_report
 from tools._address_queries import build_queries
+
+
+# ---------------------------------------------------------------------------
+# Concurrency gate — only 1 address_report runs at a time.
+# Second caller waits (doesn't fail). Prevents 200-query OOM when
+# two users hit this simultaneously.
+# ---------------------------------------------------------------------------
+_GATE = threading.Semaphore(1)
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +57,16 @@ def address_report(
     if not address or not address.strip():
         raise ToolError("Please provide a NYC street address, e.g. '305 Linden Blvd, Brooklyn'")
 
+    # Gate: only 1 address_report at a time (100 queries is heavy)
+    _GATE.acquire()
+    try:
+        return _address_report_impl(address, ctx)
+    finally:
+        _GATE.release()
+
+
+def _address_report_impl(address: str, ctx: Context) -> ToolResult:
+    """Inner implementation — runs under the concurrency gate."""
     pool = ctx.lifespan_context["pool"]
 
     # Step 1: detect BBL (10-digit number) or resolve address
