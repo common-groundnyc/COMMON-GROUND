@@ -176,21 +176,6 @@ async def app_lifespan(server):
     from extensions import load_extensions
     ext_status = load_extensions(conn)
 
-    # Configure S3 for MinIO via CREATE SECRET (survives DETACH/ATTACH cycles)
-    minio_user = os.environ.get("MINIO_ROOT_USER", "").replace("'", "''")
-    minio_pass = os.environ.get("MINIO_ROOT_PASSWORD", "").replace("'", "''")
-    conn.execute(f"""
-        CREATE OR REPLACE SECRET minio_s3 (
-            TYPE s3,
-            KEY_ID '{minio_user}',
-            SECRET '{minio_pass}',
-            ENDPOINT 'minio:9000',
-            USE_SSL false,
-            URL_STYLE 'path'
-        )
-    """)
-    print("S3/MinIO credentials configured (SECRET)", flush=True)
-
     # Performance tuning
     conn.execute("SET memory_limit = '8GB'")
     conn.execute("SET threads = 8")
@@ -198,16 +183,10 @@ async def app_lifespan(server):
     conn.execute("SET max_temp_directory_size = '50GB'")
     conn.execute("SET preserve_insertion_order = false")
 
-    # HTTP/S3 resilience — disable keep-alive to prevent stale 403s (known DuckDB bug)
-    conn.execute("SET http_keep_alive = false")
-    conn.execute("SET enable_http_metadata_cache = true")
-    conn.execute("SET http_retries = 5")
-    conn.execute("SET http_retry_wait_ms = 200")
-
     # NYC timezone + case-insensitive search
     conn.execute("SET TimeZone = 'America/New_York'")
     conn.execute("SET default_collation = 'NOCASE'")
-    print("Performance tuning applied", flush=True)
+    print("Performance tuning applied (local filesystem, no S3)", flush=True)
 
     pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
     conn.execute(f"""
@@ -227,20 +206,11 @@ async def app_lifespan(server):
         conn = duckdb.connect(config={"allow_unsigned_extensions": "true"})
         from extensions import load_extensions
         ext_status = load_extensions(conn)
-        # Reconfigure S3 via SECRET and performance tuning on new connection
-        conn.execute(f"""
-            CREATE OR REPLACE SECRET minio_s3 (
-                TYPE s3, KEY_ID '{minio_user}', SECRET '{minio_pass}',
-                ENDPOINT 'minio:9000', USE_SSL false, URL_STYLE 'path'
-            )
-        """)
+        # Reconfigure performance tuning on new connection
         conn.execute("SET memory_limit = '8GB'")
         conn.execute("SET threads = 8")
         conn.execute("SET temp_directory = '/tmp/duckdb_temp'")
         conn.execute("SET max_temp_directory_size = '50GB'")
-        conn.execute("SET enable_http_metadata_cache = true")
-        conn.execute("SET http_retries = 5")
-        conn.execute("SET http_retry_wait_ms = 200")
         conn.execute("SET TimeZone = 'America/New_York'")
         conn.execute("SET default_collation = 'NOCASE'")
         conn.execute(f"""
