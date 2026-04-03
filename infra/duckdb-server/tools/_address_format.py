@@ -43,12 +43,12 @@ def fmt(n: object, kind: str = "auto") -> str:
     if n is None:
         return "n/a"
     if kind == "year":
-        return str(int(n))
+        return str(int(float(n)))
     if kind == "money":
-        v = int(n) if float(n) == int(float(n)) else n
-        if isinstance(v, int):
-            return f"${v:,}"
-        return f"${v:,.2f}"
+        f_val = float(n)
+        if f_val == int(f_val):
+            return f"${int(f_val):,}"
+        return f"${f_val:,.2f}"
     if kind == "pct":
         return f"{n}%"
     # auto: detect years (4-digit ints between 1800–2100)
