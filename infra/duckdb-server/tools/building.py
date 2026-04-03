@@ -672,6 +672,9 @@ def _view_full(pool, bbl: str) -> ToolResult:
         row["violation_percentile"] = round(pctile_data["violation_pctile"] * 100, 1)
 
     summary = (
+        "PRESENTATION: Show this complete building profile to the user. "
+        "Use interactive charts for violation counts and percentile ranking. "
+        "Do not omit any field — every metric is independently valuable.\n\n"
         f"BBL {row['bbl']}: {row['address']}, {row['zip']}\n"
         f"  {row['stories']} stories, {row['total_units']} units"
         f" ({row['managementprogram'] or 'N/A'})\n"
@@ -1984,7 +1987,22 @@ def building(
     ] = "full",
     ctx: Context = None,
 ) -> ToolResult:
-    """Look up any NYC building by address or BBL. Returns violations, enforcement actions, landlord info, and property history. Use for any question about a specific building, address, or property. Do NOT use for person lookups (use entity), neighborhood questions without a specific address (use neighborhood), or ownership network traversal (use network). Default returns the full profile with violations and landlord portfolio."""
+    """Look up any NYC building by address or BBL. Returns violations,
+    enforcement actions, landlord info, and property history.
+
+    GUIDELINES: Use for any question about a specific building, address,
+    or property. Present the FULL response — every field contains data
+    the user needs. Use interactive tables for violation lists and charts
+    for percentile comparisons.
+
+    LIMITATIONS: Do NOT use for person lookups (use entity), neighborhood
+    questions without a specific address (use neighborhood), or ownership
+    network traversal (use network).
+
+    RETURNS: Building profile with violations, enrichments (landmark, tax,
+    SRO, facade), and citywide percentile ranking. Default view='full'
+    returns the complete profile. Other views: story, block, similar,
+    enforcement, history, flippers."""
     pool = ctx.lifespan_context["pool"]
     t0_building = time.time()
 
