@@ -550,11 +550,16 @@ _FAMOUS_BUILDINGS = [
 
 def _view_full(pool, bbl: str) -> ToolResult:
     """Full building profile with violations, enrichments, and percentile."""
+    t_start = time.time()
+
     # --- Step 1: BBL resolution (sequential — everything depends on this) ---
     try:
         cols, rows = execute(pool, BUILDING_PROFILE_MV_SQL, [bbl])
     except Exception:
         cols, rows = execute(pool, BUILDING_PROFILE_SQL, [bbl, bbl, bbl, bbl])
+
+    t_bbl = time.time()
+    print(f"[building:full] BBL resolve: {(t_bbl - t_start)*1000:.0f}ms", flush=True)
 
     if not rows:
         raise ToolError(f"No building found for BBL {bbl}")
@@ -591,18 +596,9 @@ def _view_full(pool, bbl: str) -> ToolResult:
             """,
             [bbl],
         ),
-        (
-            "valuation",
-            """
-            SELECT year, curmkttot, curacttot, curtxbtot, zoning, owner,
-                   bldg_class, yrbuilt, units, gross_sqft
-            FROM lake.housing.property_valuation
-            WHERE (boro || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0')) = ?::VARCHAR
-            ORDER BY year DESC
-            LIMIT 1
-            """,
-            [bbl],
-        ),
+        # NOTE: property_valuation (10.5M rows, ~25s full scan) removed from parallel
+        # batch. Key fields (zoning, owner, yearbuilt) already come from mv_building_hub.
+        # TODO: add foundation.mv_valuation materialized view for fast point lookups.
         (
             "sro",
             """
@@ -638,7 +634,11 @@ def _view_full(pool, bbl: str) -> ToolResult:
             [bbl],
         ))
 
+    t_pre_parallel = time.time()
+    print(f"[building:full] Pre-parallel setup: {(t_pre_parallel - t_bbl)*1000:.0f}ms, {len(enrichment_queries)} queries", flush=True)
     results = parallel_queries(pool, enrichment_queries)
+    t_post_parallel = time.time()
+    print(f"[building:full] Parallel queries: {(t_post_parallel - t_pre_parallel)*1000:.0f}ms", flush=True)
 
     # Unpack parallel results
     landmark_rows = results.get("landmark", ([], []))[1]
@@ -1986,6 +1986,7 @@ def building(
 ) -> ToolResult:
     """Look up any NYC building by address or BBL. Returns violations, enforcement actions, landlord info, and property history. Use for any question about a specific building, address, or property. Do NOT use for person lookups (use entity), neighborhood questions without a specific address (use neighborhood), or ownership network traversal (use network). Default returns the full profile with violations and landlord portfolio."""
     pool = ctx.lifespan_context["pool"]
+    t0_building = time.time()
 
     # Auto-detect: 10-digit numeric = BBL, otherwise resolve address
     bbl_input = identifier.strip()
@@ -1993,6 +1994,8 @@ def building(
         bbl = bbl_input
     else:
         bbl = _resolve_bbl(pool, bbl_input)
+
+    print(f"[building] Address resolve: {(time.time() - t0_building)*1000:.0f}ms → BBL {bbl}", flush=True)
 
     # Special case: building_context is dispatched as "story" view variant
     # but we keep it as a separate internal — the "story" view maps to building_story

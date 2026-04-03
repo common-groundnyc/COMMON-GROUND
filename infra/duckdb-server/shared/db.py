@@ -310,17 +310,27 @@ def parallel_queries(
 
     results: dict[str, tuple[list, list]] = {}
 
-    def _run(name: str, sql: str, params: list | None) -> tuple[str, tuple[list, list]]:
-        return name, safe_query(pool, sql, params)
+    def _run(name: str, sql: str, params: list | None) -> tuple[str, tuple[list, list], float]:
+        t = time.time()
+        result = safe_query(pool, sql, params)
+        elapsed = (time.time() - t) * 1000
+        return name, result, elapsed
 
     with ThreadPoolExecutor(max_workers=min(len(queries), 20)) as ex:
         futures = {
             ex.submit(_run, name, sql, params): name
             for name, sql, params in queries
         }
+        timings = []
         for fut in as_completed(futures):
-            name, result = fut.result()
+            name, result, elapsed = fut.result()
             results[name] = result
+            timings.append((name, elapsed))
+
+    # Log per-query timings (sorted slowest first)
+    timings.sort(key=lambda x: -x[1])
+    parts = [f"{n}={ms:.0f}ms" for n, ms in timings]
+    print(f"[parallel] {', '.join(parts)}", flush=True)
 
     return results
 
