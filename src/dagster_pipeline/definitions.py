@@ -17,6 +17,7 @@ from dagster_pipeline.defs.entity_master_asset import entity_master
 from dagster_pipeline.defs.quality_assets import data_health
 from dagster_pipeline.defs.materialized_view_assets import (
     mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
+    mv_entity_acris, mv_city_averages, mv_pctile_violations, mv_pctile_311,
 )
 from dagster_pipeline.defs.spatial_views_asset import spatial_views
 from dagster_pipeline.defs.address_lookup_asset import address_lookup
@@ -26,6 +27,7 @@ all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, name_index
               h3_index, phonetic_index, row_fingerprints, data_health, entity_name_embeddings,
               entity_master, address_lookup,
               mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
+              mv_entity_acris, mv_city_averages, mv_pctile_violations, mv_pctile_311,
               spatial_views]
 
 from dagster_pipeline.sources.datasets import (
@@ -96,6 +98,10 @@ materialized_views_job = dg.define_asset_job(
         dg.AssetKey(["foundation", "mv_zip_stats"]),
         dg.AssetKey(["foundation", "mv_crime_precinct"]),
         dg.AssetKey(["foundation", "mv_corp_network"]),
+        dg.AssetKey(["foundation", "mv_entity_acris"]),
+        dg.AssetKey(["foundation", "mv_city_averages"]),
+        dg.AssetKey(["foundation", "mv_pctile_violations"]),
+        dg.AssetKey(["foundation", "mv_pctile_311"]),
     ),
 )
 
@@ -126,11 +132,29 @@ entity_embeddings_schedule = dg.ScheduleDefinition(
     default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 
+# AutomationCondition.eager() on MVs requires this sensor to evaluate conditions
+mv_automation_sensor = dg.AutomationConditionSensorDefinition(
+    name="mv_auto_materialize",
+    target=dg.AssetSelection.assets(
+        dg.AssetKey(["foundation", "mv_building_hub"]),
+        dg.AssetKey(["foundation", "mv_acris_deeds"]),
+        dg.AssetKey(["foundation", "mv_zip_stats"]),
+        dg.AssetKey(["foundation", "mv_crime_precinct"]),
+        dg.AssetKey(["foundation", "mv_corp_network"]),
+        dg.AssetKey(["foundation", "mv_entity_acris"]),
+        dg.AssetKey(["foundation", "mv_city_averages"]),
+        dg.AssetKey(["foundation", "mv_pctile_violations"]),
+        dg.AssetKey(["foundation", "mv_pctile_311"]),
+    ),
+    minimum_interval_seconds=300,
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)
+
 defs = dg.Definitions(
     assets=all_assets,
     jobs=[daily_live_job, monthly_refresh_job, all_assets_job, entity_resolution_job, foundation_job, materialized_views_job, entity_embeddings_job],
     schedules=[daily_schedule, monthly_schedule, entity_embeddings_schedule],
-    sensors=[flush_ducklake_sensor, data_freshness_sensor],
+    sensors=[flush_ducklake_sensor, data_freshness_sensor, mv_automation_sensor],
     resources={
         "ducklake": DuckLakeResource(
             catalog_url=os.environ.get(

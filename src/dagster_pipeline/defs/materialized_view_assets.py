@@ -353,6 +353,239 @@ def mv_crime_precinct(context) -> dg.MaterializeResult:
 
 
 @dg.asset(
+    key=dg.AssetKey(["foundation", "mv_entity_acris"]),
+    group_name="foundation",
+    description="Pre-joined ACRIS party→transaction index for entity_xray lookups.",
+    compute_kind="duckdb",
+    automation_condition=dg.AutomationCondition.eager(),
+    deps=[
+        dg.AssetKey(["housing", "acris_master"]),
+        dg.AssetKey(["housing", "acris_parties"]),
+        dg.AssetKey(["housing", "acris_legals"]),
+    ],
+)
+def mv_entity_acris(context) -> dg.MaterializeResult:
+    conn = _connect_ducklake()
+    t0 = time.time()
+    try:
+        conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
+        conn.execute("DROP TABLE IF EXISTS lake.foundation.mv_entity_acris")
+        conn.execute("""
+            CREATE TABLE lake.foundation.mv_entity_acris AS
+            SELECT
+                UPPER(p.name) AS party_name,
+                p.party_type,
+                m.doc_type,
+                TRY_CAST(m.document_amt AS DOUBLE) AS amount,
+                TRY_CAST(m.document_date AS DATE) AS document_date,
+                (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
+                l.street_name,
+                l.unit
+            FROM lake.housing.acris_parties p
+            JOIN lake.housing.acris_master m ON p.document_id = m.document_id
+            JOIN lake.housing.acris_legals l ON p.document_id = l.document_id
+            WHERE p.name IS NOT NULL AND LENGTH(TRIM(p.name)) > 1
+        """)
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM lake.foundation.mv_entity_acris"
+        ).fetchone()[0]
+        elapsed = round(time.time() - t0, 1)
+        context.log.info("mv_entity_acris: %s rows in %ss", f"{row_count:,}", elapsed)
+        return dg.MaterializeResult(
+            metadata={
+                "row_count": dg.MetadataValue.int(row_count),
+                "elapsed_s": dg.MetadataValue.float(elapsed),
+            }
+        )
+    finally:
+        conn.close()
+
+
+@dg.asset(
+    key=dg.AssetKey(["foundation", "mv_city_averages"]),
+    group_name="foundation",
+    description=(
+        "Pre-computed citywide averages: violations per building, "
+        "crimes and arrests per precinct."
+    ),
+    compute_kind="duckdb",
+    automation_condition=dg.AutomationCondition.eager(),
+    deps=[
+        dg.AssetKey(["housing", "hpd_violations"]),
+        dg.AssetKey(["public_safety", "nypd_arrests_historic"]),
+        dg.AssetKey(["public_safety", "nypd_complaints_historic"]),
+    ],
+)
+def mv_city_averages(context) -> dg.MaterializeResult:
+    conn = _connect_ducklake()
+    t0 = time.time()
+    try:
+        conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
+        conn.execute("DROP TABLE IF EXISTS lake.foundation.mv_city_averages")
+        conn.execute("""
+            CREATE TABLE lake.foundation.mv_city_averages AS
+            WITH building_violations AS (
+                SELECT bbl,
+                       COUNT(*) AS v_cnt,
+                       COUNT(*) FILTER (WHERE violationstatus = 'Open') AS open_cnt
+                FROM lake.housing.hpd_violations
+                GROUP BY bbl
+                HAVING COUNT(*) > 0
+            ),
+            arrest_totals AS (
+                SELECT arrest_precinct AS pct, COUNT(*) AS arrests
+                FROM lake.public_safety.nypd_arrests_historic
+                WHERE TRY_CAST(arrest_date AS DATE) >= CURRENT_DATE - INTERVAL 1 YEAR
+                GROUP BY arrest_precinct
+            ),
+            crime_totals AS (
+                SELECT addr_pct_cd AS pct, COUNT(*) AS crimes
+                FROM lake.public_safety.nypd_complaints_historic
+                WHERE TRY_CAST(rpt_dt AS DATE) >= CURRENT_DATE - INTERVAL 1 YEAR
+                GROUP BY addr_pct_cd
+            )
+            SELECT
+                'building' AS scope,
+                AVG(v_cnt) AS avg_violations_per_bldg,
+                AVG(open_cnt) AS avg_open_violations_per_bldg,
+                NULL::DOUBLE AS avg_arrests,
+                NULL::DOUBLE AS avg_crimes,
+                NULL::DOUBLE AS avg_arrest_rate_per_1k
+            FROM building_violations
+            UNION ALL
+            SELECT
+                'precinct' AS scope,
+                NULL, NULL,
+                AVG(a.arrests),
+                AVG(c.crimes),
+                AVG(CASE WHEN c.crimes > 0 THEN a.arrests * 1000.0 / c.crimes END)
+            FROM arrest_totals a
+            JOIN crime_totals c ON a.pct = c.pct
+        """)
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM lake.foundation.mv_city_averages"
+        ).fetchone()[0]
+        elapsed = round(time.time() - t0, 1)
+        context.log.info("mv_city_averages: %s rows in %ss", f"{row_count:,}", elapsed)
+        return dg.MaterializeResult(
+            metadata={
+                "row_count": dg.MetadataValue.int(row_count),
+                "elapsed_s": dg.MetadataValue.float(elapsed),
+            }
+        )
+    finally:
+        conn.close()
+
+
+@dg.asset(
+    key=dg.AssetKey(["foundation", "mv_pctile_violations"]),
+    group_name="foundation",
+    description=(
+        "Pre-computed violation and complaint percentiles by BBL. "
+        "Replaces per-request PERCENT_RANK scans in building_profile."
+    ),
+    compute_kind="duckdb",
+    automation_condition=dg.AutomationCondition.eager(),
+    deps=[
+        dg.AssetKey(["housing", "hpd_violations"]),
+        dg.AssetKey(["housing", "hpd_complaints"]),
+    ],
+)
+def mv_pctile_violations(context) -> dg.MaterializeResult:
+    conn = _connect_ducklake()
+    t0 = time.time()
+    try:
+        conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
+        conn.execute("DROP TABLE IF EXISTS lake.foundation.mv_pctile_violations")
+        conn.execute("""
+            CREATE TABLE lake.foundation.mv_pctile_violations AS
+            WITH v_counts AS (
+                SELECT LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') AS bbl,
+                       COUNT(*) AS violation_cnt
+                FROM lake.housing.hpd_violations
+                WHERE bbl IS NOT NULL
+                GROUP BY 1
+            ),
+            c_counts AS (
+                SELECT LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') AS bbl,
+                       COUNT(DISTINCT complaint_id) AS complaint_cnt
+                FROM lake.housing.hpd_complaints
+                WHERE bbl IS NOT NULL
+                GROUP BY 1
+            )
+            SELECT
+                COALESCE(v.bbl, c.bbl) AS bbl,
+                COALESCE(v.violation_cnt, 0) AS violation_cnt,
+                PERCENT_RANK() OVER (ORDER BY COALESCE(v.violation_cnt, 0)) AS violation_pctile,
+                COALESCE(c.complaint_cnt, 0) AS complaint_cnt,
+                PERCENT_RANK() OVER (ORDER BY COALESCE(c.complaint_cnt, 0)) AS complaint_pctile
+            FROM v_counts v
+            FULL OUTER JOIN c_counts c ON v.bbl = c.bbl
+        """)
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM lake.foundation.mv_pctile_violations"
+        ).fetchone()[0]
+        elapsed = round(time.time() - t0, 1)
+        context.log.info("mv_pctile_violations: %s rows in %ss", f"{row_count:,}", elapsed)
+        return dg.MaterializeResult(
+            metadata={
+                "row_count": dg.MetadataValue.int(row_count),
+                "elapsed_s": dg.MetadataValue.float(elapsed),
+            }
+        )
+    finally:
+        conn.close()
+
+
+@dg.asset(
+    key=dg.AssetKey(["foundation", "mv_pctile_311"]),
+    group_name="foundation",
+    description=(
+        "Pre-computed 311 complaint percentiles by ZIP. "
+        "Replaces per-request PERCENT_RANK scans in neighborhood_portrait."
+    ),
+    compute_kind="duckdb",
+    automation_condition=dg.AutomationCondition.eager(),
+    deps=[dg.AssetKey(["social_services", "n311_service_requests"])],
+)
+def mv_pctile_311(context) -> dg.MaterializeResult:
+    conn = _connect_ducklake()
+    t0 = time.time()
+    try:
+        conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
+        conn.execute("DROP TABLE IF EXISTS lake.foundation.mv_pctile_311")
+        conn.execute("""
+            CREATE TABLE lake.foundation.mv_pctile_311 AS
+            WITH zip_counts AS (
+                SELECT incident_zip AS zipcode,
+                       COUNT(*) AS complaint_cnt
+                FROM lake.social_services.n311_service_requests
+                WHERE incident_zip IS NOT NULL
+                  AND LENGTH(TRIM(incident_zip)) = 5
+                GROUP BY incident_zip
+            )
+            SELECT
+                zipcode,
+                complaint_cnt,
+                PERCENT_RANK() OVER (ORDER BY complaint_cnt) AS complaint_pctile
+            FROM zip_counts
+        """)
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM lake.foundation.mv_pctile_311"
+        ).fetchone()[0]
+        elapsed = round(time.time() - t0, 1)
+        context.log.info("mv_pctile_311: %s rows in %ss", f"{row_count:,}", elapsed)
+        return dg.MaterializeResult(
+            metadata={
+                "row_count": dg.MetadataValue.int(row_count),
+                "elapsed_s": dg.MetadataValue.float(elapsed),
+            }
+        )
+    finally:
+        conn.close()
+
+
+@dg.asset(
     key=dg.AssetKey(["foundation", "mv_corp_network"]),
     group_name="foundation",
     description=(
