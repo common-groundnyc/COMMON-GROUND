@@ -231,24 +231,9 @@ ORDER BY cnt DESC LIMIT 10
 """
 
 CITY_AVERAGES_SQL = """
-WITH arrest_totals AS (
-    SELECT arrest_precinct AS pct, COUNT(*) AS arrests
-    FROM lake.public_safety.nypd_arrests_historic
-    WHERE TRY_CAST(arrest_date AS DATE) >= CURRENT_DATE - INTERVAL 1 YEAR
-    GROUP BY arrest_precinct
-),
-crime_totals AS (
-    SELECT addr_pct_cd AS pct, COUNT(*) AS crimes
-    FROM lake.public_safety.nypd_complaints_historic
-    WHERE TRY_CAST(rpt_dt AS DATE) >= CURRENT_DATE - INTERVAL 1 YEAR
-    GROUP BY addr_pct_cd
-)
-SELECT
-    AVG(a.arrests) AS avg_arrests,
-    AVG(c.crimes) AS avg_crimes,
-    AVG(CASE WHEN c.crimes > 0 THEN a.arrests * 1000.0 / c.crimes END) AS avg_arrest_rate_per_1k
-FROM arrest_totals a
-JOIN crime_totals c ON a.pct = c.pct
+SELECT avg_arrests, avg_crimes, avg_arrest_rate_per_1k
+FROM lake.foundation.mv_city_averages
+WHERE scope = 'precinct'
 """
 
 CCRB_SQL = """

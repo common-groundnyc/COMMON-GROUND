@@ -176,31 +176,11 @@ def build_queries(
     # ── BUILDING PERCENTILES ─────────────────────────────────────────────
 
     queries.append(("pctile_violations", """
-        WITH bbl_counts AS (
-            SELECT bbl, COUNT(*) AS cnt
-            FROM lake.housing.hpd_violations
-            GROUP BY bbl
-        ),
-        ranked AS (
-            SELECT bbl, cnt, PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
-            FROM bbl_counts
-        )
-        SELECT pctile FROM ranked
-        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        SELECT violation_pctile AS pctile FROM lake.foundation.mv_pctile_violations WHERE bbl = ?
     """, [bbl]))
 
     queries.append(("pctile_complaints", """
-        WITH bbl_counts AS (
-            SELECT bbl, COUNT(DISTINCT complaint_id) AS cnt
-            FROM lake.housing.hpd_complaints
-            GROUP BY bbl
-        ),
-        ranked AS (
-            SELECT bbl, cnt, PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
-            FROM bbl_counts
-        )
-        SELECT pctile FROM ranked
-        WHERE LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') = ?
+        SELECT complaint_pctile AS pctile FROM lake.foundation.mv_pctile_violations WHERE bbl = ?
     """, [bbl]))
 
     queries.append(("pctile_energy", """
@@ -333,17 +313,7 @@ def build_queries(
     """, [zipcode]))
 
     queries.append(("pctile_311", """
-        WITH zip_counts AS (
-            SELECT incident_zip, COUNT(*) AS cnt
-            FROM lake.social_services.n311_service_requests
-            WHERE TRY_CAST(created_date AS DATE) >= CURRENT_DATE - INTERVAL '1 year'
-            GROUP BY incident_zip
-        ),
-        ranked AS (
-            SELECT incident_zip, PERCENT_RANK() OVER (ORDER BY cnt) AS pctile
-            FROM zip_counts
-        )
-        SELECT pctile FROM ranked WHERE incident_zip = ?
+        SELECT complaint_pctile AS pctile FROM lake.foundation.mv_pctile_311 WHERE zipcode = ?
     """, [zipcode]))
 
     # ══════════════════════════════════════════════════════════════════════

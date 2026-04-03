@@ -615,16 +615,10 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
         queries.append(("oath", oath_sql, oath_params))
     if _should_query("acris_parties"):
         queries.append(("acris", """
-            SELECT p.name AS party_name, p.party_type,
-                   m.doc_type, TRY_CAST(m.document_amt AS DOUBLE) AS amount,
-                   m.document_date,
-                   (l.borough || LPAD(l.block::VARCHAR, 5, '0') || LPAD(l.lot::VARCHAR, 4, '0')) AS bbl,
-                   l.street_name, l.unit
-            FROM lake.housing.acris_parties p
-            JOIN lake.housing.acris_master m ON p.document_id = m.document_id
-            JOIN lake.housing.acris_legals l ON p.document_id = l.document_id
-            WHERE UPPER(p.name) LIKE ?
-            ORDER BY m.document_date DESC
+            SELECT party_name, party_type, doc_type, amount, document_date, bbl, street_name, unit
+            FROM lake.foundation.mv_entity_acris
+            WHERE party_name LIKE ?
+            ORDER BY document_date DESC
             LIMIT 20
         """, [f"%{search}%"]))
     if _should_query("pluto"):

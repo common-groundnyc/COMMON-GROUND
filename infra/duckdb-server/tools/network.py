@@ -136,17 +136,9 @@ WHERE bbl IN ({placeholders})
 """
 
 WATCHDOG_CITY_AVERAGES_SQL = """
-SELECT
-    AVG(v_cnt) AS avg_violations_per_bldg,
-    AVG(c_cnt) AS avg_open_violations_per_bldg
-FROM (
-    SELECT bbl,
-           COUNT(*) AS v_cnt,
-           COUNT(*) FILTER (WHERE violationstatus = 'Open') AS c_cnt
-    FROM lake.housing.hpd_violations
-    GROUP BY bbl
-    HAVING COUNT(*) > 0
-)
+SELECT avg_violations_per_bldg, avg_open_violations_per_bldg
+FROM lake.foundation.mv_city_averages
+WHERE scope = 'building'
 """
 
 # ---------------------------------------------------------------------------
