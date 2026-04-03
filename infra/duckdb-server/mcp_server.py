@@ -1791,30 +1791,25 @@ async def app_lifespan(server):
             except Exception:
                 existing = 0
 
-            # Check if DuckLake has a newer version (query via conn, which has lake attached)
-            try:
-                lake_routes = conn.execute(
-                    "SELECT COUNT(DISTINCT token || '|' || source_table) FROM lake.foundation.name_tokens"
-                ).fetchone()[0]
-                needs_rebuild = existing == 0 or abs(existing - lake_routes) > max(1000, existing * 0.01)
-            except Exception:
-                needs_rebuild = False
-                lake_routes = 0
+            # Only rebuild if local is empty — avoid scanning 246M row DuckLake table on every start
+            needs_rebuild = existing == 0
 
-            if needs_rebuild and lake_routes > 0:
-                print(f"Building name_token_routes: {existing:,} local → {lake_routes:,} from DuckLake...", flush=True)
-                t_tok = time.time()
-                # Fetch from DuckLake via conn, insert into local emb_conn
-                route_rows = conn.execute(
-                    "SELECT DISTINCT token, source_table FROM lake.foundation.name_tokens"
-                ).fetchall()
-                emb_conn.execute("DROP TABLE IF EXISTS name_token_routes")
-                emb_conn.execute(
-                    "CREATE TABLE name_token_routes (token VARCHAR, source_table VARCHAR)"
-                )
-                emb_conn.executemany(
-                    "INSERT INTO name_token_routes VALUES (?, ?)", route_rows
-                )
+            if needs_rebuild:
+                try:
+                    print("Building name_token_routes from DuckLake (first run)...", flush=True)
+                    t_tok = time.time()
+                    route_rows = conn.execute(
+                        "SELECT DISTINCT token, source_table FROM lake.foundation.name_tokens"
+                    ).fetchall()
+                    emb_conn.execute("DROP TABLE IF EXISTS name_token_routes")
+                    emb_conn.execute(
+                        "CREATE TABLE name_token_routes (token VARCHAR, source_table VARCHAR)"
+                    )
+                    emb_conn.executemany(
+                        "INSERT INTO name_token_routes VALUES (?, ?)", route_rows
+                    )
+                except Exception as e:
+                    print(f"Warning: name_token_routes build failed: {e}", flush=True)
                 tok_count = emb_conn.execute("SELECT COUNT(*) FROM name_token_routes").fetchone()[0]
                 print(f"name_token_routes: {tok_count:,} routes in {time.time() - t_tok:.1f}s", flush=True)
             elif existing > 0:
