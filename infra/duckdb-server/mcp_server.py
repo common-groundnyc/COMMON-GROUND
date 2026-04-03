@@ -20,6 +20,7 @@ from middleware.percentile_middleware import PercentileMiddleware
 from percentiles import build_percentile_tables, build_lake_percentile_tables
 from cursor_pool import CursorPool
 from shared.db import execute, build_catalog, set_catalog_cache
+from shared.graph import graph_cache_fresh, load_graph_from_cache, save_graph_to_cache
 from shared.types import READONLY, EMBEDDINGS_DB
 
 # ---------------------------------------------------------------------------
@@ -414,65 +415,6 @@ async def app_lifespan(server):
     # Build DuckPGQ property graph — landlord-building-violation network
     # Tables are cached as Parquet on the volume; rebuild only when cache is stale
     graph_ready = False
-    GRAPH_CACHE_DIR = "/data/common-ground/graph-cache"
-    GRAPH_TABLES = [
-        "graph_owners", "graph_buildings", "graph_owns",
-        "graph_violations", "graph_has_violation", "graph_shared_owner",
-        "graph_building_flags", "graph_acris_sales", "graph_rent_stabilization",
-        "graph_corp_contacts", "graph_business_at_building", "graph_acris_chain",
-        "graph_dob_owners", "graph_eviction_petitioners",
-        "graph_doing_business", "graph_campaign_donors",
-        "graph_epa_facilities",
-        # Transaction network
-        "graph_tx_entities", "graph_tx_edges", "graph_tx_shared",
-        # Corporate web
-        "graph_corps", "graph_corp_people", "graph_corp_officer_edges", "graph_corp_shared_officer",
-        # Influence network
-        "graph_pol_entities", "graph_pol_donations", "graph_pol_contracts", "graph_pol_lobbying",
-        # Contractor network
-        "graph_contractors", "graph_permit_edges", "graph_contractor_shared",
-        "graph_contractor_building_shared",
-        # FEC + litigation
-        "graph_fec_contributions", "graph_litigation_respondents",
-        # Officer misconduct network
-        "graph_officers", "graph_officer_complaints", "graph_officer_shared_command",
-        # COIB pay-to-play network
-        "graph_coib_donors", "graph_coib_policymakers", "graph_coib_donor_edges",
-        # BIC trade waste network
-        "graph_bic_companies", "graph_bic_violation_edges", "graph_bic_shared_bbl",
-        # DOB violations (respondent-named)
-        "graph_dob_respondents", "graph_dob_respondent_bbl",
-    ]
-
-    def _graph_cache_fresh():
-        """Check if Parquet cache exists and is < 24 hours old."""
-        cache = pathlib.Path(GRAPH_CACHE_DIR)
-        if not cache.exists():
-            return False
-        marker = cache / "_built_at.txt"
-        if not marker.exists():
-            return False
-        try:
-            built_ts = float(marker.read_text().strip())
-            age_hours = (time.time() - built_ts) / 3600
-            return age_hours < 24 and all((cache / f"{t}.parquet").exists() for t in GRAPH_TABLES)
-        except (ValueError, OSError):
-            return False
-
-    def _load_graph_from_cache(c):
-        """Load all graph tables from Parquet cache."""
-        for t in GRAPH_TABLES:
-            path = f"{GRAPH_CACHE_DIR}/{t}.parquet"
-            c.execute(f"CREATE OR REPLACE TABLE main.{t} AS SELECT * FROM read_parquet('{path}')")
-
-    def _save_graph_to_cache(c):
-        """Export all graph tables to Parquet for fast restart."""
-        cache = pathlib.Path(GRAPH_CACHE_DIR)
-        cache.mkdir(parents=True, exist_ok=True)
-        for t in GRAPH_TABLES:
-            path = f"{GRAPH_CACHE_DIR}/{t}.parquet"
-            c.execute(f"COPY main.{t} TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-        (cache / "_built_at.txt").write_text(str(time.time()))
 
     # --- Persistent embeddings (hnsw_acorn in DuckDB file on volume) ---
     def _init_emb_db(emb_conn, dims):
@@ -635,9 +577,9 @@ async def app_lifespan(server):
                 pass
 
     try:
-        if _graph_cache_fresh():
+        if graph_cache_fresh():
             print("Loading graph tables from Parquet cache...", flush=True)
-            _load_graph_from_cache(conn)
+            load_graph_from_cache(conn)
             owner_count = conn.execute("SELECT COUNT(*) FROM main.graph_owners").fetchone()[0]
             building_count = conn.execute("SELECT COUNT(*) FROM main.graph_buildings").fetchone()[0]
             violation_count = conn.execute("SELECT COUNT(*) FROM main.graph_violations").fetchone()[0]
@@ -1065,7 +1007,7 @@ async def app_lifespan(server):
                                 COALESCE(lobbyist_name, '') AS lobbyist,
                                 COALESCE(client_name, '') AS client,
                                 COALESCE(government_body, '') AS target
-                            FROM lake.city_government.nys_lobbyist
+                            FROM lake.city_government.nys_lobbyist_registration
                             WHERE lobbyist_name IS NOT NULL
                         """)
                     except Exception as e:
@@ -1133,7 +1075,7 @@ async def app_lifespan(server):
                                 COALESCE(contributor_state, '') AS state,
                                 COALESCE(contributor_employer, '') AS employer,
                                 COALESCE(contributor_occupation, '') AS occupation
-                            FROM lake.city_government.fec_contributions
+                            FROM lake.federal.fec_contributions
                             WHERE contributor_name IS NOT NULL
                         """)
                     except Exception as e:
@@ -1311,7 +1253,7 @@ async def app_lifespan(server):
 
                     # Save graph to Parquet cache for fast restart
                     try:
-                        _save_graph_to_cache(conn)
+                        save_graph_to_cache(conn)
                         print("Graph tables saved to Parquet cache", flush=True)
                     except Exception as e:
                         print(f"Warning: graph cache save failed: {e}", flush=True)

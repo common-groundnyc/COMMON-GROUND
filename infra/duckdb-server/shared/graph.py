@@ -44,7 +44,7 @@ GRAPH_TABLES = [
 def require_graph(ctx: object) -> None:
     """Raise ToolError if the property graph is not available."""
     if not ctx.lifespan_context.get("graph_ready"):
-        raise ToolError("Property graph unavailable — DuckPGQ extension not loaded.")
+        raise ToolError("Property graph not yet built — startup still in progress or graph build failed.")
 
 
 def graph_cache_fresh() -> bool:

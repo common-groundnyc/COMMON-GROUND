@@ -743,7 +743,6 @@ def _view_story(pool, bbl: str) -> ToolResult:
     borough = p.get("borough") or ""
     zipcode = p.get("zipcode") or ""
     landmark = p.get("landmark")
-    hist_dist = p.get("histdist")
     lot_area = int(float(p.get("lotarea") or 0))
     bldg_area = int(float(p.get("bldgarea") or 0))
     assessed = float(p.get("assesstot") or 0)
@@ -790,8 +789,6 @@ def _view_story(pool, bbl: str) -> ToolResult:
 
     if landmark:
         lines.append(f"  Landmark: {landmark}")
-    if hist_dist:
-        lines.append(f"  Historic district: {hist_dist}")
     if alter1 and alter1 > 1800:
         lines.append(f"  Major alteration: {alter1}")
     if alter2 and alter2 > 1800:

@@ -45,9 +45,9 @@ LIMIT 5
 
 SCHOOL_MATH_SQL = """
 SELECT year, grade, number_tested, mean_scale_score,
-       pct_level_3_and_4, num_level_3_and_4, num_level_3_and_4
+       pct_level_3_and_4, num_level_3_and_4, num_level_4
 FROM lake.education.math_results
-WHERE geographic_division = ? AND report_category = 'School'
+WHERE geographic_subdivision = ? AND report_category = 'School'
   AND grade = 'All Grades'
 ORDER BY year DESC
 LIMIT 5
