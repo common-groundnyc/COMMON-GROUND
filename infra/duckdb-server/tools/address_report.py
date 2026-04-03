@@ -120,6 +120,22 @@ def address_report(
             "felonies": crimes.get("felonies") if crimes else None,
             "shootings_12mo": shootings.get("total") if shootings else None,
         },
+        "danger_signals": {
+            "emergency_repairs": _get(results, "building_emergency_repair").get("total", 0) if _get(results, "building_emergency_repair") else 0,
+            "vacate_orders": bool(_get(results, "building_vacate_hpd").get("vacate_type")) if _get(results, "building_vacate_hpd") else False,
+            "fdny_vacate": bool(_get(results, "building_fdny_vacate").get("vac_date")) if _get(results, "building_fdny_vacate") else False,
+            "oath_hearings": _get(results, "building_oath").get("total", 0) if _get(results, "building_oath") else 0,
+            "e_designation": bool(_get(results, "building_e_designation")) if _get(results, "building_e_designation") else False,
+            "lead_pipes_in_zip": _get(results, "neighborhood_lead_pipes").get("confirmed_lead", 0) if _get(results, "neighborhood_lead_pipes") else 0,
+        },
+        "livability": {
+            "community_gardens": len(_get_all(results, "neighborhood_gardens")),
+            "farmers_markets": len(_get_all(results, "neighborhood_farmers_markets")),
+            "sidewalk_cafes": _get(results, "neighborhood_cafes").get("total", 0) if _get(results, "neighborhood_cafes") else 0,
+            "liquor_licenses": _get(results, "neighborhood_liquor").get("total", 0) if _get(results, "neighborhood_liquor") else 0,
+            "solar_installations": _get(results, "neighborhood_solar").get("installations", 0) if _get(results, "neighborhood_solar") else 0,
+            "restaurant_grades": {r.get("grade", "?"): r.get("cnt", 0) for r in _get_all(results, "neighborhood_restaurants")},
+        },
         "visualization_hint": "Show violations as a ranked bar or percentile gauge. "
                               "Show neighborhood demographics as a summary card. "
                               "Show safety stats as a comparison table.",
