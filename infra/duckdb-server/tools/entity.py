@@ -20,6 +20,7 @@ from pydantic import Field
 from shared.db import execute, safe_query, parallel_queries
 from shared.formatting import format_text_table
 from shared.lance import vector_expand_names, lance_route_entity
+from shared.token_search import token_search
 
 from entity import phonetic_search_sql
 
@@ -375,13 +376,20 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     # Splink probabilistic name resolution
     name_variants = _resolve_name_variants(pool, name)
 
-    # Route via Lance — find which tables actually have this name
+    # Token-based routing — instant lookup of which tables have this name
+    token_matches = token_search(pool, search)
+    token_sources = set(token_matches.keys())
+
+    # Lance as fuzzy fallback (catches misspellings, similar names)
     lance_route = lance_route_entity(ctx, search)
-    routed_sources = lance_route.get("sources", set())
+    lance_sources = lance_route.get("sources", set())
+    lance_matched = set(lance_route.get("matched_names", []))
+
+    # Combine: token sources (exact) + lance sources (fuzzy)
+    routed_sources = token_sources | lance_sources
     use_routing = len(routed_sources) > 0
 
-    lance_matched = set(lance_route.get("matched_names", []))
-    extra_names = extra_names | lance_matched
+    extra_names = vector_expand_names(ctx, search) | lance_matched
 
     def _should_query(source_table: str) -> bool:
         if source_table in _ALWAYS_QUERY:
@@ -613,9 +621,24 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
         queries.append(("camp", camp_sql, camp_params))
     if _should_query("oath_hearings"):
         queries.append(("oath", oath_sql, oath_params))
-    if _should_query("acris_parties"):
+    acris_token_hits = token_matches.get("housing.acris_parties", [])
+    if acris_token_hits and _should_query("acris_parties"):
+        # Use token results — query by exact name match (fast)
+        unique_names = list(set(hit[1] for hit in acris_token_hits))[:50]
+        placeholders = ", ".join(["?"] * len(unique_names))
+        queries.append(("acris", f"""
+            SELECT party_name, party_type, doc_type, amount,
+                   document_date, bbl, street_name, unit
+            FROM lake.foundation.mv_entity_acris
+            WHERE party_name IN ({placeholders})
+            ORDER BY document_date DESC
+            LIMIT 20
+        """, unique_names))
+    elif _should_query("acris_parties"):
+        # Fallback: LIKE scan on MV
         queries.append(("acris", """
-            SELECT party_name, party_type, doc_type, amount, document_date, bbl, street_name, unit
+            SELECT party_name, party_type, doc_type, amount,
+                   document_date, bbl, street_name, unit
             FROM lake.foundation.mv_entity_acris
             WHERE party_name LIKE ?
             ORDER BY document_date DESC
