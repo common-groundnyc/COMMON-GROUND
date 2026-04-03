@@ -1821,12 +1821,8 @@ async def app_lifespan(server):
             except Exception:
                 existing = 0
 
-            # Check if DuckLake has a newer version
+            # Check if DuckLake has a newer version (query via conn, which has lake attached)
             try:
-                lake_count = conn.execute(
-                    "SELECT COUNT(*) FROM lake.foundation.name_tokens"
-                ).fetchone()[0]
-                # Rebuild if empty, or if DuckLake has >1% more distinct routes
                 lake_routes = conn.execute(
                     "SELECT COUNT(DISTINCT token || '|' || source_table) FROM lake.foundation.name_tokens"
                 ).fetchone()[0]
@@ -1838,14 +1834,17 @@ async def app_lifespan(server):
             if needs_rebuild and lake_routes > 0:
                 print(f"Building name_token_routes: {existing:,} local → {lake_routes:,} from DuckLake...", flush=True)
                 t_tok = time.time()
+                # Fetch from DuckLake via conn, insert into local emb_conn
+                route_rows = conn.execute(
+                    "SELECT DISTINCT token, source_table FROM lake.foundation.name_tokens"
+                ).fetchall()
                 emb_conn.execute("DROP TABLE IF EXISTS name_token_routes")
-                emb_conn.execute("""
-                    CREATE TABLE name_token_routes AS
-                    SELECT DISTINCT token, source_table
-                    FROM lake.foundation.name_tokens
-                """)
-                # Note: ART index not needed — DuckDB scans small tables fast,
-                # and the table is typically <5M rows which fits in memory
+                emb_conn.execute(
+                    "CREATE TABLE name_token_routes (token VARCHAR, source_table VARCHAR)"
+                )
+                emb_conn.executemany(
+                    "INSERT INTO name_token_routes VALUES (?, ?)", route_rows
+                )
                 tok_count = emb_conn.execute("SELECT COUNT(*) FROM name_token_routes").fetchone()[0]
                 print(f"name_token_routes: {tok_count:,} routes in {time.time() - t_tok:.1f}s", flush=True)
             elif existing > 0:
