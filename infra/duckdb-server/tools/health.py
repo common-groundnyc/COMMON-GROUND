@@ -17,7 +17,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
-from shared.db import execute, safe_query
+from shared.db import execute, safe_query, parallel_queries
 from shared.formatting import make_result, format_text_table
 from shared.types import MAX_LLM_ROWS, ZIP_PATTERN, COORDS_PATTERN
 
@@ -320,46 +320,50 @@ def _view_full(pool: object, zipcode: str, location: str) -> ToolResult:
     t0 = time.time()
     sections = []
 
-    # CDC PLACES by ZIP
-    cdc_cols, cdc_rows = safe_query(pool, CDC_PLACES_SQL, [zipcode])
+    results = parallel_queries(pool, [
+        ("cdc_zip",    CDC_PLACES_SQL,             [zipcode]),
+        ("cdc_name",   CDC_PLACES_BY_NAME_SQL,      [location]),
+        ("hiv",        HIV_AIDS_ANNUAL_SQL,          [location, location]),
+        ("deaths",     LEADING_CAUSES_SQL,           None),
+        ("flu",        ED_FLU_SQL,                   [zipcode]),
+        ("sparcs2024", SPARCS_DISCHARGES_SQL.format(year="2024"), [zipcode]),
+        ("sparcs2023", SPARCS_DISCHARGES_SQL.format(year="2023"), [zipcode]),
+        ("sparcs2022", SPARCS_DISCHARGES_SQL.format(year="2022"), [zipcode]),
+        ("chs",        COMMUNITY_HEALTH_SURVEY_SQL,  [location, location]),
+        ("pregnancy",  PREGNANCY_MORTALITY_SQL,      None),
+    ])
+
+    # CDC PLACES — prefer ZIP match, fall back to name
+    cdc_cols, cdc_rows = results["cdc_zip"]
     if not cdc_rows:
-        # Fallback: try by location name
-        cdc_cols, cdc_rows = safe_query(pool, CDC_PLACES_BY_NAME_SQL, [location])
+        cdc_cols, cdc_rows = results["cdc_name"]
     if cdc_rows:
         sections.append("### CDC PLACES Health Metrics\n" + format_text_table(cdc_cols, cdc_rows))
 
-    # HIV/AIDS
-    hiv_cols, hiv_rows = safe_query(pool, HIV_AIDS_ANNUAL_SQL, [location, location])
+    hiv_cols, hiv_rows = results["hiv"]
     if hiv_rows:
         sections.append("### HIV/AIDS Diagnoses\n" + format_text_table(hiv_cols, hiv_rows))
 
-    # Leading causes of death (citywide)
-    death_cols, death_rows = safe_query(pool, LEADING_CAUSES_SQL)
+    death_cols, death_rows = results["deaths"]
     if death_rows:
         sections.append("### Leading Causes of Death (Citywide)\n" + format_text_table(death_cols, death_rows))
 
-    # ED flu visits
-    flu_cols, flu_rows = safe_query(pool, ED_FLU_SQL, [zipcode])
+    flu_cols, flu_rows = results["flu"]
     if flu_rows:
         sections.append("### Emergency Dept Flu/Respiratory Visits\n" + format_text_table(flu_cols, flu_rows))
 
-    # SPARCS discharges — try most recent year first
-    for year in ["2024", "2023", "2022"]:
-        sparcs_sql = SPARCS_DISCHARGES_SQL.format(year=year)
-        sparcs_cols, sparcs_rows = safe_query(pool, sparcs_sql, [zipcode])
+    # SPARCS — use most recent year that has data
+    for year, key in [("2024", "sparcs2024"), ("2023", "sparcs2023"), ("2022", "sparcs2022")]:
+        sparcs_cols, sparcs_rows = results[key]
         if sparcs_rows:
-            sections.append(
-                f"### Hospital Discharges ({year})\n" + format_text_table(sparcs_cols, sparcs_rows)
-            )
+            sections.append(f"### Hospital Discharges ({year})\n" + format_text_table(sparcs_cols, sparcs_rows))
             break
 
-    # Community health survey
-    chs_cols, chs_rows = safe_query(pool, COMMUNITY_HEALTH_SURVEY_SQL, [location, location])
+    chs_cols, chs_rows = results["chs"]
     if chs_rows:
         sections.append("### Community Health Survey\n" + format_text_table(chs_cols, chs_rows))
 
-    # Pregnancy mortality (citywide)
-    preg_cols, preg_rows = safe_query(pool, PREGNANCY_MORTALITY_SQL)
+    preg_cols, preg_rows = results["pregnancy"]
     if preg_rows:
         sections.append("### Pregnancy-Related Mortality (Citywide)\n" + format_text_table(preg_cols, preg_rows))
 

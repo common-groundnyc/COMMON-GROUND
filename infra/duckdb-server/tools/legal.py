@@ -10,6 +10,7 @@ Views:
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Annotated, Literal
 
 from fastmcp import Context
@@ -17,7 +18,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
-from shared.db import safe_query
+from shared.db import safe_query, parallel_queries
 from shared.formatting import make_result, format_text_table
 from shared.types import MAX_LLM_ROWS
 
@@ -345,12 +346,17 @@ def _view_claims(pool, query: str) -> tuple[list, dict]:
 
 
 def _view_full(pool, query: str) -> tuple[list, dict]:
-    """All legal proceedings — union of all views."""
+    """All legal proceedings — union of all views, run in parallel."""
+    view_fns = (_view_litigation, _view_settlements, _view_hearings, _view_inmates, _view_claims)
+
+    with ThreadPoolExecutor(max_workers=len(view_fns)) as ex:
+        futures = {ex.submit(fn, pool, query): fn for fn in view_fns}
+        ordered = {fn: fut for fut, fn in futures.items()}
+
     all_sections = []
     all_structured = {}
-
-    for view_fn in (_view_litigation, _view_settlements, _view_hearings, _view_inmates, _view_claims):
-        sections, structured = view_fn(pool, query)
+    for fn in view_fns:
+        sections, structured = ordered[fn].result()
         all_sections.extend(sections)
         all_structured.update(structured)
 

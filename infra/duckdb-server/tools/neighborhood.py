@@ -20,7 +20,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
-from shared.db import execute, safe_query
+from shared.db import execute, safe_query, parallel_queries
 from shared.formatting import make_result, format_text_table
 from shared.types import MAX_LLM_ROWS, ZIP_PATTERN, COORDS_PATTERN
 
@@ -709,9 +709,20 @@ def _view_portrait(pool, zipcode: str) -> ToolResult:
         "=" * 60,
     ]
 
-    # --- Cuisine fingerprint ---
-    cols_c, rows_c = safe_query(pool, PORTRAIT_CUISINE_SQL, [zipcode])
-    cols_city, rows_city = safe_query(pool, PORTRAIT_CUISINE_CITY_SQL)
+    # Run all independent portrait queries in parallel
+    results = parallel_queries(pool, [
+        ("cuisine",        PORTRAIT_CUISINE_SQL,           [zipcode]),
+        ("cuisine_city",   PORTRAIT_CUISINE_CITY_SQL,      None),
+        ("grades",         PORTRAIT_GRADES_SQL,            [zipcode]),
+        ("buildings",      PORTRAIT_BUILDINGS_SQL,         [zipcode]),
+        ("complaints_311", PORTRAIT_311_SQL,               [zipcode]),
+        ("noise",          PORTRAIT_311_NOISE_SQL,         [zipcode]),
+        ("city_noise",     PORTRAIT_311_CITY_NOISE_SQL,    None),
+        ("biz",            PORTRAIT_BIZ_SQL,               [zipcode]),
+    ])
+
+    cols_c, rows_c = results["cuisine"]
+    cols_city, rows_city = results["cuisine_city"]
     city_totals: dict[str, int] = {}
     city_zips = 200  # approximate number of NYC ZIPs
     if rows_city:
@@ -743,7 +754,7 @@ def _view_portrait(pool, zipcode: str) -> ToolResult:
             lines.append(f"\n  Signature: {standout[0]} — {standout[1]:.1f}x the city average")
 
     # --- Restaurant grades ---
-    cols_g, rows_g = safe_query(pool, PORTRAIT_GRADES_SQL, [zipcode])
+    cols_g, rows_g = results["grades"]
     if rows_g:
         grades = {dict(zip(cols_g, r))["grade"]: int(dict(zip(cols_g, r))["cnt"]) for r in rows_g}
         total_graded = sum(grades.values())
@@ -755,7 +766,7 @@ def _view_portrait(pool, zipcode: str) -> ToolResult:
                 lines.append(f"    {g}: {grades[g]}")
 
     # --- Building stock ---
-    cols_b, rows_b = safe_query(pool, PORTRAIT_BUILDINGS_SQL, [zipcode])
+    cols_b, rows_b = results["buildings"]
     if rows_b:
         b = dict(zip(cols_b, rows_b[0]))
         total_bldg = int(b.get("total") or 0)
@@ -777,7 +788,7 @@ def _view_portrait(pool, zipcode: str) -> ToolResult:
             lines.append(f"  In historic district: {hist_ct}")
 
     # --- 311 character ---
-    cols_311, rows_311 = safe_query(pool, PORTRAIT_311_SQL, [zipcode])
+    cols_311, rows_311 = results["complaints_311"]
     if rows_311:
         lines.append("\n311 CHARACTER (since 2020)")
         for row in rows_311[:8]:
@@ -786,8 +797,8 @@ def _view_portrait(pool, zipcode: str) -> ToolResult:
             lines.append(f"  {r.get('complaint_type')}: {cnt:,}")
 
     # Noise comparison
-    cols_noise, rows_noise = safe_query(pool, PORTRAIT_311_NOISE_SQL, [zipcode])
-    cols_cn, rows_cn = safe_query(pool, PORTRAIT_311_CITY_NOISE_SQL)
+    cols_noise, rows_noise = results["noise"]
+    cols_cn, rows_cn = results["city_noise"]
     if rows_noise and rows_cn:
         local_noise = int(dict(zip(cols_noise, rows_noise[0])).get("noise_total") or 0)
         city_avg_noise = float(dict(zip(cols_cn, rows_cn[0])).get("avg_noise_per_zip") or 1)
@@ -801,7 +812,7 @@ def _view_portrait(pool, zipcode: str) -> ToolResult:
                 lines.append("\n  Noise level: about average for NYC")
 
     # --- Business mix ---
-    cols_biz, rows_biz = safe_query(pool, PORTRAIT_BIZ_SQL, [zipcode])
+    cols_biz, rows_biz = results["biz"]
     if rows_biz:
         lines.append("\nBUSINESS MIX (active licenses)")
         for row in rows_biz[:6]:

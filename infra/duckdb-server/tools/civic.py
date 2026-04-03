@@ -8,7 +8,7 @@ from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
 from fastmcp.exceptions import ToolError
 
-from shared.db import safe_query
+from shared.db import safe_query, parallel_queries
 from shared.formatting import format_text_table
 from shared.types import MAX_LLM_ROWS
 
@@ -258,14 +258,15 @@ _VIEW_DISPATCH = {
 
 
 def _run_queries(pool: object, q: str, queries: list[tuple[str, str, int]]) -> list[tuple[str, list, list]]:
-    """Run a list of (label, sql, param_count) queries, return [(label, cols, rows)]."""
-    results = []
-    for label, sql, param_count in queries:
-        params = [q] * param_count
-        cols, rows = safe_query(pool, sql, params)
-        if rows:
-            results.append((label, cols, rows))
-    return results
+    """Run a list of (label, sql, param_count) queries in parallel, return [(label, cols, rows)]."""
+    pq_input = [(label, sql, [q] * param_count) for label, sql, param_count in queries]
+    raw = parallel_queries(pool, pq_input)
+    # Preserve original order, drop empty results
+    return [
+        (label, raw[label][0], raw[label][1])
+        for label, _, _ in queries
+        if raw[label][1]
+    ]
 
 
 def _build_result(query: str, view: str, sections: list[tuple[str, list, list]], elapsed: float) -> ToolResult:
