@@ -49,6 +49,17 @@ def _write(conn, table_name: str, arrow_table: pa.Table | None,
 # NOTE: contest codes scraped from vote.nyc/page/election-results-summary-{year}
 # The URL spaces are unencoded — vote.nyc serves both encoded and unencoded
 VOTE_NYC_CONTESTS = [
+    # 2025 General — Mayor, Public Advocate, Comptroller
+    ("2025", "20251104General Election",
+     "00000100000Citywide Mayor Citywide",
+     "Mayor 2025", "election_2025_mayor"),
+    ("2025", "20251104General Election",
+     "00000200000Citywide Public Advocate Citywide",
+     "Public Advocate 2025", "election_2025_public_advocate"),
+    ("2025", "20251104General Election",
+     "00000300000Citywide City Comptroller Citywide",
+     "Comptroller 2025", "election_2025_comptroller"),
+
     # 2024 General
     ("2024", "20241105General Election",
      "00000100000Citywide President Vice President Citywide",
