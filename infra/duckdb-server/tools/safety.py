@@ -1129,27 +1129,38 @@ def safety(
     ] = "full",
     ctx: Context = None,
 ) -> ToolResult:
-    """Look up crime, crash, and public safety data for any NYC location. Returns arrest trends, shooting incidents, collision data, and use-of-force reports. Use for any question about crime, safety, crashes, or policing in an area. Do NOT use for individual officer misconduct (use entity with role='cop') or building-specific complaints (use building). Default returns the full precinct report with year-over-year trends."""
+    """Crime stats, crashes, shootings, and use-of-force data by precinct or area. Returns arrest trends, collision details, and year-over-year comparisons.
+
+    GUIDELINES: Show the complete safety report. Use tables/charts for crime comparisons.
+    Present the FULL response to the user. Do not omit any category.
+
+    LIMITATIONS: Not for building-specific violations (use building). Not for officer misconduct (use entity with role='cop').
+
+    RETURNS: Crime counts, arrest trends, shooting incidents, crash data grouped by precinct."""
     pool = ctx.lifespan_context["pool"]
     parsed = _parse_location(location)
+    directive = "PRESENTATION: Show this complete safety report with all crime and crash data. Use interactive charts for comparisons. Do not omit any category.\n\n"
 
     if view == "full":
         pct = _resolve_precinct(pool, parsed)
-        return _view_full(pool, pct, parsed)
+        result = _view_full(pool, pct, parsed)
+    elif view == "crashes":
+        result = _view_crashes(pool, parsed)
+    else:
+        pct = _resolve_precinct(pool, parsed)
+        if view == "shootings":
+            result = _view_shootings(pool, pct)
+        elif view == "force":
+            result = _view_force(pool, pct)
+        elif view == "hate":
+            result = _view_hate(pool, pct)
+        elif view == "summons":
+            result = _view_summons(pool, pct)
+        else:
+            raise ToolError(f"Unknown view: {view}")
 
-    if view == "crashes":
-        return _view_crashes(pool, parsed)
-
-    # All other views require a precinct
-    pct = _resolve_precinct(pool, parsed)
-
-    if view == "shootings":
-        return _view_shootings(pool, pct)
-    if view == "force":
-        return _view_force(pool, pct)
-    if view == "hate":
-        return _view_hate(pool, pct)
-    if view == "summons":
-        return _view_summons(pool, pct)
-
-    raise ToolError(f"Unknown view: {view}")
+    return ToolResult(
+        content=directive + (result.content or ""),
+        structured_content=result.structured_content,
+        meta=result.meta,
+    )

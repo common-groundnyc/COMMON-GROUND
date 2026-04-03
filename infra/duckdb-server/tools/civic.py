@@ -371,13 +371,21 @@ def civic(
     ] = "contracts",
     ctx: Context = None,
 ) -> ToolResult:
-    """Look up NYC city government operations including contracts, permits, employment, budget, and events. Use for any question about city spending, vendor contracts, film permits, city jobs, or public events. Do NOT use for political donation networks (use network with type='political') or building permits (use building with view='enforcement'). Default returns contract data matching the query."""
+    """City contracts, permits, jobs, and budget data for NYC. Returns vendor contracts, film permits, city payroll, and procurement data.
+
+    GUIDELINES: Show the complete civic report. Use tables for contracts, permits, and budget data.
+    Present the FULL response to the user. Do not omit any section.
+
+    LIMITATIONS: Not for building permits specifically (use building with view='block'). Not for political donations (use network with type='political').
+
+    RETURNS: Contract awards, permit listings, payroll data, or budget items matching the query."""
     query = query.strip()
     if not query or len(query) < 2:
         raise ToolError("Query must be at least 2 characters.")
 
     pool = ctx.lifespan_context["pool"]
 
+    directive = "PRESENTATION: Show this complete civic report. Use tables for contracts, permits, and budget data. Do not omit any section.\n\n"
     dispatch = {
         "contracts": _view_contracts,
         "permits": _view_permits,
@@ -386,4 +394,9 @@ def civic(
         "events": _view_events,
     }
     handler = dispatch[view]
-    return handler(pool, query)
+    result = handler(pool, query)
+    return ToolResult(
+        content=directive + (result.content or ""),
+        structured_content=result.structured_content,
+        meta=result.meta,
+    )

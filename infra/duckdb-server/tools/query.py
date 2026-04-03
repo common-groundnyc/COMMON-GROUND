@@ -487,12 +487,20 @@ def query(
     ] = "text",
     ctx: Context = None,
 ) -> ToolResult:
-    """Execute SQL queries, discover schemas, search the catalog, and export data from the NYC data lake. 294 tables across 14 schemas. Use mode='nl' for natural language questions (e.g., 'how many violations in Brooklyn?'). Use mode='sql' for raw SQL."""
+    """Custom SQL queries, table exploration, and data export from the NYC data lake. 294 tables across 14 schemas.
+
+    GUIDELINES: Show complete query results as interactive table. All rows, all columns.
+    Present the FULL response to the user. Do not summarize SQL results.
+
+    LIMITATIONS: Read-only. No INSERT/UPDATE/DELETE. Max rows enforced server-side.
+
+    RETURNS: Query results as table, or schema/catalog metadata depending on mode."""
     pool = ctx.lifespan_context["pool"]
     catalog = ctx.lifespan_context.get("catalog", {})
+    directive = "PRESENTATION: Show the complete query results as an interactive table. All rows, all columns. Do not summarize SQL results.\n\n"
 
     if mode == "sql":
-        return _sql(pool, input, format, ctx)
+        result = _sql(pool, input, format, ctx)
     elif mode == "nl":
         from tools.nl_query import nl_query
         emb_conn = ctx.lifespan_context.get("emb_conn")
@@ -507,19 +515,25 @@ def query(
             raise ToolError("Embeddings not available. NL query requires the embedding pipeline.")
         if not api_key:
             raise ToolError("No Gemini API key available for NL query generation.")
-        return nl_query(input, pool, emb_conn, embed_fn, api_key, format, ctx=ctx)
+        result = nl_query(input, pool, emb_conn, embed_fn, api_key, format, ctx=ctx)
     elif mode == "admin":
-        return _admin(pool, input, ctx)
+        result = _admin(pool, input, ctx)
     elif mode == "catalog":
         embed_fn = ctx.lifespan_context.get("embed_fn")
-        return _catalog(pool, input, catalog, embed_fn, ctx=ctx)
+        result = _catalog(pool, input, catalog, embed_fn, ctx=ctx)
     elif mode == "schemas":
-        return _schemas(catalog)
+        result = _schemas(catalog)
     elif mode == "tables":
-        return _tables(pool, input, catalog)
+        result = _tables(pool, input, catalog)
     elif mode == "describe":
-        return _describe(pool, input, catalog)
+        result = _describe(pool, input, catalog)
     elif mode == "health":
-        return _health(pool, input if input.strip() else None)
+        result = _health(pool, input if input.strip() else None)
     else:
         raise ToolError(f"Unknown mode '{mode}'. Use: sql, nl, catalog, schemas, tables, describe, health, admin.")
+
+    return ToolResult(
+        content=directive + (result.content or ""),
+        structured_content=result.structured_content,
+        meta=result.meta,
+    )

@@ -809,32 +809,40 @@ def school(
     )],
     ctx: Context = None,
 ) -> ToolResult:
-    """Look up NYC public schools by name, DBN, ZIP code, or district number. Returns test scores, chronic absenteeism, class size, and survey results. Auto-detects input type: DBN gives a full report, ZIP searches nearby schools, district number gives an aggregate, multiple DBNs compare side-by-side. Do NOT use for neighborhood-level analysis (use neighborhood) or person lookups (use entity)."""
+    """Look up NYC public school profiles, test scores, and demographics by name, DBN, ZIP, or district. Returns ELA/math scores, absenteeism, class size, and survey results.
+
+    GUIDELINES: Show complete school profile with all test scores and demographics. Use tables for score breakdowns.
+    Present the FULL response to the user. Do not omit any metric.
+
+    LIMITATIONS: Not for neighborhood-level education stats (use neighborhood).
+
+    RETURNS: School profile with test scores, demographics, attendance, and quality ratings."""
     query = query.strip()
     if not query or len(query) < 1:
         raise ToolError("Query must not be empty.")
 
     pool = ctx.lifespan_context["pool"]
+    directive = "PRESENTATION: Show the complete school profile with test scores and demographics. Use tables for score breakdowns. Do not omit any metric.\n\n"
 
     # Multiple DBNs → compare
     if "," in query:
         dbns = [d.strip() for d in query.split(",") if d.strip()]
-        return _compare(pool, dbns)
+        result = _compare(pool, dbns)
+    elif _DBN_PATTERN.match(query):
+        result = _report(pool, query.upper())
+    elif _ZIP_PATTERN.match(query):
+        result = _search_by_zip(pool, query)
+    else:
+        m = _DISTRICT_PATTERN.match(query)
+        if m:
+            result = _district(pool, m.group(1))
+        else:
+            if len(query) < 2:
+                raise ToolError("Search query must be at least 2 characters.")
+            result = _search_by_name(pool, query)
 
-    # Single DBN → report
-    if _DBN_PATTERN.match(query):
-        return _report(pool, query.upper())
-
-    # ZIP code → search by zip
-    if _ZIP_PATTERN.match(query):
-        return _search_by_zip(pool, query)
-
-    # District number → district report
-    m = _DISTRICT_PATTERN.match(query)
-    if m:
-        return _district(pool, m.group(1))
-
-    # Fallback → name search
-    if len(query) < 2:
-        raise ToolError("Search query must be at least 2 characters.")
-    return _search_by_name(pool, query)
+    return ToolResult(
+        content=directive + (result.content or ""),
+        structured_content=result.structured_content,
+        meta=result.meta,
+    )

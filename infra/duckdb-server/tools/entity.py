@@ -1860,7 +1860,14 @@ def entity(
     ] = "auto",
     ctx: Context = None,
 ) -> ToolResult:
-    """Look up any person or company across all NYC datasets. Lance vector index resolves identity across 44 tables. Returns every dataset hit, corporate ties, property records, and donations. Use for any question about a specific person, company, landlord, or organization. Do NOT use for building lookups by address (use building) or relationship traversal (use network). Default returns the full cross-reference across all datasets."""
+    """Find any person, company, cop, or judge across all NYC datasets. Returns every dataset appearance with source attribution.
+
+    GUIDELINES: Present ALL matches in a table. Each row is a distinct data source. Do not summarize.
+    Present the FULL response to the user. Use interactive tables for entity matches.
+
+    LIMITATIONS: Not for addresses (use building), not for neighborhood stats (use neighborhood).
+
+    RETURNS: Cross-referenced entity hits from up to 44 tables, grouped by source."""
     name = name.strip()
     if len(name) < 3:
         raise ToolError("Name must be at least 3 characters.")
@@ -1877,4 +1884,10 @@ def entity(
     }
 
     handler = dispatch[role]
-    return handler(name, pool, ctx)
+    result = handler(name, pool, ctx)
+    directive = "PRESENTATION: Show all entity matches in a table. Each row is a distinct data source appearance. Do not summarize — show every match with source attribution.\n\n"
+    return ToolResult(
+        content=directive + (result.content or ""),
+        structured_content=result.structured_content,
+        meta=result.meta,
+    )

@@ -398,7 +398,14 @@ def legal(
     ] = "full",
     ctx: Context = None,
 ) -> ToolResult:
-    """Search NYC legal proceedings, court records, and city settlements. Returns litigation, OATH hearings, settlement payments, and claims against the city. Use for any question about lawsuits, court cases, administrative hearings, or city payouts. Do NOT use for individual person background checks (use entity with role='background') or police misconduct records (use entity with role='cop'). Default returns all legal proceedings matching the query."""
+    """Court cases, settlements, and administrative hearings in NYC. Returns litigation, OATH hearings, settlement payments, and claims against the city.
+
+    GUIDELINES: Show all legal records in full. Use tables for case listings.
+    Present the FULL response to the user. Do not summarize court data.
+
+    LIMITATIONS: Not for building violations (use building). Not for person search (use entity).
+
+    RETURNS: Case listings with parties, dates, outcomes, and payment amounts."""
     t0 = time.perf_counter()
 
     if not query or len(query.strip()) < 2:
@@ -409,7 +416,10 @@ def legal(
     sections, structured = dispatch_fn(pool, query)
 
     # Build text output from sections
-    lines = [f"## Legal proceedings for '{query}' (view={view})"]
+    lines = [
+        "PRESENTATION: Show all legal records in full. Use tables for case listings. Do not summarize court data.\n",
+        f"## Legal proceedings for '{query}' (view={view})",
+    ]
     total_rows = 0
 
     for label, cols, rows in sections:

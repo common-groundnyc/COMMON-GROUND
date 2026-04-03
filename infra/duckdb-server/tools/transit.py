@@ -624,7 +624,14 @@ def transit(
     ] = "full",
     ctx: Context = None,
 ) -> ToolResult:
-    """Look up transportation data for any NYC location. Returns parking violations, MTA ridership, traffic volumes, and infrastructure condition. Use for any question about parking tickets, subway ridership, traffic patterns, or street conditions. Do NOT use for motor vehicle crashes (use safety with view='crashes') or building-level data (use building). Default returns the full transportation overview for the area."""
+    """Parking tickets, MTA ridership, traffic volume, and street infrastructure for any NYC location. Returns violation counts, ridership trends, and infrastructure condition.
+
+    GUIDELINES: Show the complete transit report. Use tables for ticket data and ridership stats.
+    Present the FULL response to the user. Do not omit any section.
+
+    LIMITATIONS: Not for crash data (use safety). Not for building-level data (use building).
+
+    RETURNS: Parking violations, ridership trends, traffic volumes, and infrastructure data."""
     pool = ctx.lifespan_context["pool"]
 
     loc = _parse_location(location)
@@ -635,4 +642,10 @@ def transit(
             f"Unknown view '{view}'. Choose from: full, parking, ridership, traffic, infrastructure"
         )
 
-    return handler(pool, loc)
+    directive = "PRESENTATION: Show this complete transit report. Use tables for ticket data and ridership stats. Do not omit any section.\n\n"
+    result = handler(pool, loc)
+    return ToolResult(
+        content=directive + (result.content or ""),
+        structured_content=result.structured_content,
+        meta=result.meta,
+    )

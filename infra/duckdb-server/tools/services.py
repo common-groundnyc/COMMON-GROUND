@@ -659,10 +659,23 @@ def services(
     )] = "",
     ctx: Context = None,
 ) -> ToolResult:
-    """Find social services near any NYC location including childcare, food assistance, shelters, benefits, legal aid, and community resources. Use for any question about where to get help, find services, or access community resources. Do NOT use for health facilities (use health with view='facilities') or school programs (use school). Default returns all available services near the location."""
+    """Childcare, shelters, food pantries, and community services near any NYC location. Returns program listings with addresses, phone numbers, and eligibility.
+
+    GUIDELINES: Show all services data with locations and details. Use tables for service listings.
+    Present the FULL response to the user. Do not omit any entry.
+
+    LIMITATIONS: Not for school info (use school). Not for health facilities (use health).
+
+    RETURNS: Service listings grouped by category with contact info and addresses."""
     pool = ctx.lifespan_context["pool"]
     zipcode = _extract_zip(location)
     need_clean = need.strip()
 
+    directive = "PRESENTATION: Show all services data with locations and details. Use tables for service listings. Do not omit any entry.\n\n"
     handler = _VIEW_DISPATCH[view]
-    return handler(pool, zipcode, need_clean)
+    result = handler(pool, zipcode, need_clean)
+    return ToolResult(
+        content=directive + (result.content or ""),
+        structured_content=result.structured_content,
+        meta=result.meta,
+    )

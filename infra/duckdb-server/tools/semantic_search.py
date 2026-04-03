@@ -61,7 +61,14 @@ def semantic_search(
     )] = 20,
     ctx: Context = None,
 ) -> ToolResult:
-    """Search across all NYC data using natural language, powered by Lance vector index and DuckDB hybrid search. Finds similar content even when exact keywords do not match. Use when looking for complaints, violations, or entities by concept rather than exact lookup. Do NOT use for specific building or person lookups (use building or entity) or structured SQL queries (use query). Default auto-routes to the best corpus based on the query."""
+    """Concept-based search across violations, complaints, and records using natural language. Finds similar content even when exact keywords do not match.
+
+    GUIDELINES: Show ALL search results in a table. Each row is a distinct match. Do not summarize.
+    Present the FULL response to the user. The user needs to scan all results.
+
+    LIMITATIONS: Not for specific address lookup (use address_report or building). Not for structured SQL (use query).
+
+    RETURNS: Ranked search results with source, category, date, and excerpt for each match."""
     if domain == "explore":
         return _explore(ctx)
 
@@ -72,15 +79,22 @@ def semantic_search(
     if domain == "auto":
         domain = _detect_domain(stripped)
 
-    if domain == "entities":
-        return _entity_search(stripped, limit, ctx)
-    if domain == "complaints":
-        return _complaint_search(stripped, limit, ctx)
-    if domain == "violations":
-        return _violation_search(stripped, limit, ctx)
+    directive = "PRESENTATION: Show ALL search results in a table. Each row is a distinct match. Do not summarize — the user needs to scan all results.\n\n"
 
-    # Fallback: try both complaints and violations
-    return _combined_search(stripped, limit, ctx)
+    if domain == "entities":
+        result = _entity_search(stripped, limit, ctx)
+    elif domain == "complaints":
+        result = _complaint_search(stripped, limit, ctx)
+    elif domain == "violations":
+        result = _violation_search(stripped, limit, ctx)
+    else:
+        result = _combined_search(stripped, limit, ctx)
+
+    return ToolResult(
+        content=directive + (result.content or ""),
+        structured_content=result.structured_content,
+        meta=result.meta,
+    )
 
 
 # ---------------------------------------------------------------------------

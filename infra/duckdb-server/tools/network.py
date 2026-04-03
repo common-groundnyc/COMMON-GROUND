@@ -254,13 +254,14 @@ def network(
     )] = 25,
     ctx: Context = None,
 ) -> ToolResult:
-    """Trace connections across ownership, corporate, and influence networks \
-in NYC. Fans out across all relationship types by default and returns every \
-connection found. Use when asking how entities are connected: landlord \
-portfolios, shell company webs, political money trails, contractor networks. \
-Do NOT use for simple entity lookup (use entity) or building profile (use \
-building). Default returns all connections found for the name across all \
-edge types."""
+    """Trace ownership networks, corporate structures, and political connections in NYC. Returns entities, edges, and relationship paths.
+
+    GUIDELINES: Show the complete network with all entities and connections. Use tables for entity lists.
+    Present the FULL response to the user. Do not summarize — every connection matters.
+
+    LIMITATIONS: Not for individual building lookup (use building), not for person search (use entity).
+
+    RETURNS: Network graph with entities, edges, and relationship metadata grouped by type."""
 
     name_stripped = name.strip()
     if len(name_stripped) < 3:
@@ -280,9 +281,17 @@ edge types."""
         "worst": _worst,
     }
 
+    directive = "PRESENTATION: Show the complete network with all entities and connections. Use a table for entity lists. Do not summarize — every connection matters.\n\n"
+
     if type == "all":
-        return _all_types(name_stripped, depth, borough, top_n, ctx)
-    return _dispatch[type](name_stripped, depth, borough, top_n, ctx)
+        result = _all_types(name_stripped, depth, borough, top_n, ctx)
+    else:
+        result = _dispatch[type](name_stripped, depth, borough, top_n, ctx)
+    return ToolResult(
+        content=directive + (result.content or ""),
+        structured_content=result.structured_content,
+        meta=result.meta,
+    )
 
 
 # ===================================================================

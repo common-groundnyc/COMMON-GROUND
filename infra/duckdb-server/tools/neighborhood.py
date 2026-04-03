@@ -855,9 +855,10 @@ def _view_full(pool, zipcode: str) -> ToolResult:
     portrait = _view_portrait(pool, zipcode)
     complaints = _view_complaints(pool, zipcode)
 
+    directive = "PRESENTATION: Show this complete neighborhood profile. Use interactive charts for demographic data and trend comparisons. Do not omit any section.\n\n"
     p_text = portrait.content if isinstance(portrait.content, str) else "\n".join(str(c) for c in portrait.content)
     c_text = complaints.content if isinstance(complaints.content, str) else "\n".join(str(c) for c in complaints.content)
-    merged_text = p_text + "\n\n" + c_text
+    merged_text = directive + p_text + "\n\n" + c_text
     merged_structured = {
         **(portrait.structured_content or {}),
         "complaints": complaints.structured_content,
@@ -1717,7 +1718,14 @@ def neighborhood(
     )] = 500,
     ctx: Context = None,
 ) -> ToolResult:
-    """Explore any NYC neighborhood by ZIP code or coordinates. Returns demographics, safety, climate risk, complaints, and local services. Use for any area-level question about quality of life, comparisons, gentrification, or restaurant searches. Do NOT use for specific building questions (use building) or person lookups (use entity). Default returns the full neighborhood portrait with demographics and environment."""
+    """Neighborhood demographics, trends, and comparisons by ZIP code or coordinates. Returns population, income, safety, climate risk, complaints, and local services.
+
+    GUIDELINES: Present the FULL neighborhood profile. Use interactive charts for demographics and comparisons.
+    Do not omit any section. Present the complete response to the user.
+
+    LIMITATIONS: Not for specific buildings (use building), not for person lookups (use entity).
+
+    RETURNS: Demographics, environment, complaints, and services for the requested area."""
     pool = ctx.lifespan_context["pool"]
     location = location.strip()
 
