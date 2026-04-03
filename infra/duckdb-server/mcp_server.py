@@ -212,9 +212,9 @@ async def app_lifespan(server):
     pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
     conn.execute(f"""
         ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-        AS lake (METADATA_SCHEMA 'lake')
+        AS lake (DATA_PATH '/data/common-ground/ducklake/data/', OVERRIDE_DATA_PATH true, METADATA_SCHEMA 'lake')
     """)
-    print("DuckLake catalog attached", flush=True)
+    print("DuckLake catalog attached (local filesystem, bypassing S3)", flush=True)
 
     # Warm up: first query triggers compactor which may crash on orphaned snapshots.
     # If it does, close and reconnect — the second attach skips the compactor.
@@ -245,9 +245,9 @@ async def app_lifespan(server):
         conn.execute("SET default_collation = 'NOCASE'")
         conn.execute(f"""
             ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-            AS lake (METADATA_SCHEMA 'lake')
+            AS lake (DATA_PATH '/data/common-ground/ducklake/data/', OVERRIDE_DATA_PATH true, METADATA_SCHEMA 'lake')
         """)
-        print("DuckLake reconnected after warm-up failure", flush=True)
+        print("DuckLake reconnected after warm-up failure (local filesystem)", flush=True)
     # Note: enable_compaction option removed in DuckLake 1.5.1 — compaction runs automatically
 
     # DuckLake catalog options (persistent in Postgres, idempotent)
