@@ -46,45 +46,59 @@ def _write(conn, table_name: str, arrow_table: pa.Table | None,
 # ═══════════════════════════════════════════════════════════════════
 
 # Each tuple: (year, date+type URL segment, contest code, office description, table_name)
+# NOTE: contest codes scraped from vote.nyc/page/election-results-summary-{year}
+# The URL spaces are unencoded — vote.nyc serves both encoded and unencoded
 VOTE_NYC_CONTESTS = [
-    # 2024 General — President, Senate, Congress
-    ("2024", "20241105General%20Election",
-     "00000100000Citywide%20President%20Vice%20President%20Citywide",
+    # 2024 General
+    ("2024", "20241105General Election",
+     "00000100000Citywide President Vice President Citywide",
      "President 2024", "election_2024_president"),
-    ("2024", "20241105General%20Election",
-     "00000500000Citywide%20United%20States%20Senator%20Citywide",
+    ("2024", "20241105General Election",
+     "00000800000Citywide United States Senator Citywide",
      "US Senate 2024", "election_2024_us_senate"),
 
-    # 2022 General — Governor, Congress
-    ("2022", "20221108General%20Election",
-     "00000100000Citywide%20Governor%20Lieutenant%20Governor%20Citywide",
+    # 2022 General
+    ("2022", "20221108General Election",
+     "00000200000Citywide Governor Lieutenant Governor Citywide",
      "Governor 2022", "election_2022_governor"),
+    ("2022", "20221108General Election",
+     "00000700000Citywide United States Senator Citywide",
+     "US Senate 2022", "election_2022_us_senate"),
 
-    # 2021 General — Mayor, Comptroller, Public Advocate
-    ("2021", "20211102General%20Election",
-     "00000200000Citywide%20Mayor%20Citywide",
+    # 2021 General
+    ("2021", "20211102General Election",
+     "00000200000Citywide Mayor Citywide",
      "Mayor 2021", "election_2021_mayor"),
-    ("2021", "20211102General%20Election",
-     "00000300000Citywide%20Comptroller%20Citywide",
-     "Comptroller 2021", "election_2021_comptroller"),
-    ("2021", "20211102General%20Election",
-     "00000400000Citywide%20Public%20Advocate%20Citywide",
+    ("2021", "20211102General Election",
+     "00000300000Citywide Public Advocate Citywide",
      "Public Advocate 2021", "election_2021_public_advocate"),
+    ("2021", "20211102General Election",
+     "00000400000Citywide City Comptroller Citywide",
+     "Comptroller 2021", "election_2021_comptroller"),
 
-    # 2020 General — President
+    # 2020 General
     ("2020", "20201103General%20Election",
      "00000100000Citywide%20President%20Vice%20President%20Citywide",
      "President 2020", "election_2020_president"),
 
-    # 2017 General — Mayor
+    # 2017 General
     ("2017", "20171107General%20Election",
-     "00000200000Citywide%20Mayor%20Citywide",
+     "00001100000Citywide%20Mayor%20Citywide",
      "Mayor 2017", "election_2017_mayor"),
+    ("2017", "20171107General%20Election",
+     "00001200000Citywide%20Public%20Advocate%20Citywide",
+     "Public Advocate 2017", "election_2017_public_advocate"),
+    ("2017", "20171107General%20Election",
+     "00001300000Citywide%20City%20Comptroller%20Citywide",
+     "Comptroller 2017", "election_2017_comptroller"),
 
-    # 2016 General — President
+    # 2016 General
     ("2016", "20161108General%20Election",
      "00000100000Citywide%20President%20Vice%20President%20Citywide",
      "President 2016", "election_2016_president"),
+    ("2016", "20161108General%20Election",
+     "00001000000Citywide%20United%20States%20Senator%20Citywide",
+     "US Senate 2016", "election_2016_us_senate"),
 ]
 
 VOTE_NYC_BASE = "https://vote.nyc/sites/default/files/pdf/election_results"
@@ -97,7 +111,12 @@ def _fetch_vote_nyc(year: str, election_segment: str, contest_code: str) -> pa.T
     columns 0-10 are header labels and columns 11-21 are the actual values.
     We extract the data columns and apply the header names.
     """
-    url = f"{VOTE_NYC_BASE}/{year}/{election_segment}/{contest_code}%20EDLevel.csv"
+    # Build URL — some entries use raw spaces, others use %20
+    # Normalize to spaces then percent-encode the path segments
+    from urllib.parse import quote
+    seg_clean = election_segment.replace("%20", " ")
+    code_clean = contest_code.replace("%20", " ")
+    url = f"{VOTE_NYC_BASE}/{year}/{quote(seg_clean)}/{quote(code_clean)} EDLevel.csv"
     try:
         resp = _CLIENT.get(url)
         resp.raise_for_status()
@@ -114,17 +133,21 @@ def _fetch_vote_nyc(year: str, election_segment: str, contest_code: str) -> pa.T
     if len(rows) < 2:
         return None
 
-    # Headers are the first 11 values of row 0
-    headers = [h.strip() for h in rows[0][:11]]
-    # Data is in columns 11-21 of each row
-    data_rows = []
-    for row in rows:
-        if len(row) >= 22:
-            data_rows.append(row[11:22])
-        elif len(row) >= 11:
-            # Some rows might be shorter — pad with None
-            vals = row[11:] + [None] * (11 - len(row[11:]))
-            data_rows.append(vals)
+    # Detect format: double-width (22 cols) vs normal (11 cols)
+    first_row_len = len(rows[0]) if rows else 0
+    headers = ["AD", "ED", "County", "EDAD Status", "Event",
+               "Party/Independent Body", "Office/Position Title",
+               "District Key", "VoteFor", "Unit Name", "Tally"]
+
+    if first_row_len >= 22:
+        # Double-width format (2020-2024): headers in cols 0-10, data in cols 11-21
+        data_rows = []
+        for row in rows:
+            if len(row) >= 22:
+                data_rows.append(row[11:22])
+    else:
+        # Normal CSV format (2016-2017): header row + data rows
+        data_rows = rows[1:]  # skip header
 
     if not data_rows:
         return None
