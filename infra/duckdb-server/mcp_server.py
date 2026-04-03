@@ -2318,6 +2318,46 @@ async def query_json(request: Request) -> JSONResponse:
     return await _handle_query(request, _shared_pool, _shared_catalog, _cors_origin(request))
 
 
+# ---------------------------------------------------------------------------
+# Public HTTP API — anomaly detection endpoint for website widget
+# ---------------------------------------------------------------------------
+
+from tools.anomalies import detect_anomalies as _detect_anomalies
+
+
+@mcp.custom_route("/api/anomalies", methods=["GET", "OPTIONS"])
+async def anomalies_json(request: Request) -> JSONResponse:
+    """Return statistical anomalies across NYC datasets for the website widget."""
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+    if _shared_pool is None:
+        return JSONResponse({"anomalies": [], "count": 0, "error": "Server starting up"}, status_code=503)
+    try:
+        z_threshold = float(request.query_params.get("z", "2.0"))
+        max_results = int(request.query_params.get("limit", "15"))
+        results = _detect_anomalies(_shared_pool, z_threshold=z_threshold, max_results=max_results)
+        return JSONResponse(
+            {"anomalies": results, "count": len(results)},
+            headers={
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
+                "Cache-Control": "public, max-age=900",
+            },
+        )
+    except Exception as e:
+        print(f"[anomalies] Error: {e}", flush=True)
+        return JSONResponse({"anomalies": [], "count": 0, "error": str(e)}, status_code=500)
+
+
 _well_known_routes = [
     Route("/.well-known/oauth-authorization-server", _oauth_stub, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server/{path:path}", _oauth_stub, methods=["GET"]),
