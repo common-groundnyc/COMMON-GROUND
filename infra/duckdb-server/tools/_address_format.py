@@ -223,6 +223,134 @@ def assemble_report(ctx: dict, results: dict) -> str:
     ):
         bldg_lines.append(f" ⚠ Boiler: {boiler['overall_status']}")
 
+    # New danger signals
+    dob_comp = _get(results, "building_dob_complaints")
+    if dob_comp and dob_comp.get("total", 0) > 0:
+        bldg_lines.append(
+            f" DOB complaints          {fmt(dob_comp['total']):>8s}"
+            f"   active: {fmt(dob_comp.get('active', 0))}"
+        )
+
+    dob_viol = _get(results, "building_dob_violations_direct")
+    if dob_viol and dob_viol.get("total", 0) > 0:
+        bldg_lines.append(
+            f" DOB violations          {fmt(dob_viol['total']):>8s}"
+            f"   ({fmt(dob_viol.get('types', 0))} violation types)"
+        )
+
+    emergency = _get(results, "building_emergency_repair")
+    if emergency and emergency.get("total", 0) > 0:
+        bldg_lines.append(
+            f" ⚠ HPD emergency repairs: {fmt(emergency['total'])}"
+            f" (${fmt(emergency.get('total_cost', 0), 'money')} spent)"
+        )
+
+    vacate_hpd = _get(results, "building_vacate_hpd")
+    if vacate_hpd and vacate_hpd.get("vacate_type"):
+        bldg_lines.append(
+            f" ⚠ HPD vacate order: {vacate_hpd['vacate_type']}"
+            f" — {vacate_hpd.get('primary_vacate_reason', 'unknown')}"
+        )
+
+    vacate_fdny = _get(results, "building_fdny_vacate")
+    if vacate_fdny and vacate_fdny.get("vac_date"):
+        bldg_lines.append(
+            f" ⚠ FDNY vacate: {vacate_fdny.get('description', 'N/A')}"
+            f" ({vacate_fdny['vac_date']})"
+        )
+
+    vacate_reloc = _get(results, "building_vacate_reloc")
+    if vacate_reloc and vacate_reloc.get("vacatereason"):
+        bldg_lines.append(
+            f" ⚠ Vacate/relocation: {vacate_reloc['vacatereason']}"
+        )
+
+    oath = _get(results, "building_oath")
+    if oath and oath.get("total", 0) > 0:
+        bldg_lines.append(
+            f" OATH hearings           {fmt(oath['total']):>8s}"
+            f"   penalties: {fmt(oath.get('total_penalties', 0), 'money')}"
+        )
+
+    landmark = _get(results, "building_landmark")
+    if landmark and landmark.get("lm_name"):
+        bldg_lines.append(
+            f" Landmark: {landmark['lm_name']} ({landmark.get('lm_type', '?')})"
+        )
+        if landmark.get("hist_distr"):
+            bldg_lines.append(f"   Historic district: {landmark['hist_distr']}")
+
+    e_desig = _get(results, "building_e_designation")
+    if e_desig:
+        codes = []
+        if e_desig.get("hazmat_code"): codes.append("hazmat")
+        if e_desig.get("air_code"): codes.append("air quality")
+        if e_desig.get("noise_code"): codes.append("noise")
+        if codes:
+            bldg_lines.append(f" ⚠ E-Designation: {', '.join(codes)}")
+
+    cleanup = _get(results, "building_oer_cleanup")
+    if cleanup and cleanup.get("project_name"):
+        bldg_lines.append(
+            f" ⚠ Environmental cleanup: {cleanup['project_name']}"
+            f" ({cleanup.get('phase', '?')})"
+        )
+
+    # Money & ownership
+    tax_ex = _get_all(results, "building_tax_exemptions")
+    if tax_ex:
+        exemptions = [f"{r.get('exname') or r.get('exmp_code', '?')} ({r.get('year', '?')})"
+                      for r in tax_ex[:3]]
+        bldg_lines.append(f" Tax exemptions: {', '.join(exemptions)}")
+
+    abatement = _get(results, "building_abatement")
+    if abatement and abatement.get("appliedabt"):
+        bldg_lines.append(f" Tax abatement: {fmt(abatement['appliedabt'], 'money')} ({abatement.get('taxyr', '?')})")
+
+    charges = _get(results, "building_charges")
+    if charges and charges.get("outstanding_balance") and float(charges.get("outstanding_balance") or 0) > 0:
+        bldg_lines.append(f" ⚠ Outstanding property charges: {fmt(charges['outstanding_balance'], 'money')}")
+
+    affordable = _get(results, "building_affordable")
+    if affordable and affordable.get("all_counted_units"):
+        bldg_lines.append(
+            f" Affordable housing: {fmt(affordable['all_counted_units'])} units"
+            f" (ELI: {fmt(affordable.get('extremely_low_income_units', 0))},"
+            f" VLI: {fmt(affordable.get('very_low_income_units', 0))},"
+            f" LI: {fmt(affordable.get('low_income_units', 0))})"
+        )
+
+    lottery = _get_all(results, "building_lottery")
+    if lottery:
+        bldg_lines.append(f" Housing Connect lotteries: {len(lottery)}")
+
+    sro = _get(results, "building_sro")
+    if sro:
+        bldg_lines.append(
+            f" SRO building: Class A: {fmt(sro.get('legalclassa', 0))},"
+            f" Class B: {fmt(sro.get('legalclassb', 0))}"
+        )
+
+    parties = _get_all(results, "building_acris_parties")
+    if parties:
+        for p in parties[:3]:
+            ptype = "Buyer" if str(p.get("party_type")) == "2" else "Seller"
+            bldg_lines.append(
+                f" {ptype}: {p.get('name', '?')} ({p.get('doc_date', '?')})"
+            )
+
+    licenses = _get_all(results, "building_licenses")
+    if licenses:
+        biz_names = [r.get("business_name", "?") for r in licenses[:3]]
+        bldg_lines.append(f" Active businesses: {', '.join(biz_names)}")
+
+    comps = _get_all(results, "building_comps")
+    if comps:
+        bldg_lines.append(f" Recent comparable sales on block:")
+        for c in comps[:3]:
+            price = fmt(c.get("sale_price"), "money") if c.get("sale_price") else "?"
+            bldg_lines.append(f"   {c.get('address', '?')}: {price} ({c.get('sale_date', '?')})")
+
     _section_or_empty(lines, "BUILDING", bldg_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━ BLOCK ━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -278,6 +406,65 @@ def assemble_report(ctx: dict, results: dict) -> str:
     if recycling and recycling.get("diversion_rate_total"):
         hood_lines.append(f" Recycling rate: {fmt(recycling['diversion_rate_total'], 'pct')}")
 
+    restaurants = _get_all(results, "neighborhood_restaurants")
+    if restaurants:
+        grades = {r.get("grade", "?"): r.get("cnt", 0) for r in restaurants}
+        grade_str = ", ".join(f"{g}: {fmt(c)}" for g, c in sorted(grades.items()))
+        hood_lines.append(f" Restaurant grades: {grade_str}")
+
+    health_fac = _get_all(results, "neighborhood_health_facilities")
+    if health_fac:
+        hood_lines.append(f" Health facilities in ZIP: {len(health_fac)}")
+
+    childcare = _get(results, "neighborhood_childcare")
+    if childcare and childcare.get("total", 0) > 0:
+        hood_lines.append(
+            f" Childcare programs: {fmt(childcare['total'])}"
+            f" ({fmt(childcare.get('total_capacity', 0))} capacity)"
+        )
+
+    child_care = _get(results, "neighborhood_child_care")
+    if child_care and child_care.get("providers", 0) > 0:
+        hood_lines.append(
+            f" Licensed child care: {fmt(child_care['providers'])} providers"
+            f" ({fmt(child_care.get('total_slots', 0))} slots)"
+        )
+
+    gardens = _get_all(results, "neighborhood_gardens")
+    if gardens:
+        hood_lines.append(f" Community gardens: {len(gardens)}")
+
+    markets = _get_all(results, "neighborhood_farmers_markets")
+    if markets:
+        names = [m.get("marketname", "?") for m in markets[:2]]
+        hood_lines.append(f" Farmers markets: {', '.join(names)}")
+        if markets[0].get("accepts_ebt"):
+            hood_lines.append(f"   Accepts EBT: {'Yes' if markets[0]['accepts_ebt'] else 'No'}")
+
+    liquor = _get(results, "neighborhood_liquor")
+    if liquor and liquor.get("total", 0) > 0:
+        hood_lines.append(
+            f" Liquor licenses: {fmt(liquor['total'])}"
+            f" ({fmt(liquor.get('bars_restaurants', 0))} bars/restaurants)"
+        )
+
+    cafes = _get(results, "neighborhood_cafes")
+    if cafes and cafes.get("total", 0) > 0:
+        hood_lines.append(
+            f" Sidewalk cafes: {fmt(cafes['total'])}"
+            f" ({fmt(cafes.get('total_tables', 0))} tables,"
+            f" {fmt(cafes.get('total_chairs', 0))} chairs)"
+        )
+
+    nycha = _get_all(results, "neighborhood_nycha")
+    if nycha:
+        hood_lines.append(f" NYCHA developments: {len(nycha)}")
+        for n in nycha[:2]:
+            hood_lines.append(
+                f"   {n.get('PROJECT_NAME', '?')}: {fmt(n.get('TOTAL_UNITS', 0))} units"
+                f" (${fmt(n.get('avg_rent', 0))} avg rent)"
+            )
+
     _section_or_empty(lines, hood_label, hood_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━ SAFETY ━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -308,6 +495,21 @@ def assemble_report(ctx: dict, results: dict) -> str:
                 f"  ·  injured: {fmt(crashes.get('injured'))}"
                 f"  ·  killed: {fmt(crashes.get('killed'))}"
             )
+        arrests = _get(results, "safety_arrests")
+        if arrests and arrests.get("total", 0) > 0:
+            safety_lines.append(
+                f" Arrests (YTD): {fmt(arrests['total'])}"
+                f"  ·  felony: {fmt(arrests.get('felony_arrests', 0))}"
+                f"  ·  misdemeanor: {fmt(arrests.get('misdemeanor_arrests', 0))}"
+            )
+
+        hate = _get(results, "safety_hate_crimes")
+        if hate and hate.get("total", 0) > 0:
+            safety_lines.append(f" Hate crimes (2yr): {fmt(hate['total'])}")
+
+        summons = _get(results, "safety_summons")
+        if summons and summons.get("total", 0) > 0:
+            safety_lines.append(f" Criminal summonses (12mo): {fmt(summons['total'])}")
     else:
         safety_lines.append(" Precinct not resolved — use safety(precinct) for details")
 
@@ -330,6 +532,17 @@ def assemble_report(ctx: dict, results: dict) -> str:
             f" Top ELA: {top.get('school_name', '?')} — "
             f"{fmt(top.get('level_3_4_pct'), 'pct')} proficient"
         )
+
+    school_safe = _get_all(results, "school_safety")
+    if school_safe:
+        for s in school_safe[:2]:
+            major = int(s.get("major_incidents") or 0)
+            violent = int(s.get("violent_incidents") or 0)
+            if major > 0 or violent > 0:
+                school_lines.append(
+                    f" {s.get('location_name', '?')}: {major} major,"
+                    f" {violent} violent incidents"
+                )
 
     _section_or_empty(lines, "SCHOOLS", school_lines)
 
@@ -378,6 +591,21 @@ def assemble_report(ctx: dict, results: dict) -> str:
             f"  ·  EUI: {fmt(energy.get('source_eui_kbtu_ft2'))} kBtu/ft2"
         )
 
+    lead_pipes = _get(results, "neighborhood_lead_pipes")
+    if lead_pipes and lead_pipes.get("total", 0) > 0:
+        confirmed = lead_pipes.get("confirmed_lead", 0)
+        if confirmed > 0:
+            env_lines.append(f" ⚠ Lead service lines: {fmt(confirmed)} confirmed in ZIP")
+        else:
+            env_lines.append(f" Lead pipes inspected: {fmt(lead_pipes['total'])} (0 confirmed)")
+
+    solar = _get(results, "neighborhood_solar")
+    if solar and solar.get("installations", 0) > 0:
+        env_lines.append(
+            f" Solar installations: {fmt(solar['installations'])}"
+            f" ({fmt(solar.get('total_kw', 0))} kW installed)"
+        )
+
     _section_or_empty(lines, "ENVIRONMENT", env_lines)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━ CIVIC ━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -403,6 +631,10 @@ def assemble_report(ctx: dict, results: dict) -> str:
             svc_lines.append(f" {s.get('station_name', '?')} — {s.get('line', '?')} line")
     if pantries and pantries.get("cnt", 0) > 0:
         svc_lines.append(f" Food pantries in ZIP: {fmt(pantries['cnt'])}")
+
+    parking = _get(results, "transit_parking")
+    if parking and parking.get("total", 0) > 0:
+        svc_lines.append(f" Parking violations (12mo): {fmt(parking['total'])}")
 
     _section_or_empty(lines, "SERVICES", svc_lines)
 
