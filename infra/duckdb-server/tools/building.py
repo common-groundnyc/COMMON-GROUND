@@ -794,8 +794,24 @@ def _view_story(pool, bbl: str) -> ToolResult:
     if alter2 and alter2 > 1800:
         lines.append(f"  Second alteration: {alter2}")
 
+    # All independent queries in one parallel batch
+    story_batch = [
+        ("violations", STORY_VIOLATIONS_SQL, [boro_digit, block, lot]),
+        ("complaints", STORY_COMPLAINTS_SQL, [boro_digit, block, lot]),
+        ("permits", STORY_PERMITS_SQL, [boro_digit, block, lot]),
+    ]
+    if zipcode:
+        story_batch.append(("s311", STORY_311_SQL, [zipcode, bbl]))
+        story_batch.append(("neighbors", STORY_NEIGHBORS_SQL, [zipcode]))
+    story_results = parallel_queries(pool, story_batch)
+
+    cols_v, rows_v = story_results.get("violations", ([], []))
+    cols_c, rows_c = story_results.get("complaints", ([], []))
+    cols_p, rows_p = story_results.get("permits", ([], []))
+    cols_311, rows_311 = story_results.get("s311", ([], []))
+    cols_n, rows_n = story_results.get("neighbors", ([], []))
+
     # Violations
-    cols_v, rows_v = safe_query(pool, STORY_VIOLATIONS_SQL, [boro_digit, block, lot])
     if rows_v:
         v = dict(zip(cols_v, rows_v[0]))
         total_v = int(v.get("total") or 0)
@@ -811,7 +827,6 @@ def _view_story(pool, bbl: str) -> ToolResult:
                 lines.append(f"  Most recent: {latest_v}")
 
     # Complaint character
-    cols_c, rows_c = safe_query(pool, STORY_COMPLAINTS_SQL, [boro_digit, block, lot])
     if rows_c:
         lines.append(f"\nWHAT RESIDENTS TALK ABOUT")
         for row in rows_c[:6]:
@@ -821,16 +836,13 @@ def _view_story(pool, bbl: str) -> ToolResult:
             lines.append(f"  {cat}: {cnt:,} complaints")
 
     # 311
-    if zipcode:
-        cols_311, rows_311 = safe_query(pool, STORY_311_SQL, [zipcode, bbl])
-        if rows_311:
-            lines.append(f"\n311 CALLS (since 2020)")
-            for row in rows_311[:5]:
-                r = dict(zip(cols_311, row))
-                lines.append(f"  {r.get('complaint_type')}: {int(r.get('cnt') or 0):,}")
+    if zipcode and rows_311:
+        lines.append(f"\n311 CALLS (since 2020)")
+        for row in rows_311[:5]:
+            r = dict(zip(cols_311, row))
+            lines.append(f"  {r.get('complaint_type')}: {int(r.get('cnt') or 0):,}")
 
     # Construction history
-    cols_p, rows_p = safe_query(pool, STORY_PERMITS_SQL, [boro_digit, block, lot])
     if rows_p:
         lines.append(f"\nCONSTRUCTION HISTORY")
         for row in rows_p:
@@ -844,31 +856,29 @@ def _view_story(pool, bbl: str) -> ToolResult:
             lines.append(f"  {yr}: {event}")
 
     # Neighborhood comparison
-    if zipcode:
-        cols_n, rows_n = safe_query(pool, STORY_NEIGHBORS_SQL, [zipcode])
-        if rows_n:
-            n = dict(zip(cols_n, rows_n[0]))
-            total_n = int(n.get("total_buildings") or 0)
-            avg_yr = int(float(n.get("avg_year") or 0))
-            avg_fl = round(float(n.get("avg_floors") or 0), 1)
-            if total_n:
-                lines.append(f"\nIN THE NEIGHBORHOOD (ZIP {zipcode})")
-                lines.append(f"  {total_n:,} buildings in your ZIP code")
-                if avg_yr > 1800 and year > 1800:
-                    diff = year - avg_yr
-                    if diff < -5:
-                        lines.append(f"  Your building is {abs(diff)} years older than average (built {avg_yr})")
-                    elif diff > 5:
-                        lines.append(f"  Your building is {diff} years younger than average (built {avg_yr})")
-                    else:
-                        lines.append(f"  Your building is typical age for the area (avg built {avg_yr})")
-                if floors:
-                    if floors > avg_fl + 2:
-                        lines.append(f"  Taller than neighbors ({floors} floors vs avg {avg_fl})")
-                    elif floors < avg_fl - 2:
-                        lines.append(f"  Shorter than neighbors ({floors} floors vs avg {avg_fl})")
-                    else:
-                        lines.append(f"  Similar height to neighbors ({floors} floors, avg {avg_fl})")
+    if zipcode and rows_n:
+        n = dict(zip(cols_n, rows_n[0]))
+        total_n = int(n.get("total_buildings") or 0)
+        avg_yr = int(float(n.get("avg_year") or 0))
+        avg_fl = round(float(n.get("avg_floors") or 0), 1)
+        if total_n:
+            lines.append(f"\nIN THE NEIGHBORHOOD (ZIP {zipcode})")
+            lines.append(f"  {total_n:,} buildings in your ZIP code")
+            if avg_yr > 1800 and year > 1800:
+                diff = year - avg_yr
+                if diff < -5:
+                    lines.append(f"  Your building is {abs(diff)} years older than average (built {avg_yr})")
+                elif diff > 5:
+                    lines.append(f"  Your building is {diff} years younger than average (built {avg_yr})")
+                else:
+                    lines.append(f"  Your building is typical age for the area (avg built {avg_yr})")
+            if floors:
+                if floors > avg_fl + 2:
+                    lines.append(f"  Taller than neighbors ({floors} floors vs avg {avg_fl})")
+                elif floors < avg_fl - 2:
+                    lines.append(f"  Shorter than neighbors ({floors} floors vs avg {avg_fl})")
+                else:
+                    lines.append(f"  Similar height to neighbors ({floors} floors, avg {avg_fl})")
 
     elapsed = round((time.time() - t0) * 1000)
     lines.append(f"\n({elapsed}ms)")
@@ -910,8 +920,25 @@ def _view_block(pool, bbl: str) -> ToolResult:
     lines.append(f"Block {block}, {borough} (from {address})")
     lines.append("=" * 60)
 
+    # All independent block queries in one parallel batch
+    block_batch = [
+        ("neighbors", BLOCK_NEIGHBORS_SQL, [block_prefix]),
+        ("permits", BLOCK_PERMITS_SQL, [boro_digit, block]),
+        ("hpd", BLOCK_HPD_SQL, [boro_digit, block]),
+    ]
+    if zipcode:
+        block_batch.append(("restaurants", BLOCK_RESTAURANTS_SQL, [zipcode]))
+        bbl_prefix = bbl[:6] + "%"
+        block_batch.append(("s311", BLOCK_311_SQL, [zipcode, bbl_prefix]))
+    block_results = parallel_queries(pool, block_batch)
+
+    cols_n, rows_n = block_results.get("neighbors", ([], []))
+    cols_p, rows_p = block_results.get("permits", ([], []))
+    cols_h, rows_h = block_results.get("hpd", ([], []))
+    cols_r, rows_r = block_results.get("restaurants", ([], []))
+    cols_311, rows_311 = block_results.get("s311", ([], []))
+
     # All buildings on the block
-    cols_n, rows_n = safe_query(pool, BLOCK_NEIGHBORS_SQL, [block_prefix])
     if rows_n:
         buildings = [dict(zip(cols_n, r)) for r in rows_n]
         years = [b["yearbuilt"] for b in buildings if b.get("yearbuilt")]
@@ -938,7 +965,6 @@ def _view_block(pool, bbl: str) -> ToolResult:
             lines.append(f"    {b.get('address')}: {y}, {fl}fl, {cls}{marker}")
 
     # Construction permits (last 10 years)
-    cols_p, rows_p = safe_query(pool, BLOCK_PERMITS_SQL, [boro_digit, block])
     if rows_p:
         lines.append(f"\nCONSTRUCTION ACTIVITY (last 10 years)")
         by_year = {}
@@ -967,41 +993,35 @@ def _view_block(pool, bbl: str) -> ToolResult:
                     lines.append(f"\n  Trend: construction activity down {abs(change):.0f}% vs. early period")
 
     # Restaurant scene
-    if zipcode:
-        cols_r, rows_r = safe_query(pool, BLOCK_RESTAURANTS_SQL, [zipcode])
-        if rows_r:
-            restaurants = [dict(zip(cols_r, r)) for r in rows_r]
-            cuisines = {}
-            for rest in restaurants:
-                c = rest.get("cuisine_description") or "Other"
-                cuisines[c] = cuisines.get(c, 0) + 1
-            lines.append(f"\nRESTAURANT SCENE (ZIP {zipcode})")
-            lines.append(f"  {len(restaurants)} restaurants with recent grades")
-            top_cuisines = sorted(cuisines.items(), key=lambda x: -x[1])[:5]
-            lines.append(f"  Top cuisines: {', '.join(f'{c} ({n})' for c, n in top_cuisines)}")
+    if zipcode and rows_r:
+        restaurants = [dict(zip(cols_r, r)) for r in rows_r]
+        cuisines = {}
+        for rest in restaurants:
+            c = rest.get("cuisine_description") or "Other"
+            cuisines[c] = cuisines.get(c, 0) + 1
+        lines.append(f"\nRESTAURANT SCENE (ZIP {zipcode})")
+        lines.append(f"  {len(restaurants)} restaurants with recent grades")
+        top_cuisines = sorted(cuisines.items(), key=lambda x: -x[1])[:5]
+        lines.append(f"  Top cuisines: {', '.join(f'{c} ({n})' for c, n in top_cuisines)}")
 
     # 311 trends
-    if zipcode:
-        bbl_prefix = bbl[:6] + "%"
-        cols_311, rows_311 = safe_query(pool, BLOCK_311_SQL, [zipcode, bbl_prefix])
-        if rows_311:
-            lines.append(f"\n311 COMPLAINTS ON YOUR BLOCK (since 2020)")
-            by_year_311 = {}
-            for row in rows_311:
-                r = dict(zip(cols_311, row))
-                yr = int(r.get("yr") or 0)
-                if yr > 0:
-                    if yr not in by_year_311:
-                        by_year_311[yr] = {}
-                    by_year_311[yr][r.get("complaint_type")] = int(r.get("cnt") or 0)
-            for yr in sorted(by_year_311, reverse=True)[:4]:
-                total = sum(by_year_311[yr].values())
-                top = sorted(by_year_311[yr].items(), key=lambda x: -x[1])[:3]
-                top_str = ", ".join(f"{t}: {c}" for t, c in top)
-                lines.append(f"  {yr}: {total} calls ({top_str})")
+    if zipcode and rows_311:
+        lines.append(f"\n311 COMPLAINTS ON YOUR BLOCK (since 2020)")
+        by_year_311 = {}
+        for row in rows_311:
+            r = dict(zip(cols_311, row))
+            yr = int(r.get("yr") or 0)
+            if yr > 0:
+                if yr not in by_year_311:
+                    by_year_311[yr] = {}
+                by_year_311[yr][r.get("complaint_type")] = int(r.get("cnt") or 0)
+        for yr in sorted(by_year_311, reverse=True)[:4]:
+            total = sum(by_year_311[yr].values())
+            top = sorted(by_year_311[yr].items(), key=lambda x: -x[1])[:3]
+            top_str = ", ".join(f"{t}: {c}" for t, c in top)
+            lines.append(f"  {yr}: {total} calls ({top_str})")
 
     # HPD complaint trends
-    cols_h, rows_h = safe_query(pool, BLOCK_HPD_SQL, [boro_digit, block])
     if rows_h:
         lines.append(f"\nHPD COMPLAINTS ON YOUR BLOCK")
         by_year_hpd = {}
@@ -1112,8 +1132,12 @@ def _view_similar(pool, bbl: str, ctx=None) -> ToolResult:
     if year < 1800:
         raise ToolError(f"Building has no valid year built ({year}). Cannot find twins.")
 
-    cols_tw, rows_tw = safe_query(pool, TWINS_FIND_SQL, [bbl, bbl])
-    cols_ct, rows_ct = safe_query(pool, TWINS_COUNT_SQL, [bldg_class, year - 5, year + 5])
+    twins_results = parallel_queries(pool, [
+        ("twins", TWINS_FIND_SQL, [bbl, bbl]),
+        ("count", TWINS_COUNT_SQL, [bldg_class, year - 5, year + 5]),
+    ])
+    cols_tw, rows_tw = twins_results.get("twins", ([], []))
+    cols_ct, rows_ct = twins_results.get("count", ([], []))
     total_similar = 0
     if rows_ct:
         total_similar = int(dict(zip(cols_ct, rows_ct[0])).get("total_similar") or 0)
