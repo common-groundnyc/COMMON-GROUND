@@ -46,12 +46,12 @@ WITH hpd AS (
     GROUP BY major_category
 ),
 svc311 AS (
-    SELECT problem_formerly_complaint_type AS category, '311' AS source,
+    SELECT complaint_type AS category, '311' AS source,
            COUNT(*) AS cnt
     FROM lake.social_services.n311_service_requests
     WHERE incident_zip = ?
       AND TRY_CAST(created_date AS DATE) >= CURRENT_DATE - INTERVAL (?) DAY
-    GROUP BY problem_formerly_complaint_type
+    GROUP BY complaint_type
 ),
 combined AS (
     SELECT * FROM hpd

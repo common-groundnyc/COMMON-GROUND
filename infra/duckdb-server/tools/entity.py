@@ -804,7 +804,7 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
         lines.append(f"--- BUSINESS LICENSES ({len(biz_rows)} licenses) ---")
         for r in biz_rows:
             dba = f" (dba: {r[1]})" if r[1] else ""
-            lines.append(f"  {r[0]}{dba} | {r[2] or '?'} | {r[3]} | {r[4]} | {r[6] or '?'} {r[7] or ''}")
+            lines.append(f"  {r[0]}{dba} | {r[2] or '?'} | {r[3]} | {r[4] or '?'} | {r[5] or '?'} {r[6] or ''}")
         lines.append("")
 
     if rest_rows:
