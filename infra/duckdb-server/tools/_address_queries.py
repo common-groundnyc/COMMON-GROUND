@@ -697,7 +697,7 @@ def build_queries(
         WHERE report_category = 'School'
           AND grade = 'All Grades'
           AND geographic_subdivision IN (
-              SELECT DISTINCT dbn FROM lake.health.school_cafeteria_inspections
+              SELECT DISTINCT dbn FROM lake.education.school_safety
               WHERE TRY_CAST(latitude AS DOUBLE) IS NOT NULL
                 AND ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.01
                 AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.01
@@ -709,35 +709,32 @@ def build_queries(
 
     queries.append(("school_math", """
         SELECT school_name, mean_scale_score,
-               level_3_4_1 AS level_3_4_pct
+               pct_level_3_and_4 AS level_3_4_pct
         FROM lake.education.math_results
         WHERE report_category = 'School'
           AND grade = 'All Grades'
-          AND geographic_subdivision IN (
-              SELECT DISTINCT dbn FROM lake.health.school_cafeteria_inspections
+          AND geographic_division IN (
+              SELECT DISTINCT dbn FROM lake.education.school_safety
               WHERE TRY_CAST(latitude AS DOUBLE) IS NOT NULL
                 AND ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.01
                 AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.01
           )
           AND year = (SELECT MAX(year) FROM lake.education.math_results)
-        ORDER BY TRY_CAST(level_3_4_1 AS DOUBLE) DESC NULLS LAST
+        ORDER BY TRY_CAST(pct_level_3_and_4 AS DOUBLE) DESC NULLS LAST
         LIMIT 3
     """, [latitude or 0, longitude or 0]))
 
     queries.append(("school_safety", """
-        SELECT s.location_name, s.register,
-               TRY_CAST(s.major_n AS INT) AS major_incidents,
-               TRY_CAST(s.vio_n AS INT) AS violent_incidents,
-               TRY_CAST(s.prop_n AS INT) AS property_incidents
-        FROM lake.education.school_safety s
-        WHERE s.school_year = (SELECT MAX(school_year) FROM lake.education.school_safety)
-          AND s.location_name IN (
-              SELECT DISTINCT schoolname FROM lake.health.school_cafeteria_inspections
-              WHERE TRY_CAST(latitude AS DOUBLE) IS NOT NULL
-                AND ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.01
-                AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.01
-          )
-        ORDER BY TRY_CAST(s.major_n AS INT) DESC NULLS LAST
+        SELECT location_name, register,
+               TRY_CAST(major_n AS INT) AS major_incidents,
+               TRY_CAST(vio_n AS INT) AS violent_incidents,
+               TRY_CAST(prop_n AS INT) AS property_incidents
+        FROM lake.education.school_safety
+        WHERE school_year = (SELECT MAX(school_year) FROM lake.education.school_safety)
+          AND TRY_CAST(latitude AS DOUBLE) IS NOT NULL
+          AND ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.01
+          AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.01
+        ORDER BY TRY_CAST(major_n AS INT) DESC NULLS LAST
         LIMIT 3
     """, [latitude or 0, longitude or 0]))
 
