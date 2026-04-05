@@ -163,6 +163,164 @@ _shared_pool = None
 _shared_catalog = {}
 
 
+def _define_property_graphs(conn) -> None:
+    """Define DuckPGQ property graphs. Safe to call only after all graph_*
+    tables exist (either loaded from cache or freshly built)."""
+    try:
+        conn.execute("LOAD duckpgq")
+    except Exception:
+        return  # extension not available
+
+    _graphs = [
+        ("nyc_ownership", """
+            CREATE OR REPLACE PROPERTY GRAPH nyc_ownership
+            VERTEX TABLES (
+                main.graph_owners PROPERTIES (owner_name, registrationid) LABEL Owner,
+                main.graph_buildings PROPERTIES (bbl, borough, address, stories, units, year_built) LABEL Building,
+                main.graph_violations PROPERTIES (violation_id, bbl, class, status, description, issued_date) LABEL Violation
+            )
+            EDGE TABLES (
+                main.graph_owns
+                    SOURCE KEY (owner_id) REFERENCES main.graph_owners (owner_id)
+                    DESTINATION KEY (bbl) REFERENCES main.graph_buildings (bbl)
+                    LABEL Owns,
+                main.graph_has_violation
+                    SOURCE KEY (bbl) REFERENCES main.graph_buildings (bbl)
+                    DESTINATION KEY (violation_id) REFERENCES main.graph_violations (violation_id)
+                    LABEL HasViolation,
+                main.graph_shared_owner
+                    SOURCE KEY (src_bbl) REFERENCES main.graph_buildings (bbl)
+                    DESTINATION KEY (dst_bbl) REFERENCES main.graph_buildings (bbl)
+                    LABEL SharedOwner
+            )
+        """),
+        ("nyc_transactions", """
+            CREATE OR REPLACE PROPERTY GRAPH nyc_transactions
+            VERTEX TABLES (
+                main.graph_tx_entities PROPERTIES (entity_name, party_type) LABEL TxEntity
+            )
+            EDGE TABLES (
+                main.graph_tx_shared
+                    SOURCE KEY (src) REFERENCES main.graph_tx_entities (entity_name)
+                    DESTINATION KEY (dst) REFERENCES main.graph_tx_entities (entity_name)
+                    LABEL SharedTransaction
+            )
+        """),
+        ("nyc_corporate_web", """
+            CREATE OR REPLACE PROPERTY GRAPH nyc_corporate_web
+            VERTEX TABLES (
+                main.graph_corps PROPERTIES (dos_id, corp_name, jurisdiction, formed, registered_agent) LABEL Corporation,
+                main.graph_corp_people PROPERTIES (dos_id, person_name, title) LABEL CorpPerson
+            )
+            EDGE TABLES (
+                main.graph_corp_officer_edges
+                    SOURCE KEY (corp_id) REFERENCES main.graph_corps (dos_id)
+                    DESTINATION KEY (other_corp_id) REFERENCES main.graph_corps (dos_id)
+                    LABEL SharedOfficer,
+                main.graph_corp_shared_officer
+                    SOURCE KEY (corp1) REFERENCES main.graph_corps (dos_id)
+                    DESTINATION KEY (corp2) REFERENCES main.graph_corps (dos_id)
+                    LABEL OfficerOverlap
+            )
+        """),
+        ("nyc_influence", """
+            CREATE OR REPLACE PROPERTY GRAPH nyc_influence
+            VERTEX TABLES (
+                main.graph_pol_entities PROPERTIES (entity_name, role) LABEL PoliticalEntity
+            )
+            EDGE TABLES (
+                main.graph_pol_donations
+                    SOURCE KEY (donor) REFERENCES main.graph_pol_entities (entity_name)
+                    DESTINATION KEY (recipient) REFERENCES main.graph_pol_entities (entity_name)
+                    LABEL Donated
+            )
+        """),
+        ("nyc_contractor_network", """
+            CREATE OR REPLACE PROPERTY GRAPH nyc_contractor_network
+            VERTEX TABLES (
+                main.graph_contractors PROPERTIES (name, license_number, license_type) LABEL Contractor
+            )
+            EDGE TABLES (
+                main.graph_contractor_shared
+                    SOURCE KEY (c1) REFERENCES main.graph_contractors (name)
+                    DESTINATION KEY (c2) REFERENCES main.graph_contractors (name)
+                    LABEL SharedPermit,
+                main.graph_contractor_building_shared
+                    SOURCE KEY (c1) REFERENCES main.graph_contractors (name)
+                    DESTINATION KEY (c2) REFERENCES main.graph_contractors (name)
+                    LABEL SharedBuilding
+            )
+        """),
+        ("nyc_officer_network", """
+            CREATE OR REPLACE PROPERTY GRAPH nyc_officer_network
+            VERTEX TABLES (
+                main.graph_officers
+                    PROPERTIES (officer_name, shield_no, rank, command)
+                    LABEL Officer
+            )
+            EDGE TABLES (
+                main.graph_officer_shared_command
+                    SOURCE KEY (officer1) REFERENCES main.graph_officers (officer_name)
+                    DESTINATION KEY (officer2) REFERENCES main.graph_officers (officer_name)
+                    LABEL SharedCommand
+            )
+        """),
+        ("nyc_tradewaste_network", """
+            CREATE OR REPLACE PROPERTY GRAPH nyc_tradewaste_network
+            VERTEX TABLES (
+                main.graph_bic_companies
+                    PROPERTIES (business_name, license_number, address, vehicles)
+                    LABEL TradeWasteCompany
+            )
+            EDGE TABLES (
+                main.graph_bic_shared_bbl
+                    SOURCE KEY (c1) REFERENCES main.graph_bic_companies (business_name)
+                    DESTINATION KEY (c2) REFERENCES main.graph_bic_companies (business_name)
+                    LABEL SharedLocation
+            )
+        """),
+    ]
+
+    for name, sql in _graphs:
+        try:
+            conn.execute(sql)
+            print(f"Property graph {name} created", flush=True)
+        except Exception as e:
+            print(f"Warning: {name} graph definition failed: {e}", flush=True)
+
+    # COIB network — skip if tables not yet built (avoids hang)
+    coib_tables = ["graph_coib_donors", "graph_coib_policymakers", "graph_coib_donor_edges"]
+    try:
+        coib_ok = all(
+            conn.execute(f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{t}'").fetchone()[0] > 0
+            for t in coib_tables
+        )
+    except Exception:
+        coib_ok = False
+    if coib_ok:
+        try:
+            conn.execute("""
+                CREATE OR REPLACE PROPERTY GRAPH nyc_coib_network
+                VERTEX TABLES (
+                    main.graph_coib_donors
+                        PROPERTIES (donor_name, donation_types, total_donated, donation_count, city, state)
+                        LABEL COIBDonor,
+                    main.graph_coib_policymakers
+                        PROPERTIES (policymaker_name, agency, title, latest_year, years_active)
+                        LABEL Policymaker
+                )
+                EDGE TABLES (
+                    main.graph_coib_donor_edges
+                        SOURCE KEY (donor_name) REFERENCES main.graph_coib_donors (donor_name)
+                        DESTINATION KEY (recipient) REFERENCES main.graph_coib_policymakers (policymaker_name)
+                        LABEL DonatesTo
+                )
+            """)
+            print("Property graph nyc_coib_network created", flush=True)
+        except Exception as e:
+            print(f"Warning: nyc_coib_network graph definition failed: {e}", flush=True)
+
+
 @lifespan
 async def app_lifespan(server):
     global _shared_pool, _shared_catalog
@@ -587,6 +745,8 @@ async def app_lifespan(server):
             shared_count = conn.execute("SELECT COUNT(*) FROM main.graph_shared_owner").fetchone()[0]
             print(f"Graph loaded from cache: {owner_count:,} owners, {building_count:,} buildings, "
                   f"{violation_count:,} violations", flush=True)
+            graph_ready = True
+            _define_property_graphs(conn)
         else:
             print("Building graph tables from lake (no cache or stale)...", flush=True)
 
@@ -1258,6 +1418,10 @@ async def app_lifespan(server):
                     except Exception as e:
                         print(f"Warning: graph cache save failed: {e}", flush=True)
 
+                    # DuckPGQ property graph definitions — run here in the background
+                    # thread so we don't race with the main thread on the shared conn.
+                    _define_property_graphs(conn)
+
                     print("Extended graph tables complete", flush=True)
                 except Exception as e:
                     print(f"Warning: extended graph build failed: {e}", flush=True)
@@ -1268,194 +1432,8 @@ async def app_lifespan(server):
 
             # --- END GRAPH TABLE BUILD ---
 
-        # --- DuckPGQ property graph definitions ---
-        try:
-            conn.execute("LOAD duckpgq")
-        except Exception:
-            pass
-
-        try:
-            conn.execute("""
-                CREATE OR REPLACE PROPERTY GRAPH nyc_ownership
-                VERTEX TABLES (
-                    main.graph_owners PROPERTIES (owner_name, registrationid) LABEL Owner,
-                    main.graph_buildings PROPERTIES (bbl, borough, address, stories, units, year_built) LABEL Building,
-                    main.graph_violations PROPERTIES (violation_id, bbl, class, status, description, issued_date) LABEL Violation
-                )
-                EDGE TABLES (
-                    main.graph_owns
-                        SOURCE KEY (owner_id) REFERENCES main.graph_owners (owner_id)
-                        DESTINATION KEY (bbl) REFERENCES main.graph_buildings (bbl)
-                        LABEL Owns,
-                    main.graph_has_violation
-                        SOURCE KEY (bbl) REFERENCES main.graph_buildings (bbl)
-                        DESTINATION KEY (violation_id) REFERENCES main.graph_violations (violation_id)
-                        LABEL HasViolation,
-                    main.graph_shared_owner
-                        SOURCE KEY (src_bbl) REFERENCES main.graph_buildings (bbl)
-                        DESTINATION KEY (dst_bbl) REFERENCES main.graph_buildings (bbl)
-                        LABEL SharedOwner
-                )
-            """)
-            print("Property graph nyc_ownership created", flush=True)
-        except Exception as e:
-            print(f"Warning: nyc_ownership graph definition failed: {e}", flush=True)
-
-        # Transaction network graph
-        try:
-            conn.execute("""
-                CREATE OR REPLACE PROPERTY GRAPH nyc_transactions
-                VERTEX TABLES (
-                    main.graph_tx_entities PROPERTIES (entity_name, party_type) LABEL TxEntity
-                )
-                EDGE TABLES (
-                    main.graph_tx_shared
-                        SOURCE KEY (src) REFERENCES main.graph_tx_entities (entity_name)
-                        DESTINATION KEY (dst) REFERENCES main.graph_tx_entities (entity_name)
-                        LABEL SharedTransaction
-                )
-            """)
-            print("Property graph nyc_transactions created", flush=True)
-        except Exception as e:
-            print(f"Warning: nyc_transactions graph definition failed: {e}", flush=True)
-
-        # Corporate web graph
-        try:
-            conn.execute("""
-                CREATE OR REPLACE PROPERTY GRAPH nyc_corporate_web
-                VERTEX TABLES (
-                    main.graph_corps PROPERTIES (dos_id, corp_name, jurisdiction, formed, registered_agent) LABEL Corporation,
-                    main.graph_corp_people PROPERTIES (dos_id, person_name, title) LABEL CorpPerson
-                )
-                EDGE TABLES (
-                    main.graph_corp_officer_edges
-                        SOURCE KEY (corp_id) REFERENCES main.graph_corps (dos_id)
-                        DESTINATION KEY (other_corp_id) REFERENCES main.graph_corps (dos_id)
-                        LABEL SharedOfficer,
-                    main.graph_corp_shared_officer
-                        SOURCE KEY (corp1) REFERENCES main.graph_corps (dos_id)
-                        DESTINATION KEY (corp2) REFERENCES main.graph_corps (dos_id)
-                        LABEL OfficerOverlap
-                )
-            """)
-            print("Property graph nyc_corporate_web created", flush=True)
-        except Exception as e:
-            print(f"Warning: nyc_corporate_web graph definition failed: {e}", flush=True)
-
-        # Influence network graph
-        try:
-            conn.execute("""
-                CREATE OR REPLACE PROPERTY GRAPH nyc_influence
-                VERTEX TABLES (
-                    main.graph_pol_entities PROPERTIES (entity_name, role) LABEL PoliticalEntity
-                )
-                EDGE TABLES (
-                    main.graph_pol_donations
-                        SOURCE KEY (donor) REFERENCES main.graph_pol_entities (entity_name)
-                        DESTINATION KEY (recipient) REFERENCES main.graph_pol_entities (entity_name)
-                        LABEL Donated
-                )
-            """)
-            print("Property graph nyc_influence created", flush=True)
-        except Exception as e:
-            print(f"Warning: nyc_influence graph definition failed: {e}", flush=True)
-
-        # Contractor network graph
-        try:
-            conn.execute("""
-                CREATE OR REPLACE PROPERTY GRAPH nyc_contractor_network
-                VERTEX TABLES (
-                    main.graph_contractors PROPERTIES (name, license_number, license_type) LABEL Contractor
-                )
-                EDGE TABLES (
-                    main.graph_contractor_shared
-                        SOURCE KEY (c1) REFERENCES main.graph_contractors (name)
-                        DESTINATION KEY (c2) REFERENCES main.graph_contractors (name)
-                        LABEL SharedPermit,
-                    main.graph_contractor_building_shared
-                        SOURCE KEY (c1) REFERENCES main.graph_contractors (name)
-                        DESTINATION KEY (c2) REFERENCES main.graph_contractors (name)
-                        LABEL SharedBuilding
-                )
-            """)
-            print("Property graph nyc_contractor_network created", flush=True)
-        except Exception as e:
-            print(f"Warning: nyc_contractor_network graph definition failed: {e}", flush=True)
-
-        # Officer misconduct network
-        try:
-            conn.execute("""
-                CREATE OR REPLACE PROPERTY GRAPH nyc_officer_network
-                VERTEX TABLES (
-                    main.graph_officers
-                        PROPERTIES (officer_name, shield_no, rank, command)
-                        LABEL Officer
-                )
-                EDGE TABLES (
-                    main.graph_officer_shared_command
-                        SOURCE KEY (officer1) REFERENCES main.graph_officers (officer_name)
-                        DESTINATION KEY (officer2) REFERENCES main.graph_officers (officer_name)
-                        LABEL SharedCommand
-                )
-            """)
-            print("Property graph nyc_officer_network created", flush=True)
-        except Exception as e:
-            print(f"Warning: nyc_officer_network graph definition failed: {e}", flush=True)
-
-        # BIC trade waste network
-        try:
-            conn.execute("""
-                CREATE OR REPLACE PROPERTY GRAPH nyc_tradewaste_network
-                VERTEX TABLES (
-                    main.graph_bic_companies
-                        PROPERTIES (business_name, license_number, address, vehicles)
-                        LABEL TradeWasteCompany
-                )
-                EDGE TABLES (
-                    main.graph_bic_shared_bbl
-                        SOURCE KEY (c1) REFERENCES main.graph_bic_companies (business_name)
-                        DESTINATION KEY (c2) REFERENCES main.graph_bic_companies (business_name)
-                        LABEL SharedLocation
-                )
-            """)
-            print("Property graph nyc_tradewaste_network created", flush=True)
-        except Exception as e:
-            print(f"Warning: nyc_tradewaste_network graph definition failed: {e}", flush=True)
-
-        # COIB conflicts of interest network — skip if tables missing (hangs otherwise)
-        coib_tables = ["graph_coib_donors", "graph_coib_policymakers", "graph_coib_donor_edges"]
-        coib_ok = all(
-            conn.execute(f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{t}'").fetchone()[0] > 0
-            for t in coib_tables
-        )
-        if coib_ok:
-            try:
-                conn.execute("""
-                    CREATE OR REPLACE PROPERTY GRAPH nyc_coib_network
-                    VERTEX TABLES (
-                        main.graph_coib_donors
-                            PROPERTIES (donor_name, donation_types, total_donated, donation_count, city, state)
-                            LABEL COIBDonor,
-                        main.graph_coib_policymakers
-                            PROPERTIES (policymaker_name, agency, title, latest_year, years_active)
-                            LABEL Policymaker
-                    )
-                    EDGE TABLES (
-                        main.graph_coib_donor_edges
-                            SOURCE KEY (donor_name) REFERENCES main.graph_coib_donors (donor_name)
-                            DESTINATION KEY (recipient) REFERENCES main.graph_coib_policymakers (policymaker_name)
-                            LABEL DonatesTo
-                    )
-                """)
-                print("Property graph nyc_coib_network created", flush=True)
-            except Exception as e:
-                print(f"Warning: nyc_coib_network graph definition failed: {e}", flush=True)
-        else:
-            print("Warning: nyc_coib_network skipped — COIB graph tables not built yet", flush=True)
-
-        # graph_ready already set after core tables — DuckPGQ definitions are optional
     except Exception as e:
-        print(f"Warning: DuckPGQ property graph build failed: {e}", flush=True)
+        print(f"Warning: graph build/load failed: {e}", flush=True)
 
     # PostHog analytics — track MCP tool usage
     ph_key = os.environ.get("POSTHOG_API_KEY", "")
@@ -1725,6 +1703,8 @@ async def app_lifespan(server):
             pass  # _pipeline_state may not exist yet
 
         # --- Name token routes (persistent local table for instant name→table routing) ---
+        # Runs in a background thread — name_tokens has 246M rows, COPY takes minutes.
+        # Server starts immediately; routing is degraded until background build finishes.
         if emb_conn:
             try:
                 existing = emb_conn.execute(
@@ -1737,32 +1717,37 @@ async def app_lifespan(server):
             needs_rebuild = existing < 100_000
 
             if needs_rebuild:
-                try:
-                    print(f"Building name_token_routes ({existing:,} existing, rebuilding)...", flush=True)
-                    t_tok = time.time()
-                    # Write distinct routes to a temp parquet on local disk, then bulk-load
-                    tmp_path = "/data/common-ground/lake/_tmp_routes.parquet"
-                    conn.execute(f"""
-                        COPY (
-                            SELECT DISTINCT token, source_table
-                            FROM lake.foundation.name_tokens
-                        ) TO '{tmp_path}' (FORMAT PARQUET)
-                    """)
-                    print(f"  Routes exported to parquet in {time.time() - t_tok:.1f}s", flush=True)
-                    emb_conn.execute("DROP TABLE IF EXISTS name_token_routes")
-                    emb_conn.execute(f"""
-                        CREATE TABLE name_token_routes AS
-                        SELECT * FROM read_parquet('{tmp_path}')
-                    """)
-                    import pathlib
-                    pathlib.Path(tmp_path).unlink(missing_ok=True)
-                except Exception as e:
-                    print(f"Warning: name_token_routes build failed: {e}", flush=True)
-                try:
-                    tok_count = emb_conn.execute("SELECT COUNT(*) FROM name_token_routes").fetchone()[0]
-                    print(f"name_token_routes: {tok_count:,} routes in {time.time() - t_tok:.1f}s", flush=True)
-                except Exception:
-                    pass
+                def _build_token_routes_bg(bg_conn, bg_emb_conn):
+                    try:
+                        print(f"Background: building name_token_routes ({existing:,} existing)...", flush=True)
+                        t_tok = time.time()
+                        tmp_path = "/data/common-ground/lake/_tmp_routes.parquet"
+                        bg_conn.execute(f"""
+                            COPY (
+                                SELECT DISTINCT token, source_table
+                                FROM lake.foundation.name_tokens
+                            ) TO '{tmp_path}' (FORMAT PARQUET)
+                        """)
+                        print(f"  Routes exported to parquet in {time.time() - t_tok:.1f}s", flush=True)
+                        bg_emb_conn.execute("DROP TABLE IF EXISTS name_token_routes")
+                        bg_emb_conn.execute(f"""
+                            CREATE TABLE name_token_routes AS
+                            SELECT * FROM read_parquet('{tmp_path}')
+                        """)
+                        import pathlib
+                        pathlib.Path(tmp_path).unlink(missing_ok=True)
+                        tok_count = bg_emb_conn.execute("SELECT COUNT(*) FROM name_token_routes").fetchone()[0]
+                        print(f"name_token_routes: {tok_count:,} routes in {time.time() - t_tok:.1f}s", flush=True)
+                    except Exception as e:
+                        print(f"Warning: name_token_routes build failed: {e}", flush=True)
+
+                threading.Thread(
+                    target=_build_token_routes_bg,
+                    args=(conn, emb_conn),
+                    daemon=True,
+                    name="token-routes-build",
+                ).start()
+                print("Background: name_token_routes build started (246M rows, will take a few minutes)", flush=True)
             elif existing > 0:
                 print(f"name_token_routes: {existing:,} routes (up to date)", flush=True)
             else:

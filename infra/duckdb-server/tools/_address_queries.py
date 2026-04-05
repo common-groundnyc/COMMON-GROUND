@@ -340,7 +340,16 @@ def build_queries(
     """, [bbl]))
 
     queries.append(("pctile_complaints", """
-        SELECT complaint_pctile AS pctile FROM lake.foundation.mv_pctile_violations WHERE bbl = ?
+        WITH bbl_counts AS (
+            SELECT LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') AS bbl,
+                   COUNT(DISTINCT complaint_id) AS cnt
+            FROM lake.housing.hpd_complaints
+            GROUP BY 1
+        ),
+        ranked AS (
+            SELECT bbl, PERCENT_RANK() OVER (ORDER BY cnt) AS pctile FROM bbl_counts
+        )
+        SELECT pctile FROM ranked WHERE bbl = ?
     """, [bbl]))
 
     queries.append(("pctile_energy", """
@@ -540,8 +549,11 @@ def build_queries(
 
     queries.append(("neighborhood_liquor", """
         SELECT COUNT(*) AS total,
-               COUNT(*) FILTER (WHERE UPPER(class) ILIKE '%ON%PREMISES%'
-                                   OR UPPER(type) ILIKE '%ON%PREMISES%') AS bars_restaurants
+               COUNT(*) FILTER (WHERE description IN (
+                   'Restaurant', 'Food & Beverage Business', 'Additional Bar',
+                   'Club', 'Hotel', 'Catering Establishment', 'Tavern Miscellaneous',
+                   'Legitimate theatre', 'Summer Food & beverage business'
+               )) AS bars_restaurants
         FROM lake.business.nys_liquor_authority
         WHERE zipcode = ?
     """, [zipcode]))
@@ -580,9 +592,7 @@ def build_queries(
         """, [pct_val]))
 
         queries.append(("safety_shootings", """
-            SELECT COUNT(*) AS total,
-                   COUNT(*) FILTER (
-                       WHERE statistical_murder_flag = 'true') AS fatal
+            SELECT COUNT(*) AS total
             FROM lake.public_safety.shootings
             WHERE precinct = ?
               AND TRY_CAST(occur_date AS DATE)
@@ -650,14 +660,35 @@ def build_queries(
     # Borough letter: M=Manhattan, X=Bronx, K=Brooklyn, Q=Queens, R=Staten Island
     boro_letter = {"1": "M", "2": "X", "3": "K", "4": "Q", "5": "R"}.get(boro_code, "")
 
-    queries.append(("school_nearest", """
-        SELECT DISTINCT school_name, dbn
-        FROM lake.education.quality_reports
-        WHERE SUBSTR(dbn, 3, 1) = ?
-          AND school_name IS NOT NULL
-        ORDER BY school_name
-        LIMIT 3
-    """, [boro_letter]))
+    if latitude and longitude:
+        queries.append(("school_nearest", """
+            WITH schools AS (
+                SELECT DISTINCT schoolname,
+                       FIRST(TRY_CAST(latitude AS DOUBLE)) AS lat,
+                       FIRST(TRY_CAST(longitude AS DOUBLE)) AS lon
+                FROM lake.health.school_cafeteria_inspections
+                WHERE TRY_CAST(latitude AS DOUBLE) IS NOT NULL
+                GROUP BY schoolname
+            )
+            SELECT schoolname AS school_name,
+                   ROUND(2 * 3961 * ASIN(SQRT(
+                       POWER(SIN(RADIANS(lat - ?) / 2), 2) +
+                       COS(RADIANS(?)) * COS(RADIANS(lat)) *
+                       POWER(SIN(RADIANS(lon - ?) / 2), 2)
+                   )), 2) AS dist_miles
+            FROM schools
+            ORDER BY ABS(lat - ?) + ABS(lon - ?)
+            LIMIT 5
+        """, [latitude, latitude, longitude, latitude, longitude]))
+    else:
+        queries.append(("school_nearest", """
+            SELECT DISTINCT school_name, dbn
+            FROM lake.education.quality_reports
+            WHERE SUBSTR(dbn, 3, 1) = ?
+              AND school_name IS NOT NULL
+            ORDER BY school_name
+            LIMIT 5
+        """, [boro_letter]))
 
     queries.append(("school_ela", """
         SELECT school_name, mean_scale_score,
@@ -665,11 +696,16 @@ def build_queries(
         FROM lake.education.ela_results
         WHERE report_category = 'School'
           AND grade = 'All Grades'
-          AND SUBSTR(geographic_subdivision, 3, 1) = ?
+          AND geographic_subdivision IN (
+              SELECT DISTINCT dbn FROM lake.health.school_cafeteria_inspections
+              WHERE TRY_CAST(latitude AS DOUBLE) IS NOT NULL
+                AND ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.01
+                AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.01
+          )
           AND year = (SELECT MAX(year) FROM lake.education.ela_results)
         ORDER BY TRY_CAST(level_3_4_1 AS DOUBLE) DESC NULLS LAST
         LIMIT 3
-    """, [boro_letter]))
+    """, [latitude or 0, longitude or 0]))
 
     queries.append(("school_math", """
         SELECT school_name, mean_scale_score,
@@ -677,11 +713,16 @@ def build_queries(
         FROM lake.education.math_results
         WHERE report_category = 'School'
           AND grade = 'All Grades'
-          AND SUBSTR(geographic_subdivision, 3, 1) = ?
+          AND geographic_subdivision IN (
+              SELECT DISTINCT dbn FROM lake.health.school_cafeteria_inspections
+              WHERE TRY_CAST(latitude AS DOUBLE) IS NOT NULL
+                AND ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.01
+                AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.01
+          )
           AND year = (SELECT MAX(year) FROM lake.education.math_results)
         ORDER BY TRY_CAST(level_3_4_1 AS DOUBLE) DESC NULLS LAST
         LIMIT 3
-    """, [boro_letter]))
+    """, [latitude or 0, longitude or 0]))
 
     queries.append(("school_safety", """
         SELECT location_name, register,
@@ -689,11 +730,16 @@ def build_queries(
                TRY_CAST(vio_n AS INT) AS violent_incidents,
                TRY_CAST(prop_n AS INT) AS property_incidents
         FROM lake.education.school_safety
-        WHERE SUBSTR(dbn, 3, 1) = ?
+        WHERE dbn IN (
+            SELECT DISTINCT dbn FROM lake.health.school_cafeteria_inspections
+            WHERE TRY_CAST(latitude AS DOUBLE) IS NOT NULL
+              AND ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.01
+              AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.01
+        )
           AND school_year = (SELECT MAX(school_year) FROM lake.education.school_safety)
         ORDER BY TRY_CAST(major_n AS INT) DESC NULLS LAST
         LIMIT 3
-    """, [boro_letter]))
+    """, [latitude or 0, longitude or 0]))
 
     # ══════════════════════════════════════════════════════════════════════
     # HEALTH (ZIP/UHF, ~5 queries)
@@ -710,7 +756,7 @@ def build_queries(
 
     queries.append(("health_rats", """
         SELECT COUNT(*) AS inspections,
-               COUNT(*) FILTER (WHERE result ILIKE '%active%') AS active_rats
+               COUNT(*) FILTER (WHERE result IN ('Rat Activity', 'Failed for Rat Act')) AS active_rats
         FROM lake.health.rodent_inspections
         WHERE zip_code = ?
     """, [zipcode]))
@@ -725,7 +771,7 @@ def build_queries(
     queries.append(("pctile_rats", """
         WITH zip_rats AS (
             SELECT zip_code,
-                   COUNT(*) FILTER (WHERE result ILIKE '%active%') AS active
+                   COUNT(*) FILTER (WHERE result IN ('Rat Activity', 'Failed for Rat Act')) AS active
             FROM lake.health.rodent_inspections
             GROUP BY zip_code
         ),
@@ -771,19 +817,19 @@ def build_queries(
     """, [zipcode]))
 
     queries.append(("env_air", """
-        SELECT name, AVG(TRY_CAST(data_value AS DOUBLE)) AS avg_val
+        SELECT name, TRY_CAST(data_value AS DOUBLE) AS avg_val
         FROM lake.environment.air_quality
         WHERE geo_type_name = 'CD'
           AND name = 'Fine particles (PM 2.5)'
+          AND geo_join_id = ?
           AND time_period = (
               SELECT MAX(time_period)
               FROM lake.environment.air_quality
               WHERE geo_type_name = 'CD'
                 AND name = 'Fine particles (PM 2.5)'
           )
-        GROUP BY name
         LIMIT 1
-    """, None))
+    """, [cd]))
 
     queries.append(("env_trees_block", """
         SELECT COUNT(*) AS tree_count
@@ -907,7 +953,8 @@ def build_queries(
     # ══════════════════════════════════════════════════════════════════════
 
     queries.append(("fun_baby_names", """
-        SELECT nm, gndr, TRY_CAST(cnt AS INT) AS cnt
+        SELECT nm, gndr, TRY_CAST(cnt AS INT) AS cnt,
+               'NYC-wide (no ZIP-level data)' AS scope
         FROM lake.recreation.baby_names
         WHERE brth_yr = (SELECT MAX(brth_yr) FROM lake.recreation.baby_names)
         ORDER BY TRY_CAST(cnt AS INT) DESC
@@ -938,12 +985,27 @@ def build_queries(
               >= CURRENT_DATE - INTERVAL '1 year'
     """, [street]))
 
-    queries.append(("fun_fishing", """
-        SELECT site
-        FROM lake.recreation.fishing_sites
-        ORDER BY RANDOM()
-        LIMIT 1
-    """, None))
+    if latitude and longitude:
+        queries.append(("fun_fishing", """
+            SELECT site,
+                   ROUND(2 * 3961 * ASIN(SQRT(
+                       POWER(SIN(RADIANS(TRY_CAST(the_geom->>'$.coordinates[1]' AS DOUBLE) - ?) / 2), 2) +
+                       COS(RADIANS(?)) * COS(RADIANS(TRY_CAST(the_geom->>'$.coordinates[1]' AS DOUBLE))) *
+                       POWER(SIN(RADIANS(TRY_CAST(the_geom->>'$.coordinates[0]' AS DOUBLE) - ?) / 2), 2)
+                   )), 1) AS dist_miles
+            FROM lake.recreation.fishing_sites
+            WHERE the_geom IS NOT NULL
+            ORDER BY ABS(TRY_CAST(the_geom->>'$.coordinates[1]' AS DOUBLE) - ?)
+                   + ABS(TRY_CAST(the_geom->>'$.coordinates[0]' AS DOUBLE) - ?)
+            LIMIT 1
+        """, [latitude, latitude, longitude, latitude, longitude]))
+    else:
+        queries.append(("fun_fishing", """
+            SELECT site
+            FROM lake.recreation.fishing_sites
+            ORDER BY RANDOM()
+            LIMIT 1
+        """, None))
 
     queries.append(("fun_corps", """
         SELECT entity_name, formation_date

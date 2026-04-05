@@ -105,6 +105,8 @@ def _address_report_impl(address: str, ctx: Context) -> ToolResult:
     acs = _get(results, "neighborhood_acs")
     crimes = _get(results, "safety_crimes")
     shootings = _get(results, "safety_shootings")
+    rats = _get(results, "health_rats")
+    liquor = _get(results, "neighborhood_liquor")
 
     structured = {
         "bbl": bbl,
@@ -147,11 +149,17 @@ def _address_report_impl(address: str, ctx: Context) -> ToolResult:
             "e_designation": bool(_get(results, "building_e_designation")) if _get(results, "building_e_designation") else False,
             "lead_pipes_in_zip": _get(results, "neighborhood_lead_pipes").get("confirmed_lead", 0) if _get(results, "neighborhood_lead_pipes") else 0,
         },
+        "health": {
+            "rat_inspections": rats.get("inspections", 0) if rats else 0,
+            "rat_active": rats.get("active_rats", 0) if rats else 0,
+            "rat_pct": round(100.0 * (rats.get("active_rats", 0) or 0) / max(rats.get("inspections", 1) or 1, 1), 1) if rats else None,
+        },
         "livability": {
             "community_gardens": len(_get_all(results, "neighborhood_gardens")),
             "farmers_markets": len(_get_all(results, "neighborhood_farmers_markets")),
             "sidewalk_cafes": _get(results, "neighborhood_cafes").get("total", 0) if _get(results, "neighborhood_cafes") else 0,
-            "liquor_licenses": _get(results, "neighborhood_liquor").get("total", 0) if _get(results, "neighborhood_liquor") else 0,
+            "liquor_licenses": liquor.get("total", 0) if liquor else 0,
+            "bars_restaurants": liquor.get("bars_restaurants", 0) if liquor else 0,
             "solar_installations": _get(results, "neighborhood_solar").get("installations", 0) if _get(results, "neighborhood_solar") else 0,
             "restaurant_grades": {r.get("grade", "?"): r.get("cnt", 0) for r in _get_all(results, "neighborhood_restaurants")},
         },
@@ -199,20 +207,22 @@ def _resolve_context_by_bbl(pool, bbl: str) -> dict:
     data = dict(zip(cols, rows[0]))
     data["bbl"] = bbl
 
-    _, pct_rows = safe_query(pool, """
-        SELECT TRY_CAST(REGEXP_EXTRACT(incident_address, '(\\d+)\\s+PCT', 1) AS INT) AS pct
-        FROM lake.social_services.n311_service_requests
-        WHERE incident_zip = ? AND pct IS NOT NULL
-        GROUP BY pct ORDER BY COUNT(*) DESC LIMIT 1
-    """, [data.get("zip", "")])
-
-    if not pct_rows:
+    # Derive precinct via spatial proximity (bounding box on NYPD complaints)
+    lat = data.get("latitude")
+    lon = data.get("longitude")
+    if lat and lon:
         _, pct_rows = safe_query(pool, """
-            SELECT DISTINCT addr_pct_cd AS pct
-            FROM lake.public_safety.nypd_complaints_ytd
-            WHERE TRY_CAST(SUBSTR(?, 1, 1) AS INT) IS NOT NULL
+            SELECT addr_pct_cd AS pct, COUNT(*) AS cnt
+            FROM lake.public_safety.nypd_complaints_historic
+            WHERE ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.002
+              AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.002
+              AND addr_pct_cd IS NOT NULL
+            GROUP BY addr_pct_cd
+            ORDER BY cnt DESC
             LIMIT 1
-        """, [bbl])
+        """, [lat, lon])
+    else:
+        pct_rows = None
 
     data["precinct"] = str(pct_rows[0][0]) if pct_rows and pct_rows[0][0] else ""
     return data
@@ -254,22 +264,22 @@ def _resolve_context(pool, address: str) -> dict:
     data = dict(zip(cols, rows[0]))
     data["bbl"] = bbl
 
-    # Derive precinct from 311 data (most common precinct for this ZIP)
-    _, pct_rows = safe_query(pool, """
-        SELECT TRY_CAST(REGEXP_EXTRACT(incident_address, '(\\d+)\\s+PCT', 1) AS INT) AS pct
-        FROM lake.social_services.n311_service_requests
-        WHERE incident_zip = ? AND pct IS NOT NULL
-        GROUP BY pct ORDER BY COUNT(*) DESC LIMIT 1
-    """, [data.get("zip", "")])
-
-    # Fallback: try community district to precinct mapping
-    if not pct_rows:
+    # Derive precinct via spatial proximity (bounding box on NYPD complaints)
+    lat = data.get("latitude")
+    lon = data.get("longitude")
+    if lat and lon:
         _, pct_rows = safe_query(pool, """
-            SELECT DISTINCT addr_pct_cd AS pct
-            FROM lake.public_safety.nypd_complaints_ytd
-            WHERE TRY_CAST(SUBSTR(?, 1, 1) AS INT) IS NOT NULL
+            SELECT addr_pct_cd AS pct, COUNT(*) AS cnt
+            FROM lake.public_safety.nypd_complaints_historic
+            WHERE ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.002
+              AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.002
+              AND addr_pct_cd IS NOT NULL
+            GROUP BY addr_pct_cd
+            ORDER BY cnt DESC
             LIMIT 1
-        """, [bbl])
+        """, [lat, lon])
+    else:
+        pct_rows = None
 
     data["precinct"] = str(pct_rows[0][0]) if pct_rows and pct_rows[0][0] else ""
 

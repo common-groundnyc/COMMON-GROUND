@@ -48,19 +48,33 @@ def require_graph(ctx: object) -> None:
 
 
 def graph_cache_fresh() -> bool:
-    """Check if Parquet cache exists and is < 24 hours old."""
+    """Check if Parquet cache exists and hasn't been invalidated.
+
+    Cache persists indefinitely — no time-based TTL. Invalidate by deleting
+    _built_at.txt (e.g. after a Dagster materialization) or by running
+    ``touch $GRAPH_CACHE_DIR/_stale``.
+    """
     cache = pathlib.Path(GRAPH_CACHE_DIR)
     if not cache.exists():
         return False
     marker = cache / "_built_at.txt"
     if not marker.exists():
         return False
+    stale_flag = cache / "_stale"
+    if stale_flag.exists():
+        return False
     try:
-        built_ts = float(marker.read_text().strip())
-        age_hours = (time.time() - built_ts) / 3600
-        return age_hours < 24 and all((cache / f"{t}.parquet").exists() for t in GRAPH_TABLES)
+        float(marker.read_text().strip())  # validate marker is parseable
+        return all((cache / f"{t}.parquet").exists() for t in GRAPH_TABLES)
     except (ValueError, OSError):
         return False
+
+
+def invalidate_graph_cache() -> None:
+    """Mark graph cache as stale so next restart triggers a rebuild."""
+    cache = pathlib.Path(GRAPH_CACHE_DIR)
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "_stale").write_text(str(time.time()))
 
 
 def load_graph_from_cache(conn: object) -> None:
@@ -78,3 +92,7 @@ def save_graph_to_cache(conn: object) -> None:
         path = f"{GRAPH_CACHE_DIR}/{t}.parquet"
         conn.execute(f"COPY main.{t} TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
     (cache / "_built_at.txt").write_text(str(time.time()))
+    # Clear stale flag after successful rebuild
+    stale_flag = cache / "_stale"
+    if stale_flag.exists():
+        stale_flag.unlink()
