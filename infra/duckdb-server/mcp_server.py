@@ -1707,9 +1707,16 @@ async def app_lifespan(server):
         # Server starts immediately; routing is degraded until background build finishes.
         if emb_conn:
             try:
-                existing = emb_conn.execute(
-                    "SELECT COUNT(*) FROM name_token_routes"
-                ).fetchone()[0]
+                # Use a separate read-only connection to avoid blocking the background
+                # embedding thread which holds the write lock on emb_conn.
+                import duckdb as _duckdb2
+                _ro_conn = _duckdb2.connect(EMBEDDINGS_DB, read_only=True, config={"allow_unsigned_extensions": "true"})
+                try:
+                    existing = _ro_conn.execute(
+                        "SELECT COUNT(*) FROM name_token_routes"
+                    ).fetchone()[0]
+                finally:
+                    _ro_conn.close()
             except Exception:
                 existing = 0
 
@@ -1717,10 +1724,23 @@ async def app_lifespan(server):
             needs_rebuild = existing < 100_000
 
             if needs_rebuild:
-                def _build_token_routes_bg(bg_conn, bg_emb_conn):
+                # Capture pg_pass for the background thread's own connection
+                _tok_pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
+
+                def _build_token_routes_bg(tok_pg_pass, bg_emb_conn):
+                    """Build name_token_routes using its own DuckDB connection.
+                    MUST NOT share the main conn — concurrent access causes pure virtual crash."""
+                    import duckdb as _duckdb_bg, pathlib
                     try:
                         print(f"Background: building name_token_routes ({existing:,} existing)...", flush=True)
                         t_tok = time.time()
+                        # Own connection — avoids thread-safety issues with the shared conn
+                        bg_conn = _duckdb_bg.connect(config={"allow_unsigned_extensions": "true"})
+                        bg_conn.execute("LOAD ducklake")
+                        bg_conn.execute(f"""
+                            ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={tok_pg_pass} host=postgres'
+                            AS lake (METADATA_SCHEMA 'lake')
+                        """)
                         tmp_path = "/data/common-ground/lake/_tmp_routes.parquet"
                         bg_conn.execute(f"""
                             COPY (
@@ -1728,13 +1748,13 @@ async def app_lifespan(server):
                                 FROM lake.foundation.name_tokens
                             ) TO '{tmp_path}' (FORMAT PARQUET)
                         """)
+                        bg_conn.close()
                         print(f"  Routes exported to parquet in {time.time() - t_tok:.1f}s", flush=True)
                         bg_emb_conn.execute("DROP TABLE IF EXISTS name_token_routes")
                         bg_emb_conn.execute(f"""
                             CREATE TABLE name_token_routes AS
                             SELECT * FROM read_parquet('{tmp_path}')
                         """)
-                        import pathlib
                         pathlib.Path(tmp_path).unlink(missing_ok=True)
                         tok_count = bg_emb_conn.execute("SELECT COUNT(*) FROM name_token_routes").fetchone()[0]
                         print(f"name_token_routes: {tok_count:,} routes in {time.time() - t_tok:.1f}s", flush=True)
@@ -1743,7 +1763,7 @@ async def app_lifespan(server):
 
                 threading.Thread(
                     target=_build_token_routes_bg,
-                    args=(conn, emb_conn),
+                    args=(_tok_pg_pass, emb_conn),
                     daemon=True,
                     name="token-routes-build",
                 ).start()
@@ -1956,29 +1976,53 @@ _SESSION_MAX = 1000
 
 
 class PostHogMiddleware(Middleware):
-    """Capture every MCP tool call as a PostHog event with client identity."""
+    """Capture every MCP tool call with full client identity and Cloudflare headers."""
+
+    def _extract_client_info(self) -> dict:
+        """Extract real client IP, country, and user agent from Cloudflare headers."""
+        info = {"ip": "unknown", "country": "unknown", "cf_ray": "", "user_agent": ""}
+        try:
+            req = get_http_request()
+            if req:
+                headers = dict(req.headers) if hasattr(req, "headers") else {}
+                # CF-Connecting-IP is the real client IP (set by Cloudflare tunnel)
+                info["ip"] = (
+                    headers.get("cf-connecting-ip")
+                    or headers.get("x-forwarded-for", "").split(",")[0].strip()
+                    or (req.client.host if req.client else "unknown")
+                )
+                info["country"] = headers.get("cf-ipcountry", "unknown")
+                info["cf_ray"] = headers.get("cf-ray", "")
+                info["user_agent"] = headers.get("user-agent", "")
+        except Exception:
+            pass
+        return info
 
     async def on_initialize(self, context, call_next):
         result = await call_next(context)
         try:
             client_info = context.message.clientInfo
             session_id = context.fastmcp_context.session_id or "unknown"
-            client_ip = "unknown"
-            try:
-                req = get_http_request()
-                if req and req.client:
-                    client_ip = req.client.host
-            except Exception:
-                pass
+            cf = self._extract_client_info()
             _session_clients[session_id] = {
                 "client_name": getattr(client_info, "name", "unknown"),
                 "client_version": getattr(client_info, "version", "unknown"),
-                "client_ip": client_ip,
+                "client_ip": cf["ip"],
+                "client_country": cf["country"],
+                "user_agent": cf["user_agent"],
             }
             if len(_session_clients) > _SESSION_MAX:
                 excess = len(_session_clients) - _SESSION_MAX
                 for key in list(_session_clients.keys())[:excess]:
                     del _session_clients[key]
+
+            # Register session as a PostHog group (enables session-level analytics)
+            if os.environ.get("POSTHOG_API_KEY"):
+                posthog.group_identify("mcp_session", session_id, {
+                    "client_name": getattr(client_info, "name", "unknown"),
+                    "client_country": cf["country"],
+                    "client_ip": cf["ip"],
+                })
         except Exception:
             pass
         return result
@@ -1999,44 +2043,77 @@ class PostHogMiddleware(Middleware):
             pass
         client = _session_clients.get(session_id, {})
 
-        client_ip = client.get("client_ip", "unknown")
-        if client_ip == "unknown":
-            try:
-                req = get_http_request()
-                if req and req.client:
-                    client_ip = req.client.host
-            except Exception:
-                pass
+        # Get real client info from Cloudflare headers (not Docker internal IP)
+        cf = self._extract_client_info()
+        client_ip = client.get("client_ip") or cf["ip"]
+        client_country = client.get("client_country") or cf["country"]
 
         try:
             result = await call_next(context)
             return result
         except Exception as exc:
-            error = str(exc)[:200]
+            error = str(exc)[:500]
             raise
         finally:
             try:
                 elapsed = round((time.time() - t0) * 1000)
-                distinct_id = client.get("client_name", "unknown") + ":" + client_ip
+                distinct_id = f"mcp:{client_ip}"
+
                 props = {
+                    # Tool identity
                     "tool": tool_name,
                     "server": "common-ground-mcp",
+
+                    # Performance
                     "duration_ms": elapsed,
+                    "is_error": error is not None,
+
+                    # Session / client
                     "session_id": session_id,
                     "client_name": client.get("client_name", "unknown"),
                     "client_version": client.get("client_version", "unknown"),
+
+                    # Real client info from Cloudflare
                     "client_ip": client_ip,
+                    "client_country": client_country,
+                    "cf_ray": cf.get("cf_ray", ""),
+                    "user_agent": cf.get("user_agent", ""),
+
+                    # Don't create person profiles for anonymous API traffic
+                    "$process_person_profile": False,
                 }
+
+                # Include actual arg values for short strings (useful for debugging)
                 for k, v in arguments.items():
                     sv = str(v)
-                    props[f"arg_{k}"] = f"<{type(v).__name__}:{len(sv)}chars>"
+                    if len(sv) <= 100:
+                        props[f"arg_{k}"] = sv
+                    else:
+                        props[f"arg_{k}"] = f"<{type(v).__name__}:{len(sv)}chars>"
+
                 if error:
                     props["error"] = error
+
                 posthog.capture(
                     distinct_id=distinct_id,
                     event="mcp_tool_called",
                     properties=props,
+                    groups={"mcp_session": session_id},
                 )
+
+                # Also capture exceptions for PostHog Error Tracking
+                if error:
+                    posthog.capture(
+                        distinct_id=distinct_id,
+                        event="$exception",
+                        properties={
+                            "$exception_message": error,
+                            "$exception_type": "ToolError",
+                            "tool": tool_name,
+                            "session_id": session_id,
+                            "client_country": client_country,
+                        },
+                    )
             except Exception:
                 pass  # Never let analytics break tool calls
 
