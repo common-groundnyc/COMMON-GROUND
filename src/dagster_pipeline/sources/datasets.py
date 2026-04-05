@@ -406,21 +406,48 @@ SOCRATA_DATASETS: dict[str, list[tuple[str, str, str]]] = {
 }
 
 # Tables with lat/lng coordinates — eligible for H3 indexing
+# (schema, table, lat_column, lng_column)
 LAT_LNG_TABLES: list[tuple[str, str, str, str]] = [
+    # ── City Government ──
     ("city_government", "pluto", "latitude", "longitude"),
+
+    # ── Environment ──
     ("environment", "street_trees", "latitude", "longitude"),
+    ("environment", "nys_solar", "latitude", "longitude"),
+
+    # ── Public Safety ──
     ("public_safety", "motor_vehicle_collisions", "latitude", "longitude"),
     ("public_safety", "nypd_arrests_historic", "latitude", "longitude"),
     ("public_safety", "nypd_arrests_ytd", "latitude", "longitude"),
     ("public_safety", "nypd_complaints_historic", "latitude", "longitude"),
     ("public_safety", "nypd_complaints_ytd", "latitude", "longitude"),
     ("public_safety", "shootings", "latitude", "longitude"),
+    ("public_safety", "criminal_court_summons", "latitude", "longitude"),
+    ("public_safety", "nys_crashes", "latitude", "longitude"),
+
+    # ── Health ──
     ("health", "restaurant_inspections", "latitude", "longitude"),
-    ("transportation", "mta_stations", "gtfs_latitude", "gtfs_longitude"),
-    ("transportation", "mta_entrances", "entrance_latitude", "entrance_longitude"),
+    ("health", "rodent_inspections", "latitude", "longitude"),
+    ("health", "health_facilities", "latitude", "longitude"),
+    ("health", "school_cafeteria_inspections", "latitude", "longitude"),
+
+    # ── Housing ──
+    ("housing", "evictions", "latitude", "longitude"),
+
+    # ── Education ──
+    ("education", "school_safety", "latitude", "longitude"),
+
+    # ── Social Services ──
     ("social_services", "n311_service_requests", "latitude", "longitude"),
     ("social_services", "community_gardens", "latitude", "longitude"),
-    ("environment", "nys_solar", "latitude", "longitude"),
+    ("social_services", "dycd_program_sites", "latitude", "longitude"),
+    ("social_services", "nys_child_care", "latitude", "longitude"),
+
+    # ── Transportation ──
+    ("transportation", "mta_stations", "gtfs_latitude", "gtfs_longitude"),
+    ("transportation", "mta_entrances", "entrance_latitude", "entrance_longitude"),
+
+    # ── Federal ──
     ("federal", "nrel_alt_fuel_stations", "latitude", "longitude"),
     ("federal", "epa_echo_facilities_manhattan", "registrylatdecdeg", "registrylondecdeg"),
     ("federal", "epa_echo_facilities_bronx", "registrylatdecdeg", "registrylondecdeg"),
@@ -430,6 +457,17 @@ LAT_LNG_TABLES: list[tuple[str, str, str, str]] = [
     ("federal", "urban_school_directory", "latitude", "longitude"),
     ("federal", "hud_public_housing_developments", "latitude", "longitude"),
     ("federal", "hud_public_housing_buildings", "latitude", "longitude"),
+
+    # ── NOTE: Tables with GeoJSON-only coordinates (no direct lat/lon) ──
+    # These need coordinate extraction before H3 indexing:
+    #   business.nys_liquor_authority → georeference (GeoJSON)
+    #   recreation.fishing_sites → the_geom (GeoJSON)
+    #   environment.lead_service_lines → location (GeoJSON)
+    #   business.sidewalk_cafe → no geo columns
+    #   housing.dob_complaints → no geo columns
+    #   housing.dob_ecb_violations → no geo columns
+    #   federal.fec_contributions → no geo columns
+    #   transportation.parking_violations → no lat/lon columns
 ]
 
 NAME_TABLES: list[tuple[str, str]] = [
