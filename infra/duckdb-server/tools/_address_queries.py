@@ -725,19 +725,19 @@ def build_queries(
     """, [latitude or 0, longitude or 0]))
 
     queries.append(("school_safety", """
-        SELECT location_name, register,
-               TRY_CAST(major_n AS INT) AS major_incidents,
-               TRY_CAST(vio_n AS INT) AS violent_incidents,
-               TRY_CAST(prop_n AS INT) AS property_incidents
-        FROM lake.education.school_safety
-        WHERE dbn IN (
-            SELECT DISTINCT dbn FROM lake.health.school_cafeteria_inspections
-            WHERE TRY_CAST(latitude AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.01
-              AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.01
-        )
-          AND school_year = (SELECT MAX(school_year) FROM lake.education.school_safety)
-        ORDER BY TRY_CAST(major_n AS INT) DESC NULLS LAST
+        SELECT s.location_name, s.register,
+               TRY_CAST(s.major_n AS INT) AS major_incidents,
+               TRY_CAST(s.vio_n AS INT) AS violent_incidents,
+               TRY_CAST(s.prop_n AS INT) AS property_incidents
+        FROM lake.education.school_safety s
+        WHERE s.school_year = (SELECT MAX(school_year) FROM lake.education.school_safety)
+          AND s.location_name IN (
+              SELECT DISTINCT schoolname FROM lake.health.school_cafeteria_inspections
+              WHERE TRY_CAST(latitude AS DOUBLE) IS NOT NULL
+                AND ABS(TRY_CAST(latitude AS DOUBLE) - ?) < 0.01
+                AND ABS(TRY_CAST(longitude AS DOUBLE) - ?) < 0.01
+          )
+        ORDER BY TRY_CAST(s.major_n AS INT) DESC NULLS LAST
         LIMIT 3
     """, [latitude or 0, longitude or 0]))
 

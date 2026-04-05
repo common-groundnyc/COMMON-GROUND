@@ -45,7 +45,7 @@ def build_percentile_tables(db):
                     COUNT(DISTINCT ow.bbl) AS building_count,
                     COALESCE(SUM(CASE WHEN v.violation_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS violation_count,
                     COALESCE(SUM(CASE WHEN v.status = 'open' THEN 1 ELSE 0 END), 0) AS open_violation_count,
-                    COALESCE(SUM(CASE WHEN v.severity = 'C' THEN 1 ELSE 0 END), 0) AS class_c_count
+                    COALESCE(SUM(CASE WHEN v.class = 'C' THEN 1 ELSE 0 END), 0) AS class_c_count
                 FROM main.graph_owners o
                 LEFT JOIN main.graph_owns ow ON o.owner_id = ow.owner_id
                 LEFT JOIN main.graph_violations v ON ow.bbl = v.bbl
@@ -70,17 +70,17 @@ def build_percentile_tables(db):
             WITH building_stats AS (
                 SELECT
                     b.bbl,
-                    b.total_units,
+                    b.units,
                     b.stories,
                     COALESCE(COUNT(v.violation_id), 0) AS violation_count,
                     COALESCE(SUM(CASE WHEN v.status = 'open' THEN 1 ELSE 0 END), 0) AS open_violation_count
                 FROM main.graph_buildings b
                 LEFT JOIN main.graph_violations v ON b.bbl = v.bbl
-                GROUP BY b.bbl, b.total_units, b.stories
+                GROUP BY b.bbl, b.units, b.stories
             )
             SELECT
                 bbl,
-                total_units,
+                units,
                 stories,
                 violation_count,
                 open_violation_count,
