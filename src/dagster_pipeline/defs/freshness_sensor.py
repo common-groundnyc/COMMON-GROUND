@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 SYNC_THRESHOLD = 0.05  # 5% drift triggers stale
 SYNC_MIN_MISSING = 1000  # absolute row gap also triggers stale
 RETRIGGER_COOLDOWN = 6 * 3600  # 6 hours — don't re-trigger while a run is likely still ingesting
+MAX_RUNS_PER_TICK = 10  # cap queued runs per sensor tick to avoid flooding
 
 DOMAINS = {
     "nyc": "data.cityofnewyork.us",
@@ -281,12 +282,22 @@ def data_freshness_sensor(context):
         conn.close()
 
     stale_count = sum(1 for r in freshness_rows if r.get("sync_status") == "stale")
-    context.log.info(
-        "Freshness check complete: %d stale, %d run requests emitted",
-        stale_count, len(run_requests),
-    )
 
-    if not run_requests:
-        return SensorResult(run_requests=[], cursor=json.dumps(new_cursor))
+    # Cap runs per tick to avoid flooding the queue
+    deferred = 0
+    if len(run_requests) > MAX_RUNS_PER_TICK:
+        deferred = len(run_requests) - MAX_RUNS_PER_TICK
+        # Clear triggered_at for deferred datasets so they get picked up next tick
+        deferred_requests = run_requests[MAX_RUNS_PER_TICK:]
+        for req in deferred_requests:
+            dataset_id = req.tags.get("dataset_id", "")
+            if dataset_id in new_cursor:
+                new_cursor[dataset_id]["triggered_at"] = None
+        run_requests = run_requests[:MAX_RUNS_PER_TICK]
+
+    context.log.info(
+        "Freshness check complete: %d stale, %d run requests emitted, %d deferred to next tick",
+        stale_count, len(run_requests), deferred,
+    )
 
     return SensorResult(run_requests=run_requests, cursor=json.dumps(new_cursor))
