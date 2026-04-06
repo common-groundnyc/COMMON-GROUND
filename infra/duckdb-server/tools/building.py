@@ -888,7 +888,7 @@ def _view_story(pool, bbl: str) -> ToolResult:
         "year_built": year, "age": age, "era": era_name,
         "floors": floors, "units": units, "building_class": bldg_class,
         "assessed_value": assessed, "owner": owner,
-        "landmark": landmark, "historic_district": hist_dist,
+        "landmark": landmark,
         "families_estimate": families_est, "milestones_witnessed": len(witnessed),
     }
 
