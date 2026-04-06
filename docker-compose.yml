@@ -32,6 +32,7 @@ services:
       - ./models:/app/models:ro
     networks:
       - backend
+      - shared
     deploy:
       resources:
         limits:
