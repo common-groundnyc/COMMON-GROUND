@@ -1,9 +1,11 @@
 # Dagster instance configuration
 # Shared by all containers via volume mount
+# Uses Postgres for run/event storage to avoid SQLite WAL issues across containers
 
 storage:
-  sqlite:
-    base_dir: /dagster-home/storage
+  postgres:
+    postgres_url:
+      env: DAGSTER_PG_URL
 
 compute_logs:
   module: dagster.core.storage.local_compute_log_manager

@@ -50,12 +50,15 @@ services:
     init: true
     env_file:
       - .env.secrets
+    environment:
+      DAGSTER_PG_URL: "postgresql://dagster:test@common-ground-postgres-1:5432/dagster"
     volumes:
       - ./dagster-home:/dagster-home
     networks:
       - frontend
       - backend
       - tunnel_net
+      - shared
     deploy:
       resources:
         limits:
@@ -74,10 +77,13 @@ services:
     init: true
     env_file:
       - .env.secrets
+    environment:
+      DAGSTER_PG_URL: "postgresql://dagster:test@common-ground-postgres-1:5432/dagster"
     volumes:
       - ./dagster-home:/dagster-home
     networks:
       - backend
+      - shared
     deploy:
       resources:
         limits:
