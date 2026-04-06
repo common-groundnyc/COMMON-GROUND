@@ -1,0 +1,41 @@
+# Dagster instance configuration
+# Shared by all containers via volume mount
+
+storage:
+  sqlite:
+    base_dir: /dagster-home/storage
+
+compute_logs:
+  module: dagster.core.storage.local_compute_log_manager
+  class: LocalComputeLogManager
+  config:
+    base_dir: /dagster-home/compute_logs
+
+# DefaultRunLauncher — run orchestration happens in the daemon container
+# docker_executor in definitions.py spawns each STEP as its own container
+run_launcher:
+  module: dagster.core.launcher
+  class: DefaultRunLauncher
+
+run_retries:
+  enabled: true
+  max_retries: 2
+  retry_on_asset_or_op_failure: false  # only retry infrastructure crashes (OOM), not code errors
+
+run_monitoring:
+  enabled: true
+  poll_interval_seconds: 15
+  cancel_timeout_seconds: 60
+  start_timeout_seconds: 180
+  max_resume_run_attempts: 0
+  max_runtime_seconds: 21600         # kill runs stuck longer than 6 hours
+  free_slots_after_run_end_seconds: 60
+
+retention:
+  schedule:
+    purge_after_days: 30
+  sensor:
+    purge_after_days:
+      skipped: 7
+      failure: 30
+      success: 90

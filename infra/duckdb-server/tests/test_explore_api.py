@@ -84,6 +84,32 @@ class TestClassifyColumn:
     def test_units_integer_is_numeric(self):
         assert classify_column("units", "INTEGER") == FilterType.NUMERIC_RANGE
 
+    # Socrata-style columns (no underscores, all VARCHAR)
+    def test_inspectiondate_varchar_is_date(self):
+        assert classify_column("inspectiondate", "VARCHAR") == FilterType.DATE_RANGE
+
+    def test_approveddate_varchar_is_date(self):
+        assert classify_column("approveddate", "VARCHAR") == FilterType.DATE_RANGE
+
+    def test_novissueddate_varchar_is_date(self):
+        assert classify_column("novissueddate", "VARCHAR") == FilterType.DATE_RANGE
+
+    def test_violationstatus_varchar_is_category(self):
+        assert classify_column("violationstatus", "VARCHAR") == FilterType.CATEGORY
+
+    def test_currentstatus_varchar_is_category(self):
+        assert classify_column("currentstatus", "VARCHAR") == FilterType.CATEGORY
+
+    def test_novtype_varchar_is_category(self):
+        assert classify_column("novtype", "VARCHAR") == FilterType.CATEGORY
+
+    def test_novdescription_varchar_is_text_search(self):
+        assert classify_column("novdescription", "VARCHAR") == FilterType.TEXT_SEARCH
+
+    def test_streetname_varchar_is_none(self):
+        # streetname is excluded from text_search (too noisy as a filter)
+        assert classify_column("streetname", "VARCHAR") is None
+
 
 class TestBuildFilteredQuery:
     def test_no_filters_returns_select_with_limit(self):

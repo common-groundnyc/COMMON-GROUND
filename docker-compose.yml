@@ -1,0 +1,88 @@
+volumes:
+  dlt-pipelines:
+    name: dagster-pipeline-dlt-state
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+  tunnel_net:
+    external: true
+  shared:
+    external: true
+    name: common-ground-shared
+
+services:
+  # gRPC code server — loads user code, shared by webserver + daemon
+  # multiprocess_executor: steps fork from this process (no Docker per step)
+  dagster-code:
+    build: .
+    container_name: dagster-code
+    command: ["uv", "run", "dagster", "code-server", "start",
+              "-m", "dagster_pipeline.definitions",
+              "--host", "0.0.0.0", "--port", "4000"]
+    init: true
+    env_file:
+      - .env.secrets
+    volumes:
+      - ./dagster-home:/dagster-home
+      - ./src/dagster_pipeline:/app/src/dagster_pipeline
+      - ./.dlt/config.toml:/app/.dlt/config.toml:ro
+      - ./models:/app/models:ro
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 24g
+    restart: unless-stopped
+
+  # Dagster webserver — UI + GraphQL API
+  # Accessible via Cloudflare Tunnel (dagster.common-ground.nyc)
+  dagster-webserver:
+    build: .
+    container_name: dagster-webserver
+    command: ["uv", "run", "dagster-webserver", "-w", "workspace.yaml", "-p", "3000", "-h", "0.0.0.0"]
+    ports:
+      - "3000:3000"
+    init: true
+    env_file:
+      - .env.secrets
+    volumes:
+      - ./dagster-home:/dagster-home
+    networks:
+      - frontend
+      - backend
+      - tunnel_net
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '1.0'
+    depends_on:
+      - dagster-code
+    restart: unless-stopped
+
+  # Dagster daemon — scheduler, sensors, run orchestration
+  # multiprocess_executor: no Docker socket needed (steps fork in dagster-code)
+  dagster-daemon:
+    build: .
+    container_name: dagster-daemon
+    command: ["uv", "run", "dagster-daemon", "run", "-w", "workspace.yaml"]
+    init: true
+    env_file:
+      - .env.secrets
+    volumes:
+      - ./dagster-home:/dagster-home
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: '2.0'
+    depends_on:
+      - dagster-code
+    restart: unless-stopped

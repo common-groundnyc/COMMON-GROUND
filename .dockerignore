@@ -1,0 +1,11 @@
+.venv
+.git
+__pycache__
+*.pyc
+.dagster-home
+.dlt/secrets.toml
+*.duckdb
+*.duckdb.wal
+docs/
+tests/
+.planning/

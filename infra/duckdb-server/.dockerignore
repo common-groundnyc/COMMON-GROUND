@@ -1,0 +1,11 @@
+*.duckdb
+*.duckdb.wal
+*.lance
+__pycache__
+.DS_Store
+tests/
+DEBUG-*.md
+PLAN.md
+SUPER-TOOLS.md
+FASTMCP-RESEARCH.md
+stress_test.py
