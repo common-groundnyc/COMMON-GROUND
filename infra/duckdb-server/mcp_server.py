@@ -1,14 +1,18 @@
 """Common Ground — FastMCP server for NYC open data lake."""
 
+import asyncio
 import os
 import threading
 import time
+from collections import defaultdict
 
 import duckdb
 import posthog
 from fastmcp import FastMCP, Context
+from fastmcp.exceptions import ToolError
 from fastmcp.server.lifespan import lifespan
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
 from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddleware
 from fastmcp.server.dependencies import get_http_request, get_http_headers
 
@@ -2119,9 +2123,61 @@ class PostHogMiddleware(Middleware):
 
 
 # ---------------------------------------------------------------------------
+# ConcurrencyMiddleware — limit concurrent tool calls per IP and globally
+# ---------------------------------------------------------------------------
+
+_concurrency_semaphores: dict[str, asyncio.Semaphore] = defaultdict(
+    lambda: asyncio.Semaphore(4)
+)
+_GLOBAL_SEMAPHORE = asyncio.Semaphore(20)  # leave 4 cursors for health/warmup
+
+
+class ConcurrencyMiddleware(Middleware):
+    """Limit concurrent tool calls per client IP and globally."""
+
+    async def on_call_tool(self, context, call_next):
+        client_ip = "unknown"
+        try:
+            req = get_http_request()
+            if req:
+                headers = dict(req.headers) if hasattr(req, "headers") else {}
+                client_ip = (
+                    headers.get("cf-connecting-ip")
+                    or headers.get("x-forwarded-for", "").split(",")[0].strip()
+                    or (req.client.host if req.client else "unknown")
+                )
+        except Exception:
+            pass
+
+        per_ip = _concurrency_semaphores[client_ip]
+
+        if per_ip.locked():
+            raise ToolError(
+                "Too many concurrent requests from your IP (max 4). "
+                "Wait for current queries to complete."
+            )
+
+        if _GLOBAL_SEMAPHORE.locked():
+            raise ToolError(
+                "Server at capacity (20 concurrent queries). "
+                "Please retry in a few seconds."
+            )
+
+        async with _GLOBAL_SEMAPHORE:
+            async with per_ip:
+                return await call_next(context)
+
+
+# ---------------------------------------------------------------------------
 # Middleware registrations
 # ---------------------------------------------------------------------------
 
+mcp.add_middleware(RateLimitingMiddleware(
+    max_requests_per_second=2.0,
+    burst_capacity=10,
+    global_limit=True,
+))
+mcp.add_middleware(ConcurrencyMiddleware())
 mcp.add_middleware(ResponseLimitingMiddleware(max_size=50_000))
 mcp.add_middleware(OutputFormatterMiddleware())
 mcp.add_middleware(CitationMiddleware())

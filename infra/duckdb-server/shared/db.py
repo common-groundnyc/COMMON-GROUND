@@ -6,9 +6,12 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 import duckdb
 from fastmcp.exceptions import ToolError
+
+QUERY_TIMEOUT_S = 60
 
 from cursor_pool import CursorPool  # re-export
 from sql_utils import sanitize_error
@@ -224,7 +227,15 @@ def execute(
     global _last_reconnect
     with pool.cursor() as cur:
         try:
-            result = cur.execute(sql, params or [])
+            with ThreadPoolExecutor(1) as _qpool:
+                try:
+                    future = _qpool.submit(cur.execute, sql, params or [])
+                    result = future.result(timeout=QUERY_TIMEOUT_S)
+                except FuturesTimeoutError:
+                    raise ToolError(
+                        f"Query timed out after {QUERY_TIMEOUT_S}s. "
+                        "Try a simpler query or add filters."
+                    )
             cols = [d[0] for d in result.description] if result.description else []
             rows = _normalize_rows(result.fetchmany(MAX_QUERY_ROWS))
             return cols, rows
