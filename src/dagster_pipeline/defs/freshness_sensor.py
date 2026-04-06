@@ -76,7 +76,7 @@ def check_socrata_count(
         with urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
             return int(data[0]["count(*)"])
-    except (HTTPError, URLError, KeyError, IndexError, ValueError) as exc:
+    except (HTTPError, URLError, OSError, KeyError, IndexError, ValueError) as exc:
         logger.warning("count check failed for %s/%s: %s", domain, dataset_id, exc)
         return None
 

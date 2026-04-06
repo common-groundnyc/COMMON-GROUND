@@ -13,7 +13,6 @@ from dagster_pipeline.defs.resolved_entities_asset import resolved_entities
 from dagster_pipeline.defs.flush_sensor import flush_ducklake_sensor
 from dagster_pipeline.defs.freshness_sensor import data_freshness_sensor
 from dagster_pipeline.defs.foundation_assets import h3_index, phonetic_index, row_fingerprints
-from dagster_pipeline.defs.entity_embeddings_asset import entity_name_embeddings
 from dagster_pipeline.defs.entity_master_asset import entity_master
 from dagster_pipeline.defs.quality_assets import data_health
 from dagster_pipeline.defs.materialized_view_assets import (
@@ -26,7 +25,7 @@ from dagster_pipeline.defs.name_tokens_asset import name_tokens
 from dagster_pipeline.resources.ducklake import DuckLakeResource
 
 all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, *election_assets, name_index, resolved_entities,
-              h3_index, phonetic_index, row_fingerprints, data_health, entity_name_embeddings,
+              h3_index, phonetic_index, row_fingerprints, data_health,
               entity_master, address_lookup,
               mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
               mv_entity_acris, mv_city_averages, mv_pctile_violations, mv_pctile_311,
@@ -61,13 +60,6 @@ foundation_job = dg.define_asset_job(
     selection=dg.AssetSelection.groups("foundation"),
 )
 
-# Entity embeddings: rebuild Lance vector index
-entity_embeddings_job = dg.define_asset_job(
-    name="entity_embeddings",
-    selection=dg.AssetSelection.assets(
-        dg.AssetKey(["foundation", "entity_name_embeddings"]),
-    ),
-)
 
 # Full: everything (initial load or recovery)
 all_assets_job = dg.define_asset_job(
@@ -84,12 +76,6 @@ federal_schedule = dg.ScheduleDefinition(
     default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 
-# Lance embeddings rebuild — expensive, monthly is enough.
-entity_embeddings_schedule = dg.ScheduleDefinition(
-    job=entity_embeddings_job,
-    cron_schedule="0 12 1 * *",  # noon on 1st of month
-    default_status=dg.DefaultScheduleStatus.RUNNING,
-)
 
 # --- Sensors ---
 # data_freshness_sensor: hourly, triggers Socrata assets when source > lake (replaces daily/monthly schedules)
@@ -98,8 +84,8 @@ entity_embeddings_schedule = dg.ScheduleDefinition(
 
 defs = dg.Definitions(
     assets=all_assets,
-    jobs=[federal_daily_job, entity_resolution_job, foundation_job, entity_embeddings_job, all_assets_job],
-    schedules=[federal_schedule, entity_embeddings_schedule],
+    jobs=[federal_daily_job, entity_resolution_job, foundation_job, all_assets_job],
+    schedules=[federal_schedule],
     sensors=[flush_ducklake_sensor, data_freshness_sensor],
     resources={
         "ducklake": DuckLakeResource(
