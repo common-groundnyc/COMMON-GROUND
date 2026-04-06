@@ -855,7 +855,13 @@ def _view_full(pool, zipcode: str) -> ToolResult:
     portrait = _view_portrait(pool, zipcode)
     complaints = _view_complaints(pool, zipcode)
 
-    directive = "PRESENTATION: Show this complete neighborhood profile. Use interactive charts for demographic data and trend comparisons. Do not omit any section.\n\n"
+    directive = (
+        "ANALYSIS: Before showing this neighborhood profile, write 1-2 sentences summarizing "
+        "the key takeaway — cite specific numbers (cuisine standouts, noise ratio, building count, "
+        "top 311 complaint). Be direct, no preamble.\n\n"
+        "PRESENTATION: Show this complete neighborhood profile. Use interactive charts for "
+        "demographic data and trend comparisons. Do not omit any section.\n\n"
+    )
     p_text = portrait.content if isinstance(portrait.content, str) else "\n".join(str(c) for c in portrait.content)
     c_text = complaints.content if isinstance(complaints.content, str) else "\n".join(str(c) for c in complaints.content)
     merged_text = directive + p_text + "\n\n" + c_text

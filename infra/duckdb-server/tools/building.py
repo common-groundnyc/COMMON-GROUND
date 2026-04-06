@@ -892,8 +892,15 @@ def _view_story(pool, bbl: str) -> ToolResult:
         "families_estimate": families_est, "milestones_witnessed": len(witnessed),
     }
 
+    content = "\n".join(lines)
+    analysis_directive = (
+        "ANALYSIS: Before showing this building story, write 1-2 sentences summarizing "
+        "the key takeaway — cite specific numbers (violations, age, owner, complaints). "
+        "Be direct, no preamble.\n\n"
+    )
+
     return ToolResult(
-        content="\n".join(lines),
+        content=analysis_directive + content,
         structured_content=structured,
         meta={"bbl": bbl, "query_time_ms": elapsed},
     )

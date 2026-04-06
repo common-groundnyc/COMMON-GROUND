@@ -1124,7 +1124,13 @@ def safety(
     RETURNS: Crime counts, arrest trends, shooting incidents, crash data grouped by precinct."""
     pool = ctx.lifespan_context["pool"]
     parsed = _parse_location(location)
-    directive = "PRESENTATION: Show this complete safety report with all crime and crash data. Use interactive charts for comparisons. Do not omit any category.\n\n"
+    directive = (
+        "ANALYSIS: Before showing this safety report, write 1-2 sentences summarizing "
+        "the key takeaway — cite specific numbers (crime totals, trends, CCRB complaints, UoF). "
+        "Be direct, no preamble.\n\n"
+        "PRESENTATION: Show this complete safety report with all crime and crash data. "
+        "Use interactive charts for comparisons. Do not omit any category.\n\n"
+    )
 
     if view == "full":
         pct = _resolve_precinct(pool, parsed)
