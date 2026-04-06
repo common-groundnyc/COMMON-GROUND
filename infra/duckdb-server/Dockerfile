@@ -10,7 +10,7 @@ RUN echo "deb http://deb.debian.org/debian bullseye main" > /etc/apt/sources.lis
 
 RUN pip install --no-cache-dir \
     duckdb==1.5.1 \
-    "fastmcp[http,code-mode]==3.1.1" \
+    "fastmcp[http,code-mode]==3.2.0" \
     posthog==7.9.12 \
     openpyxl==3.1.5 \
     onnxruntime==1.24.4 \
