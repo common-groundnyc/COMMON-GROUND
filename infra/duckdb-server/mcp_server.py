@@ -2527,6 +2527,34 @@ async def worst_buildings_route(request: Request) -> JSONResponse:
     return response
 
 
+# ---------------------------------------------------------------------------
+# Mosaic data server endpoint — see routes/mosaic_route.py
+# ---------------------------------------------------------------------------
+from routes.mosaic_route import mosaic_query_endpoint as _explore_mosaic_query
+
+
+@mcp.custom_route("/mosaic/query", methods=["POST", "OPTIONS"])
+async def mosaic_query_route(request: Request) -> JSONResponse:
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+    if _shared_pool is None or not _shared_catalog:
+        return JSONResponse({"error": "Server starting up"}, status_code=503)
+    response = await _explore_mosaic_query(request)
+    response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
+    response.headers["Vary"] = "Origin"
+    return response
+
+
 _well_known_routes = [
     Route("/.well-known/oauth-authorization-server", _oauth_stub, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server/{path:path}", _oauth_stub, methods=["GET"]),
