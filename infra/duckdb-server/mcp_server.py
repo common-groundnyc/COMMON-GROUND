@@ -2454,6 +2454,73 @@ async def anomalies_json(request: Request) -> JSONResponse:
         return JSONResponse({"anomalies": [], "count": 0, "error": str(e)}, status_code=500)
 
 
+# ---------------------------------------------------------------------------
+# /explore dashboard REST endpoints — see routes/explore.py
+# ---------------------------------------------------------------------------
+from routes.explore import (
+    neighborhood_endpoint as _explore_neighborhood,
+    zips_search_endpoint as _explore_zips_search,
+    worst_buildings_endpoint as _explore_worst_buildings,
+)
+
+
+@mcp.custom_route("/api/neighborhood/{zip_code}", methods=["GET", "OPTIONS"])
+async def neighborhood_route(request: Request) -> JSONResponse:
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+    response = await _explore_neighborhood(request)
+    response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
+    response.headers["Vary"] = "Origin"
+    return response
+
+
+@mcp.custom_route("/api/zips/search", methods=["GET", "OPTIONS"])
+async def zips_search_route(request: Request) -> JSONResponse:
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+    response = await _explore_zips_search(request)
+    response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
+    response.headers["Vary"] = "Origin"
+    return response
+
+
+@mcp.custom_route("/api/buildings/worst", methods=["GET", "OPTIONS"])
+async def worst_buildings_route(request: Request) -> JSONResponse:
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            {},
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": _cors_origin(request),
+                "Vary": "Origin",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+    response = await _explore_worst_buildings(request)
+    response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
+    response.headers["Vary"] = "Origin"
+    return response
+
+
 _well_known_routes = [
     Route("/.well-known/oauth-authorization-server", _oauth_stub, methods=["GET"]),
     Route("/.well-known/oauth-authorization-server/{path:path}", _oauth_stub, methods=["GET"]),
