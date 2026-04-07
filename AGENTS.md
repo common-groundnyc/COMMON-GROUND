@@ -49,7 +49,7 @@ name_index · resolved_entities · entity_master · h3_index · phonetic_index �
 
 ```
 dagster-pipeline/
-├── .planning/                      # Project management — see README below
+├── docs/superpowers/                      # Project management — see README below
 │   ├── PROJECT.md                  # Vision, requirements, current state audit
 │   ├── ROADMAP.md                  # v1.0/v2.0/v3.0 phase breakdown (21 phases)
 │   ├── STATE.md                    # Current phase + progress
@@ -120,13 +120,13 @@ dagster-pipeline/
 | officer_network | corporate officers, board positions |
 | tradewaste_network | waste haulers, violations, licensees |
 
-## Project State (see `.planning/`)
+## Project State (see `docs/superpowers/`)
 
 - ✅ **v1.0 Entity Resolution** (8 phases, shipped 2026-03-17) — Splink clustering of 55.5M records
 - ✅ **v2.0 DuckPGQ Graph Rebuild** (10 phases, shipped 2026-03-26) — 8 property graphs rebuilt
-- ✅ **CG Platform v0.1 — /explore dashboard** (shipped 2026-04-07) — 20-task TDD plan, server REST endpoints + Mosaic data server + Next.js dashboard at `common-ground.nyc/explore`. See `docs/superpowers/specs/2026-04-07-cg-explore-dashboard-design.md` and `.planning/plans/cg-platform-roadmap.md`.
+- ✅ **CG Platform v0.1 — /explore dashboard** (shipped 2026-04-07) — 20-task TDD plan, server REST endpoints + Mosaic data server + Next.js dashboard at `common-ground.nyc/explore`. See `docs/superpowers/specs/2026-04-07-cg-explore-dashboard-design.md` and `docs/superpowers/plans/cg-platform-roadmap.md`.
 - 🚧 **v3.0 UX Innovation & Intelligence** (11 phases planned, ~50% milestone progress) — currently Phase 11: Entity Master
-- ⏳ **CG Platform v0.2 — notification engine + Telegram bot + CLI** (planned) — see `.planning/plans/cg-platform-roadmap.md` and the 5 sub-plans (`cg-notification-engine-design.md`, `cg-telegram-bot-architecture.md`, etc.)
+- ⏳ **CG Platform v0.2 — notification engine + Telegram bot + CLI** (planned) — see `docs/superpowers/plans/cg-platform-roadmap.md` and the 5 sub-plans (`cg-notification-engine-design.md`, `cg-telegram-bot-architecture.md`, etc.)
 
 ## Hetzner Server (178.156.228.119)
 

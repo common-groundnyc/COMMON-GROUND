@@ -4,7 +4,7 @@
 
 **Goal:** Restructure `dagster-pipeline` for optimal fresh-agent onboarding per April 2026 best practices: AGENTS.md standard, nested scoped files, progressive disclosure, codemap, ADRs, unified plan tree.
 
-**Architecture:** Documentation/structure only — no code changes. Root `AGENTS.md` <150 lines with `@import`s; nested `AGENTS.md` in `src/`, `infra/duckdb-server/`, `tests/`; `docs/ARCHITECTURE.md` codemap; `docs/adr/` with 10 backfilled ADRs; `docs/runbooks/` for operational procedures; `.planning/` fully migrated to `docs/superpowers/`; project-level `memory/` mirroring global pattern.
+**Architecture:** Documentation/structure only — no code changes. Root `AGENTS.md` <150 lines with `@import`s; nested `AGENTS.md` in `src/`, `infra/duckdb-server/`, `tests/`; `docs/ARCHITECTURE.md` codemap; `docs/adr/` with 10 backfilled ADRs; `docs/runbooks/` for operational procedures; `docs/superpowers/` fully migrated to `docs/superpowers/`; project-level `memory/` mirroring global pattern.
 
 **Tech Stack:** Markdown, git, shell. No build/test changes.
 
@@ -16,12 +16,12 @@
 
 ## Phase 1: Plan Tree Migration
 
-### Task 1: Audit `.planning/` and prepare migration
+### Task 1: Audit `docs/superpowers/` and prepare migration
 
 **Files:**
-- Read: `.planning/` (full tree)
+- Read: `docs/superpowers/` (full tree)
 
-- [ ] **Step 1: List everything in `.planning/`**
+- [ ] **Step 1: List everything in `docs/superpowers/`**
 
 Run: `find .planning -type f | sort`
 Expected: list of ~60 files across `PROJECT.md`, `ROADMAP.md`, `STATE.md`, `config.json`, `agent-history.json`, `dlt-upgrade-plan.md`, `phases/`, `audits/`, `plans/`.
@@ -30,15 +30,15 @@ Expected: list of ~60 files across `PROJECT.md`, `ROADMAP.md`, `STATE.md`, `conf
 
 Run:
 ```bash
-comm -12 <(ls .planning/plans/ | sort) <(ls docs/superpowers/plans/ | sort)
+comm -12 <(ls docs/superpowers/plans/ | sort) <(ls docs/superpowers/plans/ | sort)
 ```
-Expected: empty output (no collisions). If any output, append `strategic-` prefix to the `.planning/plans/` file before the `git mv` in Task 3.
+Expected: empty output (no collisions). If any output, append `strategic-` prefix to the `docs/superpowers/plans/` file before the `git mv` in Task 3.
 
-- [ ] **Step 3: Grep for cross-references to `.planning/`**
+- [ ] **Step 3: Grep for cross-references to `docs/superpowers/`**
 
 Run:
 ```bash
-grep -rl "\.planning/" --exclude-dir=.git --exclude-dir=.planning . > /tmp/planning-refs.txt
+grep -rl "\docs/superpowers/" --exclude-dir=.git --exclude-dir=.planning . > /tmp/planning-refs.txt
 wc -l /tmp/planning-refs.txt
 cat /tmp/planning-refs.txt
 ```
@@ -47,14 +47,14 @@ Save the list for Task 4.
 ### Task 2: Delete GSD-only artifacts
 
 **Files:**
-- Delete: `.planning/config.json`
-- Delete: `.planning/agent-history.json`
+- Delete: `docs/superpowers/config.json`
+- Delete: `docs/superpowers/agent-history.json`
 
 - [ ] **Step 1: Delete GSD artifacts**
 
 Run:
 ```bash
-git rm .planning/config.json .planning/agent-history.json
+git rm docs/superpowers/config.json docs/superpowers/agent-history.json
 ```
 Expected: both files staged for deletion.
 
@@ -65,37 +65,37 @@ Run:
 git commit -m "chore: remove obsolete GSD state files"
 ```
 
-### Task 3: Move `.planning/` contents into `docs/superpowers/`
+### Task 3: Move `docs/superpowers/` contents into `docs/superpowers/`
 
 **Files:**
-- Move: `.planning/PROJECT.md` → `docs/superpowers/PROJECT.md`
-- Move: `.planning/ROADMAP.md` → `docs/superpowers/ROADMAP.md`
-- Move: `.planning/STATE.md` → `docs/superpowers/STATE.md`
-- Move: `.planning/dlt-upgrade-plan.md` → `docs/superpowers/plans/dlt-upgrade-plan.md`
-- Move: `.planning/phases/` → `docs/superpowers/phases/`
-- Move: `.planning/audits/` → `docs/superpowers/audits/`
-- Move: `.planning/plans/*` → `docs/superpowers/plans/`
+- Move: `docs/superpowers/PROJECT.md` → `docs/superpowers/PROJECT.md`
+- Move: `docs/superpowers/ROADMAP.md` → `docs/superpowers/ROADMAP.md`
+- Move: `docs/superpowers/STATE.md` → `docs/superpowers/STATE.md`
+- Move: `docs/superpowers/dlt-upgrade-plan.md` → `docs/superpowers/plans/dlt-upgrade-plan.md`
+- Move: `docs/superpowers/phases/` → `docs/superpowers/phases/`
+- Move: `docs/superpowers/audits/` → `docs/superpowers/audits/`
+- Move: `docs/superpowers/plans/*` → `docs/superpowers/plans/`
 
 - [ ] **Step 1: Move top-level files**
 
 Run:
 ```bash
-git mv .planning/PROJECT.md docs/superpowers/PROJECT.md
-git mv .planning/ROADMAP.md docs/superpowers/ROADMAP.md
-git mv .planning/STATE.md docs/superpowers/STATE.md
-git mv .planning/dlt-upgrade-plan.md docs/superpowers/plans/dlt-upgrade-plan.md
+git mv docs/superpowers/PROJECT.md docs/superpowers/PROJECT.md
+git mv docs/superpowers/ROADMAP.md docs/superpowers/ROADMAP.md
+git mv docs/superpowers/STATE.md docs/superpowers/STATE.md
+git mv docs/superpowers/dlt-upgrade-plan.md docs/superpowers/plans/dlt-upgrade-plan.md
 ```
 
 - [ ] **Step 2: Move directories**
 
 Run:
 ```bash
-git mv .planning/phases docs/superpowers/phases
-git mv .planning/audits docs/superpowers/audits
-for f in .planning/plans/*; do git mv "$f" "docs/superpowers/plans/$(basename $f)"; done
+git mv docs/superpowers/phases docs/superpowers/phases
+git mv docs/superpowers/audits docs/superpowers/audits
+for f in docs/superpowers/plans/*; do git mv "$f" "docs/superpowers/plans/$(basename $f)"; done
 ```
 
-- [ ] **Step 3: Verify `.planning/` is empty**
+- [ ] **Step 3: Verify `docs/superpowers/` is empty**
 
 Run: `find .planning -type f`
 Expected: empty output.
@@ -104,7 +104,7 @@ Expected: empty output.
 
 Run:
 ```bash
-rmdir .planning/plans .planning 2>/dev/null || true
+rmdir docs/superpowers/plans .planning 2>/dev/null || true
 ls -la | grep planning
 ```
 Expected: no `.planning` entry.
@@ -113,7 +113,7 @@ Expected: no `.planning` entry.
 
 Run:
 ```bash
-git commit -m "refactor: migrate .planning/ to docs/superpowers/"
+git commit -m "refactor: migrate docs/superpowers/ to docs/superpowers/"
 ```
 
 ### Task 4: Update cross-references
@@ -121,21 +121,21 @@ git commit -m "refactor: migrate .planning/ to docs/superpowers/"
 **Files:**
 - Modify: every file in `/tmp/planning-refs.txt` from Task 1
 
-- [ ] **Step 1: Replace `.planning/` with `docs/superpowers/` in all referencing files**
+- [ ] **Step 1: Replace `docs/superpowers/` with `docs/superpowers/` in all referencing files**
 
 Run:
 ```bash
 while IFS= read -r f; do
   [ -f "$f" ] || continue
-  sed -i '' 's|\.planning/|docs/superpowers/|g' "$f"
+  sed -i '' 's|\docs/superpowers/|docs/superpowers/|g' "$f"
 done < /tmp/planning-refs.txt
 ```
 
-- [ ] **Step 2: Verify no `.planning/` references remain outside ADRs and git history**
+- [ ] **Step 2: Verify no `docs/superpowers/` references remain outside ADRs and git history**
 
 Run:
 ```bash
-grep -rl "\.planning/" --exclude-dir=.git . || echo "CLEAN"
+grep -rl "\docs/superpowers/" --exclude-dir=.git . || echo "CLEAN"
 ```
 Expected: `CLEAN` (or only matches inside `docs/superpowers/audits/*` historical references — those are fine to leave).
 
@@ -144,7 +144,7 @@ Expected: `CLEAN` (or only matches inside `docs/superpowers/audits/*` historical
 Run:
 ```bash
 git add -A
-git commit -m "refactor: update .planning/ references to docs/superpowers/"
+git commit -m "refactor: update docs/superpowers/ references to docs/superpowers/"
 ```
 
 ---
@@ -1480,15 +1480,15 @@ Expected: < 150.
 Run: `readlink CLAUDE.md && head -3 CLAUDE.md`
 Expected: `AGENTS.md`, then the title line "# Common Ground Data Pipeline".
 
-- [ ] **Step 3: Verify no `.planning/` references remain**
+- [ ] **Step 3: Verify no `docs/superpowers/` references remain**
 
 Run:
 ```bash
-grep -r "\.planning/" --exclude-dir=.git --exclude-dir=node_modules . 2>/dev/null | grep -v "docs/superpowers/audits" | grep -v "docs/adr" || echo "CLEAN"
+grep -r "\docs/superpowers/" --exclude-dir=.git --exclude-dir=node_modules . 2>/dev/null | grep -v "docs/superpowers/audits" | grep -v "docs/adr" || echo "CLEAN"
 ```
 Expected: `CLEAN` (or only matches inside historical audits / ADRs, which are fine).
 
-- [ ] **Step 4: Verify `.planning/` is deleted**
+- [ ] **Step 4: Verify `docs/superpowers/` is deleted**
 
 Run: `ls -la | grep planning || echo "GONE"`
 Expected: `GONE`.

@@ -29,16 +29,16 @@ uv run --with fastmcp --with starlette --with httpx --with sqlglot pytest tests/
 | `infra/cg-platform/` | Postgres schema for the future subscription/notification platform |
 | `scripts/` | Dedup, ingestion, investigation helpers |
 | `tests/` | Project-level pytest suite |
-| `.planning/` | GSD roadmap, phase plans, audits, strategic plans |
+| `docs/superpowers/` | GSD roadmap, phase plans, audits, strategic plans |
 | `docs/superpowers/` | Design specs and implementation plans |
 | `docker-compose.yml` | dagster-code, dagster-webserver, dagster-daemon |
 
 ## Key docs
 
 - **[AGENTS.md](./AGENTS.md)** — agent onboarding (stack, commands, operating principles, deploy, known issues). `CLAUDE.md` is a symlink to this.
-- **[.planning/ROADMAP.md](./.planning/ROADMAP.md)** — phases and milestones
-- **[.planning/STATE.md](./.planning/STATE.md)** — current phase
-- **[.planning/plans/cg-platform-roadmap.md](./.planning/plans/cg-platform-roadmap.md)** — CG platform v0.2+ (notifications, Telegram bot, CLI)
+- **[docs/superpowers/ROADMAP.md](./docs/superpowers/ROADMAP.md)** — phases and milestones
+- **[docs/superpowers/STATE.md](./docs/superpowers/STATE.md)** — current phase
+- **[docs/superpowers/plans/cg-platform-roadmap.md](./docs/superpowers/plans/cg-platform-roadmap.md)** — CG platform v0.2+ (notifications, Telegram bot, CLI)
 
 ## Deploy
 

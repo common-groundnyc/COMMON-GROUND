@@ -561,6 +561,6 @@ LIMIT 20;
 - [ ] **Step 6: Commit state**
 
 ```bash
-git add .planning/STATE.md
+git add docs/superpowers/STATE.md
 git commit -m "docs: Splink v2 deployed — phonetic blocking + address comparisons"
 ```

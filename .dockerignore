@@ -8,4 +8,4 @@ __pycache__
 *.duckdb.wal
 docs/
 tests/
-.planning/
+docs/superpowers/

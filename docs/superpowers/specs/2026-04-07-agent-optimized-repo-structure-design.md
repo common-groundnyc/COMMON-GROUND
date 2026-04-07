@@ -14,7 +14,7 @@ Restructure the repo so any fresh agent session (Claude Code, Codex, Cursor, Gem
 - **Hand-curated only** — ETH Zurich research (InfoQ March 2026) shows auto-generated or bloated AGENTS.md files hurt task success by ~2% and raise inference cost 20–23%
 - **Codemap** at `docs/ARCHITECTURE.md` so agents can orient without spelunking 200+ files
 - **ADRs** capturing the *why* behind load-bearing decisions that are otherwise lost to git archaeology
-- **Single plan tree** under `docs/superpowers/` — `.planning/` (GSD) is no longer used
+- **Single plan tree** under `docs/superpowers/` — `docs/superpowers/` (GSD) is no longer used
 - **Project-level memory** mirroring the global auto-memory pattern, seeded with repo-specific gotchas
 
 ## 2. Non-goals
@@ -61,13 +61,13 @@ dagster-pipeline/
 │   │   ├── deploy-dagster.md
 │   │   ├── secrets-sops.md
 │   │   └── known-issues.md
-│   └── superpowers/                   # UNIFIED plan tree (was also .planning/)
-│       ├── PROJECT.md                 # moved from .planning/
-│       ├── ROADMAP.md                 # moved from .planning/
-│       ├── STATE.md                   # moved from .planning/
-│       ├── phases/                    # moved from .planning/phases/
-│       ├── audits/                    # moved from .planning/audits/
-│       ├── plans/                     # merged: existing + .planning/plans/
+│   └── superpowers/                   # UNIFIED plan tree (was also docs/superpowers/)
+│       ├── PROJECT.md                 # moved from docs/superpowers/
+│       ├── ROADMAP.md                 # moved from docs/superpowers/
+│       ├── STATE.md                   # moved from docs/superpowers/
+│       ├── phases/                    # moved from docs/superpowers/phases/
+│       ├── audits/                    # moved from docs/superpowers/audits/
+│       ├── plans/                     # merged: existing + docs/superpowers/plans/
 │       └── specs/                     # existing (this file lives here)
 │
 └── memory/                            # NEW — project-level auto-memory
@@ -79,7 +79,7 @@ dagster-pipeline/
     └── mcp_cursor_pool.md
 ```
 
-**Deleted:** `.planning/` (fully migrated to `docs/superpowers/`).
+**Deleted:** `docs/superpowers/` (fully migrated to `docs/superpowers/`).
 
 ## 4. Root `AGENTS.md` (<150 lines)
 
@@ -158,8 +158,8 @@ Each ADR: Context / Decision / Status / Consequences. One page each. Backfilled 
 | 0003 | dlt removed in favor of direct DuckDB ingestion | commit history 2026-03-26 |
 | 0004 | hnsw_acorn over Lance for vector search | global memory `project_cg_vector_search.md` |
 | 0005 | Splink 4.0 for probabilistic entity resolution | global memory `project_splink_entity_resolution.md` |
-| 0006 | FastMCP serves REST + Mosaic alongside MCP protocol | `.planning/audits/ai-integration.md` |
-| 0007 | sqlglot AST validator for Mosaic `/mosaic/query` | `.planning/plans/cg-explore-dashboard-design.md` |
+| 0006 | FastMCP serves REST + Mosaic alongside MCP protocol | `docs/superpowers/audits/ai-integration.md` |
+| 0007 | sqlglot AST validator for Mosaic `/mosaic/query` | `docs/superpowers/plans/cg-explore-dashboard-design.md` |
 | 0008 | CursorPool for thread-safe DuckDB access | global memory `project_mcp_server_hardening.md` |
 | 0009 | Git-based deploy replaces rsync `deploy.sh` | session work 2026-04-07 |
 | 0010 | MinIO / Hetzner S3 removed from pipeline | session work 2026-04-07 |
@@ -175,25 +175,25 @@ Extracted verbatim from current root CLAUDE.md deploy/secrets/known-issues secti
 
 ## 9. Plan tree unification
 
-All of `.planning/*` → `docs/superpowers/*`. **GSD is no longer in use**; state files move alongside plans.
+All of `docs/superpowers/*` → `docs/superpowers/*`. **GSD is no longer in use**; state files move alongside plans.
 
 Migration map:
 
 | From | To |
 |---|---|
-| `.planning/PROJECT.md` | `docs/superpowers/PROJECT.md` |
-| `.planning/ROADMAP.md` | `docs/superpowers/ROADMAP.md` |
-| `.planning/STATE.md` | `docs/superpowers/STATE.md` |
-| `.planning/phases/**` | `docs/superpowers/phases/**` |
-| `.planning/audits/**` | `docs/superpowers/audits/**` |
-| `.planning/plans/**` | `docs/superpowers/plans/**` (merge with existing) |
-| `.planning/config.json` | **delete** (GSD artifact) |
-| `.planning/agent-history.json` | **delete** (GSD artifact) |
-| `.planning/dlt-upgrade-plan.md` | `docs/superpowers/plans/dlt-upgrade-plan.md` |
+| `docs/superpowers/PROJECT.md` | `docs/superpowers/PROJECT.md` |
+| `docs/superpowers/ROADMAP.md` | `docs/superpowers/ROADMAP.md` |
+| `docs/superpowers/STATE.md` | `docs/superpowers/STATE.md` |
+| `docs/superpowers/phases/**` | `docs/superpowers/phases/**` |
+| `docs/superpowers/audits/**` | `docs/superpowers/audits/**` |
+| `docs/superpowers/plans/**` | `docs/superpowers/plans/**` (merge with existing) |
+| `docs/superpowers/config.json` | **delete** (GSD artifact) |
+| `docs/superpowers/agent-history.json` | **delete** (GSD artifact) |
+| `docs/superpowers/dlt-upgrade-plan.md` | `docs/superpowers/plans/dlt-upgrade-plan.md` |
 
-Use `git mv` so history is preserved. After verification, `.planning/` is deleted. Cross-references in other markdown files are updated via `grep -rl ".planning/" | xargs sed -i ''` (verified by grep afterward).
+Use `git mv` so history is preserved. After verification, `docs/superpowers/` is deleted. Cross-references in other markdown files are updated via `grep -rl "docs/superpowers/" | xargs sed -i ''` (verified by grep afterward).
 
-**Naming-collision check:** if `.planning/plans/foo.md` and `docs/superpowers/plans/foo.md` both exist, the `.planning/` version is prefixed `strategic-` before merge. (Assumption to verify at execution time — likely zero collisions since the two trees have been used for different purposes.)
+**Naming-collision check:** if `docs/superpowers/plans/foo.md` and `docs/superpowers/plans/foo.md` both exist, the `docs/superpowers/` version is prefixed `strategic-` before merge. (Assumption to verify at execution time — likely zero collisions since the two trees have been used for different purposes.)
 
 ## 10. Project-level memory
 
@@ -219,12 +219,12 @@ Seed files are extracted from existing global memory entries (marked so they're 
 Each phase independently verifiable (grep for broken links / run existing tests).
 
 **Phase 1 — Plan tree migration** *(low risk, sets up the tree)*
-- `git mv .planning/PROJECT.md docs/superpowers/` etc.
-- Merge `.planning/plans/` into `docs/superpowers/plans/`
-- Delete `.planning/config.json`, `agent-history.json`
-- Grep + sed all `.planning/` refs across the repo
-- Delete `.planning/`
-- Verification: `grep -r ".planning/" .` returns only historical matches in ADRs/commit messages
+- `git mv docs/superpowers/PROJECT.md docs/superpowers/` etc.
+- Merge `docs/superpowers/plans/` into `docs/superpowers/plans/`
+- Delete `docs/superpowers/config.json`, `agent-history.json`
+- Grep + sed all `docs/superpowers/` refs across the repo
+- Delete `docs/superpowers/`
+- Verification: `grep -r "docs/superpowers/" .` returns only historical matches in ADRs/commit messages
 
 **Phase 2 — Root AGENTS.md slim + nested files**
 - Extract deploy → `docs/runbooks/deploy-*.md`
@@ -250,7 +250,7 @@ Each phase independently verifiable (grep for broken links / run existing tests)
 
 - `wc -l AGENTS.md` < 150
 - Root AGENTS.md contains only `@import`-ed paths that exist
-- `grep -r "\.planning/" .` returns zero matches outside ADRs and git history
+- `grep -r "\docs/superpowers/" .` returns zero matches outside ADRs and git history
 - All existing tests still pass (no code touched, so this is a smoke check)
 - `tree -L 2 docs/` shows the target layout
 - A fresh agent opening the repo can identify the stack, find the deploy procedure, and locate the server routes in <5 tool calls

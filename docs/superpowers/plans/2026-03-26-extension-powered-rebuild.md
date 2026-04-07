@@ -1725,7 +1725,7 @@ Test via MCP client:
 - [ ] **Step 4: Commit deploy state**
 
 ```bash
-git add .planning/STATE.md
+git add docs/superpowers/STATE.md
 git commit -m "docs: update state after extension-powered rebuild deployment"
 ```
 
