@@ -1,5 +1,4 @@
 """Tests for explore query builders."""
-import pytest
 from shared.explore_queries import (
     build_zip_overview_query,
     build_zip_search_query,
@@ -10,7 +9,7 @@ from shared.explore_queries import (
 def test_zip_overview_query_uses_zip_param():
     sql, params = build_zip_overview_query(zip_code="11201", days=365)
     assert "?" in sql
-    assert params == ("11201", 365, "11201", 365, "11201", 365, "11201", 365)
+    assert params == ("11201", 365, "11201", 365, "11201", 365)
     assert "hpd_violations" in sql.lower()
     assert "n311_service_requests" in sql.lower()
 

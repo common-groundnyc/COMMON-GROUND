@@ -3,15 +3,20 @@
 Each builder returns (sql, params_tuple). Pure functions, no I/O.
 Parameterized to prevent SQL injection. Use with shared.db.execute().
 """
-from typing import Tuple
+
+MIN_LIMIT = 1
+MAX_LIMIT = 100
 
 
-def build_zip_overview_query(zip_code: str, days: int) -> Tuple[str, tuple]:
+def build_zip_overview_query(zip_code: str, days: int) -> tuple[str, tuple]:
     """Build the SQL for the neighborhood stat-card query.
 
     Returns one row with: violations_count, complaints_count, crimes_count,
     restaurants_a_pct, all filtered to the ZIP and the trailing N days.
+    restaurants_a_pct is a percent in [0, 100] rounded to 1 decimal.
     """
+    # crimes_count is hardcoded to 0 until Task 4 creates lake.foundation.geo_zip_boundaries;
+    # then we'll spatial-join nypd_complaints to ZIP polygons
     sql = """
     WITH viol AS (
         SELECT COUNT(*) AS n
@@ -25,16 +30,6 @@ def build_zip_overview_query(zip_code: str, days: int) -> Tuple[str, tuple]:
         WHERE incident_zip = ?
           AND TRY_CAST(created_date AS DATE) >= CURRENT_DATE - INTERVAL (?) DAY
     ),
-    crime AS (
-        SELECT COUNT(*) AS n
-        FROM lake.public_safety.nypd_complaints
-        WHERE addr_pct_cd IS NOT NULL
-          AND CAST(? AS VARCHAR) IN (
-              SELECT DISTINCT incident_zip FROM lake.social_services.n311_service_requests
-              WHERE police_precinct = CAST(addr_pct_cd AS VARCHAR)
-          )
-          AND TRY_CAST(cmplnt_fr_dt AS DATE) >= CURRENT_DATE - INTERVAL (?) DAY
-    ),
     rest AS (
         SELECT
             COUNT(*) AS total,
@@ -46,15 +41,15 @@ def build_zip_overview_query(zip_code: str, days: int) -> Tuple[str, tuple]:
     SELECT
         (SELECT n FROM viol) AS violations_count,
         (SELECT n FROM cmpl) AS complaints_count,
-        (SELECT n FROM crime) AS crimes_count,
+        0 AS crimes_count,
         (SELECT CASE WHEN total > 0 THEN ROUND(100.0 * a_grade / total, 1) ELSE 0 END
          FROM rest) AS restaurants_a_pct
     """
-    params = (zip_code, days, zip_code, days, zip_code, days, zip_code, days)
+    params = (zip_code, days, zip_code, days, zip_code, days)
     return sql, params
 
 
-def build_zip_search_query(prefix: str) -> Tuple[str, tuple]:
+def build_zip_search_query(prefix: str) -> tuple[str, tuple]:
     """Search ZIPs by prefix or name. Returns up to 10 matches."""
     sql = """
     SELECT modzcta AS zip, label, borough
@@ -66,9 +61,9 @@ def build_zip_search_query(prefix: str) -> Tuple[str, tuple]:
     return sql, (f"{prefix}%", f"%{prefix}%")
 
 
-def build_worst_buildings_query(zip_code: str, days: int, limit: int) -> Tuple[str, tuple]:
+def build_worst_buildings_query(zip_code: str, days: int, limit: int) -> tuple[str, tuple]:
     """Worst buildings in a ZIP by HPD violation count."""
-    clamped = max(1, min(limit, 100))
+    clamped = max(MIN_LIMIT, min(limit, MAX_LIMIT))
     sql = f"""
     SELECT
         bbl,
