@@ -41,7 +41,12 @@ def test_query_too_long_rejected():
 
 
 def make_app() -> Starlette:
-    return Starlette(routes=[Route("/mosaic/query", mosaic_query_endpoint, methods=["POST"])])
+    fake_pool = object()
+
+    async def mosaic(request):
+        return await mosaic_query_endpoint(request, pool=fake_pool)
+
+    return Starlette(routes=[Route("/mosaic/query", mosaic, methods=["POST"])])
 
 
 @patch("routes.mosaic_route._run_mosaic_query")
@@ -114,7 +119,7 @@ def test_real_column_names_returned_in_data():
     """Verify _run_mosaic_query uses parsed column names from the SELECT."""
     sql = "SELECT zip, COUNT(*) AS cnt FROM lake.housing.hpd_violations GROUP BY zip"
     with patch("routes.mosaic_route.execute") as mock_execute:
-        mock_execute.return_value = [("11201", 42), ("11206", 31)]
+        mock_execute.return_value = (["zip", "cnt"], [("11201", 42), ("11206", 31)])
         from routes.mosaic_route import _run_mosaic_query
-        result = _run_mosaic_query({"sql": sql})
+        result = _run_mosaic_query(object(), {"sql": sql})
     assert result == {"data": [{"zip": "11201", "cnt": 42}, {"zip": "11206", "cnt": 31}]}

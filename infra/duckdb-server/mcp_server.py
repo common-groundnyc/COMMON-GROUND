@@ -2479,7 +2479,7 @@ async def neighborhood_route(request: Request) -> JSONResponse:
         )
     if _shared_pool is None or not _shared_catalog:
         return JSONResponse({"error": "Server starting up"}, status_code=503)
-    response = await _explore_neighborhood(request)
+    response = await _explore_neighborhood(request, pool=_shared_pool)
     response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
     response.headers["Vary"] = "Origin"
     return response
@@ -2500,7 +2500,7 @@ async def zips_search_route(request: Request) -> JSONResponse:
         )
     if _shared_pool is None or not _shared_catalog:
         return JSONResponse({"error": "Server starting up"}, status_code=503)
-    response = await _explore_zips_search(request)
+    response = await _explore_zips_search(request, pool=_shared_pool)
     response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
     response.headers["Vary"] = "Origin"
     return response
@@ -2521,7 +2521,7 @@ async def worst_buildings_route(request: Request) -> JSONResponse:
         )
     if _shared_pool is None or not _shared_catalog:
         return JSONResponse({"error": "Server starting up"}, status_code=503)
-    response = await _explore_worst_buildings(request)
+    response = await _explore_worst_buildings(request, pool=_shared_pool)
     response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
     response.headers["Vary"] = "Origin"
     return response
@@ -2549,7 +2549,7 @@ async def mosaic_query_route(request: Request) -> JSONResponse:
         )
     if _shared_pool is None or not _shared_catalog:
         return JSONResponse({"error": "Server starting up"}, status_code=503)
-    response = await _explore_mosaic_query(request)
+    response = await _explore_mosaic_query(request, pool=_shared_pool)
     response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
     response.headers["Vary"] = "Origin"
     return response

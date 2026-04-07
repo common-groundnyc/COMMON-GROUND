@@ -52,7 +52,7 @@ def _serialize(value: Any) -> Any:
     return value
 
 
-async def neighborhood_endpoint(request: Request) -> JSONResponse:
+async def neighborhood_endpoint(request: Request, *, pool) -> JSONResponse:
     """GET /api/neighborhood/{zip} → stat-card payload for the dashboard."""
     zip_code = request.path_params["zip_code"]
     if not ZIP_RE.match(zip_code):
@@ -61,7 +61,7 @@ async def neighborhood_endpoint(request: Request) -> JSONResponse:
     days = _clamp_days(request.query_params.get("days"))
     sql, params = build_zip_overview_query(zip_code=zip_code, days=days)
     try:
-        rows = await asyncio.to_thread(execute, sql, params)
+        _cols, rows = await asyncio.to_thread(execute, pool, sql, list(params))
     except Exception:
         logger.exception("explore endpoint failed: zip=%s", zip_code)
         return JSONResponse({"error": "Internal error"}, status_code=500)
@@ -83,7 +83,7 @@ async def neighborhood_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(body, headers=CACHE_HEADER)
 
 
-async def zips_search_endpoint(request: Request) -> JSONResponse:
+async def zips_search_endpoint(request: Request, *, pool) -> JSONResponse:
     """GET /api/zips/search?q=112 → autocomplete for ZIP / neighborhood name."""
     q = request.query_params.get("q", "").strip()
     if not q:
@@ -91,7 +91,7 @@ async def zips_search_endpoint(request: Request) -> JSONResponse:
 
     sql, params = build_zip_search_query(prefix=q)
     try:
-        rows = await asyncio.to_thread(execute, sql, params)
+        _cols, rows = await asyncio.to_thread(execute, pool, sql, list(params))
     except Exception:
         logger.exception("explore endpoint failed: q=%s", q)
         return JSONResponse({"error": "Internal error"}, status_code=500)
@@ -105,7 +105,7 @@ async def zips_search_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(body, headers=CACHE_HEADER)
 
 
-async def worst_buildings_endpoint(request: Request) -> JSONResponse:
+async def worst_buildings_endpoint(request: Request, *, pool) -> JSONResponse:
     """GET /api/buildings/worst?zip=11201&days=365&limit=10 → ranked buildings."""
     zip_code = request.query_params.get("zip", "").strip()
     if not ZIP_RE.match(zip_code):
@@ -116,7 +116,7 @@ async def worst_buildings_endpoint(request: Request) -> JSONResponse:
 
     sql, params = build_worst_buildings_query(zip_code=zip_code, days=days, limit=limit)
     try:
-        rows = await asyncio.to_thread(execute, sql, params)
+        _cols, rows = await asyncio.to_thread(execute, pool, sql, list(params))
     except Exception:
         logger.exception("explore endpoint failed: zip=%s", zip_code)
         return JSONResponse({"error": "Internal error"}, status_code=500)

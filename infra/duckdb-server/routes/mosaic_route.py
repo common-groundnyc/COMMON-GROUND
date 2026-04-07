@@ -99,47 +99,24 @@ def _serialize_value(value: Any) -> Any:
     return value
 
 
-def _column_names(sql: str, count: int) -> list[str]:
-    """Best-effort projection name extraction. Falls back to col0..colN."""
-    try:
-        statements = sqlglot.parse(sql, dialect="duckdb")
-        if not statements or not isinstance(
-            statements[0], (exp.Select, exp.Union, exp.Intersect, exp.Except)
-        ):
-            raise ValueError
-        select = statements[0]
-        while isinstance(select, (exp.Union, exp.Intersect, exp.Except)):
-            select = select.this
-        names: list[str] = []
-        for projection in select.expressions:
-            alias = projection.alias_or_name
-            names.append(alias if alias else f"col{len(names)}")
-        if len(names) != count:
-            raise ValueError
-        return names
-    except Exception:
-        return [f"col{i}" for i in range(count)]
-
-
-def _run_mosaic_query(payload: dict[str, Any]) -> dict[str, Any]:
+def _run_mosaic_query(pool, payload: dict[str, Any]) -> dict[str, Any]:
     """Execute a Mosaic query payload against DuckDB.
 
-    Returns rows as dicts keyed by their actual column names.
+    Returns rows as dicts keyed by their actual column names from execute()'s cols.
     """
     sql: str = payload.get("sql", "")
-    rows = execute(sql)
+    cols, rows = execute(pool, sql)
     if not rows:
         return {"data": []}
+    return {
+        "data": [
+            {col: _serialize_value(value) for col, value in zip(cols, row)}
+            for row in rows
+        ],
+    }
 
-    columns = _column_names(sql, len(rows[0]))
-    data = [
-        {columns[idx]: _serialize_value(value) for idx, value in enumerate(row)}
-        for row in rows
-    ]
-    return {"data": data}
 
-
-async def mosaic_query_endpoint(request: Request) -> JSONResponse:
+async def mosaic_query_endpoint(request: Request, *, pool) -> JSONResponse:
     """POST /mosaic/query -> Mosaic data server compatible endpoint."""
     try:
         payload = await request.json()
@@ -157,7 +134,7 @@ async def mosaic_query_endpoint(request: Request) -> JSONResponse:
         )
 
     try:
-        result = await asyncio.to_thread(_run_mosaic_query, payload)
+        result = await asyncio.to_thread(_run_mosaic_query, pool, payload)
     except Exception:
         logger.exception("mosaic query failed")
         return JSONResponse({"error": "Internal error"}, status_code=500)
