@@ -34,6 +34,7 @@ SYNC_THRESHOLD = 0.05  # 5% drift triggers stale
 SYNC_MIN_MISSING = 1000  # absolute row gap also triggers stale
 RETRIGGER_COOLDOWN = 6 * 3600  # 6 hours — don't re-trigger while a run is likely still ingesting
 MAX_RUNS_PER_TICK = 10  # cap queued runs per sensor tick to avoid flooding
+CHUNK_SIZE = 30  # datasets to check per tick — keeps each tick under 60s grpc deadline
 
 DOMAINS = {
     "nyc": "data.cityofnewyork.us",
@@ -65,7 +66,7 @@ def check_socrata_count(
     domain: str,
     dataset_id: str,
     app_token: str | None,
-    timeout: int = 10,
+    timeout: int = 5,
 ) -> int | None:
     """Fetch SELECT count(*) from a Socrata dataset. Returns None on error."""
     url = f"https://{domain}/resource/{dataset_id}.json?$select=count(*)&$limit=1"
@@ -113,7 +114,7 @@ def compute_sync_status(lake_rows: int, source_rows: int | None) -> str:
 
 @sensor(
     name="data_freshness_monitor",
-    minimum_interval_seconds=3600,
+    minimum_interval_seconds=60,
     asset_selection=AssetSelection.all(),
     default_status=DefaultSensorStatus.RUNNING,
 )
@@ -122,9 +123,9 @@ def data_freshness_sensor(context):
     app_token = os.environ.get("SOURCES__SOCRATA__APP_TOKEN")
 
     manifest = build_dataset_manifest()
-    context.log.info("Checking freshness for %d datasets", len(manifest))
 
     # Load cursor: dataset_id → {"source_rows": int, "triggered_at": float|None}
+    # plus a special "__index" key tracking the chunk offset across ticks
     raw_cursor = context.cursor or "{}"
     try:
         cursor = json.loads(raw_cursor)
@@ -133,8 +134,20 @@ def data_freshness_sensor(context):
 
     # Migrate old flat cursor format (dataset_id → int) to new format
     for k, v in list(cursor.items()):
+        if k == "__index":
+            continue
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             cursor[k] = {"source_rows": v, "triggered_at": None}
+
+    # Chunked processing: pick CHUNK_SIZE datasets starting at __index, wrap around
+    start_idx = int(cursor.get("__index", 0)) % max(len(manifest), 1)
+    end_idx = start_idx + CHUNK_SIZE
+    chunk = manifest[start_idx:end_idx]
+    next_idx = end_idx if end_idx < len(manifest) else 0
+    context.log.info(
+        "Checking freshness for %d/%d datasets (offset %d-%d)",
+        len(chunk), len(manifest), start_idx, start_idx + len(chunk),
+    )
 
     # Connect to DuckLake and get lake row counts
     from dagster_pipeline.defs.name_index_asset import _connect_ducklake
@@ -164,7 +177,7 @@ def data_freshness_sensor(context):
     freshness_rows = []
     new_cursor = dict(cursor)
 
-    for entry in manifest:
+    for entry in chunk:
         schema = entry["schema"]
         table_name = entry["table_name"]
         dataset_id = entry["dataset_id"]
@@ -300,4 +313,5 @@ def data_freshness_sensor(context):
         stale_count, len(run_requests), deferred,
     )
 
+    new_cursor["__index"] = next_idx
     return SensorResult(run_requests=run_requests, cursor=json.dumps(new_cursor))
