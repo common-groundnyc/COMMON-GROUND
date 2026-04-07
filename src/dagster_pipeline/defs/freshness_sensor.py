@@ -68,7 +68,7 @@ def check_socrata_count(
     domain: str,
     dataset_id: str,
     app_token: str | None,
-    timeout: int = 5,
+    timeout: int = 15,
 ) -> int | None:
     """Fetch SELECT count(*) from a Socrata dataset. Returns None on error.
 
