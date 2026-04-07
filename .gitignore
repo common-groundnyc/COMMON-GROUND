@@ -217,3 +217,21 @@ bobaadr.txt
 pad.zip
 .tmp/
 .tmp_dagster_home_*
+
+# Dagster runtime state (21 GB, never commit)
+dagster-home/
+.dagster-home/
+.dagster/
+
+# Large data / reports / raw dumps
+data/
+reports/
+raw_csvs/
+raw_json/
+raw_datasets/
+*.duckdb
+*.duckdb.wal
+*.parquet
+
+# Local duckdb cheatsheet
+duckdb-cheatsheet.pdf

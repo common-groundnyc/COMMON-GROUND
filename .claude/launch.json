@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dagster-dev",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "dagster", "dev", "-m", "dagster_pipeline.definitions", "-p", "3000", "-h", "0.0.0.0"],
+      "port": 3000
+    },
+    {
+      "name": "dagster-docker",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["run", "--rm", "-p", "3000:3000", "-v", "/Users/fattie2020/.dagster-home:/tmp/dagster-home", "-v", "/Users/fattie2020/Desktop/dagster-pipeline/.dlt/secrets.toml:/app/.dlt/secrets.toml:ro", "dagster-pipeline"],
+      "port": 3000
+    }
+  ]
+}
