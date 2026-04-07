@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -34,7 +35,8 @@ SYNC_THRESHOLD = 0.05  # 5% drift triggers stale
 SYNC_MIN_MISSING = 1000  # absolute row gap also triggers stale
 RETRIGGER_COOLDOWN = 6 * 3600  # 6 hours — don't re-trigger while a run is likely still ingesting
 MAX_RUNS_PER_TICK = 10  # cap queued runs per sensor tick to avoid flooding
-CHUNK_SIZE = 30  # datasets to check per tick — keeps each tick under 60s grpc deadline
+CHUNK_SIZE = 20  # datasets to check per tick — keeps each tick under 60s grpc deadline
+COUNT_CHECK_WORKERS = 10  # parallel HTTP threads inside one tick
 
 DOMAINS = {
     "nyc": "data.cityofnewyork.us",
@@ -68,7 +70,12 @@ def check_socrata_count(
     app_token: str | None,
     timeout: int = 5,
 ) -> int | None:
-    """Fetch SELECT count(*) from a Socrata dataset. Returns None on error."""
+    """Fetch SELECT count(*) from a Socrata dataset. Returns None on error.
+
+    Socrata returns the value under either ``count(*)`` (legacy) or ``count_1``
+    (post-SoQL change). Fall back to the first value in the row if neither key
+    is present.
+    """
     url = f"https://{domain}/resource/{dataset_id}.json?$select=count(*)&$limit=1"
     headers = {"Accept": "application/json"}
     if app_token:
@@ -77,7 +84,13 @@ def check_socrata_count(
     try:
         with urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
-            return int(data[0]["count(*)"])
+        if not data:
+            return None
+        row = data[0]
+        val = row.get("count(*)") or row.get("count_1")
+        if val is None and row:
+            val = next(iter(row.values()), None)
+        return int(val) if val is not None else None
     except (HTTPError, URLError, OSError, KeyError, IndexError, ValueError) as exc:
         logger.warning("count check failed for %s/%s: %s", domain, dataset_id, exc)
         return None
@@ -177,17 +190,21 @@ def data_freshness_sensor(context):
     freshness_rows = []
     new_cursor = dict(cursor)
 
-    for entry in chunk:
+    # Parallel-fetch source row counts for the whole chunk — serial loop blew the
+    # 60s gRPC deadline because Socrata latency dominates each tick.
+    def _fetch(entry):
+        return entry, check_socrata_count(entry["domain"], entry["dataset_id"], app_token)
+
+    with ThreadPoolExecutor(max_workers=COUNT_CHECK_WORKERS) as pool:
+        fetched = list(pool.map(_fetch, chunk))
+
+    for entry, source_rows in fetched:
         schema = entry["schema"]
         table_name = entry["table_name"]
         dataset_id = entry["dataset_id"]
-        domain = entry["domain"]
 
         dataset_key = f"{schema}.{table_name}"
         lake_rows = lake_counts_by_key.get(dataset_key, 0)
-
-        source_rows = check_socrata_count(domain, dataset_id, app_token)
-        time.sleep(0.01)  # gentle rate limiting
 
         if source_rows is None:
             freshness_rows.append({
