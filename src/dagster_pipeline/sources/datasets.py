@@ -423,7 +423,7 @@ LAT_LNG_TABLES: list[tuple[str, str, str, str]] = [
     ("public_safety", "nypd_complaints_ytd", "latitude", "longitude"),
     ("public_safety", "shootings", "latitude", "longitude"),
     ("public_safety", "criminal_court_summons", "latitude", "longitude"),
-    ("public_safety", "nys_crashes", "latitude", "longitude"),
+    # nys_crashes: source has no lat/lng (only municipality). Not indexable.
 
     # ── Health ──
     ("health", "restaurant_inspections", "latitude", "longitude"),
@@ -439,24 +439,23 @@ LAT_LNG_TABLES: list[tuple[str, str, str, str]] = [
 
     # ── Social Services ──
     ("social_services", "n311_service_requests", "latitude", "longitude"),
-    ("social_services", "community_gardens", "latitude", "longitude"),
+    # community_gardens: source has 'lat' only, no longitude column. Not indexable.
     ("social_services", "dycd_program_sites", "latitude", "longitude"),
     ("social_services", "nys_child_care", "latitude", "longitude"),
 
     # ── Transportation ──
-    ("transportation", "mta_stations", "gtfs_latitude", "gtfs_longitude"),
+    # mta_stations: upstream Socrata (4ta5-wz5s) has no coords — only
+    # complex_id/name/ada metadata. Use mta_entrances for station coordinates.
     ("transportation", "mta_entrances", "entrance_latitude", "entrance_longitude"),
 
     # ── Federal ──
     ("federal", "nrel_alt_fuel_stations", "latitude", "longitude"),
-    ("federal", "epa_echo_facilities_manhattan", "registrylatdecdeg", "registrylondecdeg"),
-    ("federal", "epa_echo_facilities_bronx", "registrylatdecdeg", "registrylondecdeg"),
-    ("federal", "epa_echo_facilities_brooklyn", "registrylatdecdeg", "registrylondecdeg"),
-    ("federal", "epa_echo_facilities_queens", "registrylatdecdeg", "registrylondecdeg"),
-    ("federal", "epa_echo_facilities_staten_island", "registrylatdecdeg", "registrylondecdeg"),
-    ("federal", "urban_school_directory", "latitude", "longitude"),
-    ("federal", "hud_public_housing_developments", "latitude", "longitude"),
-    ("federal", "hud_public_housing_buildings", "latitude", "longitude"),
+    # epa_echo_facilities_*: ingestion currently drops the longitude column
+    # (only FacLat survives, no FacLong). Re-ingest needed before re-enabling.
+    ("federal", "hud_public_housing_developments", "LAT", "LON"),
+    # urban_school_directory, hud_public_housing_buildings, mta_stations,
+    # community_gardens, epa_echo_facilities_manhattan: tables missing from
+    # lake — need re-ingestion.
 
     # ── NOTE: Tables with GeoJSON-only coordinates (no direct lat/lon) ──
     # These need coordinate extraction before H3 indexing:

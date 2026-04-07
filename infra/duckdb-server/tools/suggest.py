@@ -137,7 +137,7 @@ def _overview() -> ToolResult:
 
 
 def _topic_guide(topic: str, ctx: Context | None) -> ToolResult:
-    """Topic-specific tool recommendations. Uses Lance if available for semantic matching."""
+    """Topic-specific tool recommendations. Uses vector search if available for semantic matching."""
     topic_lower = topic.lower().strip()
 
     # Direct match in topic map
@@ -149,7 +149,7 @@ def _topic_guide(topic: str, ctx: Context | None) -> ToolResult:
                 lines.append(f"    {desc}")
             return ToolResult(content="\n".join(lines))
 
-    # Try Lance semantic matching against catalog embeddings
+    # Try vector semantic matching against catalog embeddings
     embed_fn = ctx.lifespan_context.get("embed_fn") if ctx else None
     if embed_fn:
         try:

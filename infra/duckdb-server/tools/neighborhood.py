@@ -84,11 +84,8 @@ zip_to_precinct AS (
 ),
 zip_primary_precinct AS (
     SELECT zip, precinct
-    FROM (
-        SELECT zip, precinct,
-               ROW_NUMBER() OVER (PARTITION BY zip ORDER BY weight DESC) AS rn
-        FROM zip_to_precinct
-    ) WHERE rn = 1
+    FROM zip_to_precinct
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY zip ORDER BY weight DESC) = 1
 ),
 zip_to_cd AS (
     SELECT incident_zip AS zip,
@@ -109,11 +106,8 @@ zip_to_cd AS (
 ),
 zip_primary_cd AS (
     SELECT zip, borocd
-    FROM (
-        SELECT zip, borocd,
-               ROW_NUMBER() OVER (PARTITION BY zip ORDER BY weight DESC) AS rn
-        FROM zip_to_cd
-    ) WHERE rn = 1
+    FROM zip_to_cd
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY zip ORDER BY weight DESC) = 1
 ),
 -- Dimension: Crime (via precinct crosswalk, historic + YTD)
 all_crimes AS (
@@ -570,13 +564,11 @@ LIMIT 20
 """
 
 PORTRAIT_GRADES_SQL = """
-WITH latest AS (
-    SELECT camis, grade,
-           ROW_NUMBER() OVER (PARTITION BY camis ORDER BY grade_date DESC) AS rn
-    FROM lake.health.restaurant_inspections
-    WHERE zipcode = ? AND grade IN ('A','B','C')
-)
-SELECT grade, COUNT(*) AS cnt FROM latest WHERE rn = 1 GROUP BY grade ORDER BY grade
+SELECT grade, COUNT(*) AS cnt
+FROM lake.health.restaurant_inspections
+WHERE zipcode = ? AND grade IN ('A','B','C')
+QUALIFY ROW_NUMBER() OVER (PARTITION BY camis ORDER BY grade_date DESC) = 1
+GROUP BY grade ORDER BY grade
 LIMIT 3
 """
 

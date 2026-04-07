@@ -19,13 +19,13 @@ from pydantic import Field
 
 from shared.db import execute, safe_query, parallel_queries
 from shared.formatting import format_text_table
-from shared.lance import vector_expand_names, lance_route_entity
+from shared.vector_search import vector_expand_names, route_entity_by_vector
 from shared.token_search import token_search
 
 from entity import phonetic_search_sql
 
 # ---------------------------------------------------------------------------
-# Tables always queried during entity xray (even when Lance routing is active)
+# Tables always queried during entity xray (even when vector routing is active)
 # ---------------------------------------------------------------------------
 
 _ALWAYS_QUERY = frozenset({
@@ -379,16 +379,16 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
     # Token-based routing — instant local lookup of which tables have this name
     token_sources = token_search(ctx, search)
 
-    # Lance as fuzzy fallback (catches misspellings, similar names)
-    lance_route = lance_route_entity(ctx, search)
-    lance_sources = lance_route.get("sources", set())
-    lance_matched = set(lance_route.get("matched_names", []))
+    # Vector search as fuzzy fallback (catches misspellings, similar names)
+    vector_route = route_entity_by_vector(ctx, search)
+    vector_sources = vector_route.get("sources", set())
+    vector_matched = set(vector_route.get("matched_names", []))
 
-    # Combine: token sources (exact) + lance sources (fuzzy)
-    routed_sources = token_sources | lance_sources
+    # Combine: token sources (exact) + vector sources (fuzzy)
+    routed_sources = token_sources | vector_sources
     use_routing = len(routed_sources) > 0
 
-    extra_names = vector_expand_names(ctx, search) | lance_matched
+    extra_names = vector_expand_names(ctx, search) | vector_matched
 
     def _should_query(source_table: str) -> bool:
         if source_table in _ALWAYS_QUERY:
@@ -783,9 +783,9 @@ def _entity_xray(name: str, pool, ctx) -> ToolResult:
 
     lines = [f"ENTITY X-RAY — '{name}'\n"]
     if use_routing:
-        lines.append(f"Lance-routed: {len(routed_sources)} sources matched, {len(lance_route.get('matched_names', []))} name variants found")
+        lines.append(f"Vector-routed: {len(routed_sources)} sources matched, {len(vector_route.get('matched_names', []))} name variants found")
     else:
-        lines.append("Full scan (Lance index unavailable)")
+        lines.append("Full scan (vector index unavailable)")
     lines.append("")
 
     if corp_rows:

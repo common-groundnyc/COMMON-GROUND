@@ -1,2 +1,34 @@
 secrets.toml
 *.secrets.toml
+.env
+.env.*
+!.env.secrets.enc
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+uv.lock
+
+# Data & artifacts (massive, never index)
+data/
+reports/
+raw_csvs/
+raw_json/
+raw_datasets/
+*.duckdb
+*.duckdb.wal
+*.parquet
+models/*.json
+
+# Dagster runtime state
+dagster-home/
+.dagster-home/
+.dagster/
+
+# Build / cache
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+node_modules/
+.open-next/

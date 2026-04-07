@@ -1,6 +1,5 @@
 *.duckdb
 *.duckdb.wal
-*.lance
 __pycache__
 .DS_Store
 tests/

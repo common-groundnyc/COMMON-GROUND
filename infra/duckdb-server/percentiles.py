@@ -91,7 +91,7 @@ def build_percentile_tables(db):
 
 
 def build_lake_percentile_tables(db):
-    """Create percentile tables requiring lake (S3/MinIO) access."""
+    """Create percentile tables requiring lake access."""
     db.execute("DROP TABLE IF EXISTS main.pctile_restaurants")
     db.execute("""
         CREATE TABLE main.pctile_restaurants AS

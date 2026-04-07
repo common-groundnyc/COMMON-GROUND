@@ -1,7 +1,7 @@
 """Dagster asset for the unified name index — extracts person names from all 47
 lake tables and materializes a cross-reference index to DuckLake.
 
-This is a SQL transformation asset (plain @asset, not @dlt_assets) that:
+This is a SQL transformation asset that:
 1. Connects to DuckLake via DuckDB
 2. Runs UNION ALL across all name-bearing tables (53 queries from name_registry)
 3. Filters to names appearing in 2+ source tables (cross-references)

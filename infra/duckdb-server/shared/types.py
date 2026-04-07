@@ -40,12 +40,6 @@ VS_TIGHT_DISTANCE = 0.12      # ~88% cosine — higher-confidence cross-domain
 VS_CATALOG_DISTANCE = 0.58    # loose — table/schema discovery
 VS_CATEGORY_SIM = 0.5         # cosine similarity for resource categories
 
-# Legacy aliases for gradual migration
-LANCE_DIR = "/data/common-ground/lance"
-LANCE_NAME_DISTANCE = VS_NAME_DISTANCE
-LANCE_TIGHT_DISTANCE = VS_TIGHT_DISTANCE
-LANCE_CATALOG_DISTANCE = VS_CATALOG_DISTANCE
-
 # ---------------------------------------------------------------------------
 # SQL safety regex patterns
 # ---------------------------------------------------------------------------

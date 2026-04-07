@@ -12,11 +12,11 @@ from pydantic import Field
 
 from shared.db import execute, parallel_queries, safe_query
 from shared.formatting import make_result
-from shared.lance import vector_expand_names, lance_route_entity
+from shared.vector_search import vector_expand_names, route_entity_by_vector
 from shared.types import VS_NAME_DISTANCE, VS_CATALOG_DISTANCE, MAX_LLM_ROWS
 
 # ---------------------------------------------------------------------------
-# Valid source filters for Lance indices
+# Valid source filters for hnsw_acorn indices
 # ---------------------------------------------------------------------------
 
 VALID_DESC_SOURCES = frozenset({"311", "restaurant", "hpd", "oath"})
@@ -166,7 +166,7 @@ def _complaint_search(query: str, limit: int, ctx: Context) -> ToolResult:
     except Exception:
         pass
 
-    # Semantic enhancement via Lance
+    # Semantic enhancement via hnsw_acorn
     semantic_suggestions = _semantic_enhance(query, ctx, source_filter="WHERE source IN ('cfpb', '311')")
 
     elapsed = round((time.time() - t0) * 1000)
@@ -243,7 +243,7 @@ def _violation_search(query: str, limit: int, ctx: Context) -> ToolResult:
         _, rows = results.get(name, ([], []))
         all_results.extend(rows)
 
-    # Semantic enhancement via Lance
+    # Semantic enhancement via hnsw_acorn
     semantic_suggestions = _semantic_enhance(query, ctx, source_filter="WHERE source IN ('restaurant', 'hpd', 'oath')")
 
     elapsed = round((time.time() - t0) * 1000)
@@ -251,7 +251,7 @@ def _violation_search(query: str, limit: int, ctx: Context) -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
-# Domain: entities (Lance fuzzy name matching)
+# Domain: entities (hnsw_acorn fuzzy name matching)
 # ---------------------------------------------------------------------------
 
 

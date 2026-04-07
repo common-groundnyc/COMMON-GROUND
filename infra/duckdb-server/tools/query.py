@@ -290,7 +290,7 @@ def _catalog(pool: CursorPool, keyword: str, catalog: dict, embed_fn=None, ctx=N
 
 
 def _semantic_fallback(pool: CursorPool, kw: str, match_count: int, embed_fn=None, ctx=None) -> str:
-    """Try Lance vector search on catalog descriptions when fuzzy matches are sparse."""
+    """Try vector search on catalog descriptions when fuzzy matches are sparse."""
     if match_count >= 3 or embed_fn is None:
         return ""
     try:

@@ -287,13 +287,19 @@ LIMIT 50
 """
 
 ALT_FUEL_STATIONS_NEARBY_SQL = """
+WITH stations AS (
+    SELECT station_name, street_address, city, state, zip,
+           fuel_type_code, ev_network, ev_connector_types,
+           TRY_CAST(latitude AS DOUBLE) AS lat,
+           TRY_CAST(longitude AS DOUBLE) AS lng
+    FROM lake.federal.nrel_alt_fuel_stations
+    WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+)
 SELECT station_name, street_address, city, state, zip,
        fuel_type_code, ev_network, ev_connector_types,
-       latitude, longitude
-FROM lake.federal.nrel_alt_fuel_stations
-WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-ORDER BY POW(TRY_CAST(latitude AS DOUBLE) - ?, 2)
-       + POW(TRY_CAST(longitude AS DOUBLE) - ?, 2)
+       lat AS latitude, lng AS longitude
+FROM stations
+ORDER BY POW(lat - ?, 2) + POW(lng - ?, 2)
 LIMIT 20
 """
 

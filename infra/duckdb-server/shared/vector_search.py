@@ -48,7 +48,7 @@ def vector_expand_names_with_ids(ctx: object, search_term: str, threshold: float
         return []
 
 
-def lance_route_entity(ctx: object, search_term: str, k: int = 30) -> dict:
+def route_entity_by_vector(ctx: object, search_term: str, k: int = 30) -> dict:
     """Search entity index to find which source tables contain matching names.
 
     Returns dict with:

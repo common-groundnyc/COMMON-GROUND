@@ -1,61 +1,57 @@
-# dagster_pipeline
+# Common Ground Data Pipeline
 
-## Getting started
+Civic intelligence data platform for NYC. Ingests open data (Socrata, federal, custom scrapers), resolves entities with Splink, builds DuckPGQ property graphs, serves it all through a FastMCP server at `mcp.common-ground.nyc` and a public dashboard at [common-ground.nyc/explore](https://common-ground.nyc/explore).
 
-### Installing dependencies
+**~352 tables · ~568M rows · 14 schemas · 15 MCP super tools · 8 property graphs**
 
-**Option 1: uv**
-
-Ensure [`uv`](https://docs.astral.sh/uv/) is installed following their [official documentation](https://docs.astral.sh/uv/getting-started/installation/).
-
-Create a virtual environment, and install the required dependencies using _sync_:
+## Quickstart
 
 ```bash
-uv sync
+# Always run Dagster in Docker (macOS forkserver OOMs otherwise)
+docker compose up -d
+docker compose logs -f dagster-daemon
+open http://localhost:3000      # Dagster UI
 ```
 
-Then, activate the virtual environment:
-
-| OS | Command |
-| --- | --- |
-| MacOS | ```source .venv/bin/activate``` |
-| Windows | ```.venv\Scripts\activate``` |
-
-**Option 2: pip**
-
-Install the python dependencies with [pip](https://pypi.org/project/pip/):
+Server-side tests:
 
 ```bash
-python3 -m venv .venv
+cd infra/duckdb-server
+uv run --with fastmcp --with starlette --with httpx --with sqlglot pytest tests/ -v
 ```
 
-Then activate the virtual environment:
+## Repo map
 
-| OS | Command |
-| --- | --- |
-| MacOS | ```source .venv/bin/activate``` |
-| Windows | ```.venv\Scripts\activate``` |
+| Path | What's there |
+|---|---|
+| `src/dagster_pipeline/` | Dagster assets, sources, definitions — the ingestion tier |
+| `infra/duckdb-server/` | FastMCP server (MCP tools + REST + Mosaic data server) — the serving tier |
+| `infra/cg-platform/` | Postgres schema for the future subscription/notification platform |
+| `scripts/` | Dedup, ingestion, investigation helpers |
+| `tests/` | Project-level pytest suite |
+| `docs/superpowers/` | GSD roadmap, phase plans, audits, strategic plans |
+| `docs/superpowers/` | Design specs and implementation plans |
+| `docker-compose.yml` | dagster-code, dagster-webserver, dagster-daemon |
 
-Install the required dependencies:
+## Key docs
 
-```bash
-pip install -e ".[dev]"
-```
+- **[AGENTS.md](./AGENTS.md)** — agent onboarding (stack, commands, operating principles, deploy, known issues). `CLAUDE.md` is a symlink to this.
+- **[docs/superpowers/ROADMAP.md](./docs/superpowers/ROADMAP.md)** — phases and milestones
+- **[docs/superpowers/STATE.md](./docs/superpowers/STATE.md)** — current phase
+- **[docs/superpowers/plans/cg-platform-roadmap.md](./docs/superpowers/plans/cg-platform-roadmap.md)** — CG platform v0.2+ (notifications, Telegram bot, CLI)
 
-### Running Dagster
+## Deploy
 
-Start the Dagster UI web server:
+Server code deploys via `git push` → `ssh` → `git pull` on Hetzner. See [AGENTS.md → Deploy](./AGENTS.md) for the full sequence. The website lives in a separate repo (`common-ground-website`) and deploys to Cloudflare Workers.
 
-```bash
-dg dev
-```
+## Gotchas
 
-Open http://localhost:3000 in your browser to see the project.
+- **Never run `dagster dev` locally** — always Docker. macOS forkserver OOMs at 60 GB.
+- **Never bypass Dagster** with ad-hoc ingestion scripts.
+- **DuckLake is attached `AS lake`** — reference tables as `lake.<schema>.<table>`.
+- **`lake.housing.hpd_violations`** has some orphan parquet refs — filtered queries fail, counts work. See AGENTS.md.
+- **Secrets** live in SOPS-encrypted `.env.secrets.enc`. Never read `*.secrets.toml` files.
 
-## Learn more
+## Stack
 
-To learn more about this template and Dagster in general:
-
-- [Dagster Documentation](https://docs.dagster.io/)
-- [Dagster University](https://courses.dagster.io/)
-- [Dagster Slack Community](https://dagster.io/slack)
+Dagster 1.12 · DuckDB 1.5 + DuckLake · Postgres · Splink 4 · hnsw_acorn · DuckPGQ · FastMCP 3 · sqlglot · Hetzner + Cloudflare Tunnel

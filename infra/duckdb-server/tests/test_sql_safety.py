@@ -31,7 +31,7 @@ class TestValidateIdentifier:
 
 class TestSanitizeError:
     def test_strips_file_paths(self):
-        result = sanitize_error("Cannot open file /data/common-ground/lance/entity.lance")
+        result = sanitize_error("Cannot open file /data/common-ground/emb.duckdb")
         assert "/data/common-ground" not in result
 
     def test_strips_password(self):

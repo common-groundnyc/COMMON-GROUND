@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared.db import execute, safe_query, fill_placeholders, parallel_queries
 from shared.formatting import make_result, format_text_table
 from shared.graph import require_graph
-from shared.lance import vector_expand_names
+from shared.vector_search import vector_expand_names
 from shared.types import MAX_LLM_ROWS, BBL_PATTERN
 
 # ---------------------------------------------------------------------------
