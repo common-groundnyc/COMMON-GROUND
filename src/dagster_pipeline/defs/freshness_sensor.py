@@ -258,9 +258,7 @@ def data_freshness_sensor(context):
                 run_requests.append(
                     RunRequest(
                         run_key=run_key,
-                        asset_selection=AssetSelection.assets(
-                            AssetKey([schema, table_name])
-                        ),
+                        asset_selection=[AssetKey([schema, table_name])],
                         tags={"triggered_by": "freshness_sensor", "dataset_id": dataset_id},
                     )
                 )
