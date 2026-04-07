@@ -21,7 +21,8 @@ RUN pip install --no-cache-dir \
     huggingface_hub==1.8.0 \
     aiohttp==3.13.3 \
     google-genai==1.68.0 \
-    google-auth==2.49.1
+    google-auth==2.49.1 \
+    sqlglot==30.2.1
 
 WORKDIR /app
 COPY *.py ./
@@ -29,6 +30,7 @@ COPY api/ api/
 COPY middleware/ middleware/
 COPY shared/ shared/
 COPY tools/ tools/
+COPY routes/ routes/
 COPY start.sh ./
 RUN chmod +x start.sh
 

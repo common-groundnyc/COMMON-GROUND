@@ -64,3 +64,57 @@ def test_mosaic_endpoint_rejects_disallowed_query():
     )
     assert response.status_code == 403
     assert "rejected" in response.json()["error"].lower()
+
+
+def test_unqualified_table_reference_rejected():
+    assert is_query_allowed("SELECT * FROM housing._pipeline_state") is False
+    assert is_query_allowed("SELECT * FROM hpd_violations") is False
+
+
+def test_whitespace_separated_keywords_rejected():
+    assert is_query_allowed("DROP\tTABLE lake.housing.hpd_violations") is False
+    assert is_query_allowed("DROP\nTABLE lake.housing.hpd_violations") is False
+    assert is_query_allowed("DROP/*comment*/TABLE lake.housing.hpd_violations") is False
+
+
+def test_multistatement_with_drop_rejected():
+    assert is_query_allowed("SELECT 1; DROP TABLE lake.housing.hpd_violations") is False
+
+
+def test_cte_with_ddl_rejected():
+    sql = "WITH x AS (SELECT 1) DELETE FROM lake.housing.hpd_violations"
+    assert is_query_allowed(sql) is False
+
+
+def test_select_column_named_created_at_allowed():
+    sql = "SELECT created_at FROM lake.housing.hpd_violations"
+    assert is_query_allowed(sql) is True
+
+
+def test_pragma_rejected():
+    assert is_query_allowed("PRAGMA database_list") is False
+
+
+def test_uppercase_lake_prefix_allowed():
+    sql = "SELECT 1 FROM LAKE.HOUSING.HPD_VIOLATIONS"
+    assert is_query_allowed(sql) is True
+
+
+def test_quoted_identifiers_resolved():
+    sql = 'SELECT 1 FROM "lake"."housing"."hpd_violations"'
+    assert is_query_allowed(sql) is True
+
+
+def test_quoted_internal_table_rejected():
+    sql = 'SELECT 1 FROM "lake"."housing"."_pipeline_state"'
+    assert is_query_allowed(sql) is False
+
+
+def test_real_column_names_returned_in_data():
+    """Verify _run_mosaic_query uses parsed column names from the SELECT."""
+    sql = "SELECT zip, COUNT(*) AS cnt FROM lake.housing.hpd_violations GROUP BY zip"
+    with patch("routes.mosaic_route.execute") as mock_execute:
+        mock_execute.return_value = [("11201", 42), ("11206", 31)]
+        from routes.mosaic_route import _run_mosaic_query
+        result = _run_mosaic_query({"sql": sql})
+    assert result == {"data": [{"zip": "11201", "cnt": 42}, {"zip": "11206", "cnt": 31}]}
