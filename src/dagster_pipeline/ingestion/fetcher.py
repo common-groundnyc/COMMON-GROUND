@@ -4,7 +4,9 @@ Two modes:
   - parallel_fetch_json: accumulates all pages (small datasets)
   - stream_fetch_pages: yields pages one at a time (large datasets, zero accumulation)
 """
+import json
 import logging
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 
@@ -16,24 +18,31 @@ logger = logging.getLogger(__name__)
 _CLIENT = httpx.Client(timeout=300, headers={"Accept-Encoding": "gzip"}, follow_redirects=True)
 
 
-def fetch_json_page(url: str, max_retries: int = 5) -> pa.Table | None:
+def _backoff(attempt: int, base: int = 5, cap: int = 120) -> float:
+    """Exponential backoff with jitter. attempt is 0-indexed."""
+    return min(cap, base * (2 ** attempt)) + random.uniform(0, 2)
+
+
+def fetch_json_page(url: str, max_retries: int = 7) -> pa.Table | None:
     """Fetch one JSON page, return as Arrow table.
 
-    Retries on 5xx AND on network/timeout errors. Without timeout retries
-    a single Socrata hiccup truncated the entire ingest at the page that
-    happened to fail, leaving lake counts at exact multiples of PAGE_SIZE.
+    Retries on:
+      - network/timeout errors (httpx.TimeoutException, NetworkError, RemoteProtocolError)
+      - 5xx server errors
+      - 429 rate limits (respects Retry-After header when present)
+      - JSONDecodeError on truncated/malformed response bodies
+    Without these retries a single Socrata hiccup truncates the entire ingest
+    at the page that happened to fail, leaving lake counts at multiples of PAGE_SIZE.
     """
     import time as _time
-    last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
             resp = _CLIENT.get(url)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
-            last_exc = exc
             if attempt >= max_retries:
                 raise
-            wait = 2 ** attempt * 5
-            logger.warning("Fetch network error for %s — retry %d in %ds: %s",
+            wait = _backoff(attempt)
+            logger.warning("Fetch network error for %s — retry %d in %.1fs: %s",
                            url[:80], attempt + 1, wait, exc)
             _time.sleep(wait)
             continue
@@ -41,19 +50,41 @@ def fetch_json_page(url: str, max_retries: int = 5) -> pa.Table | None:
         if resp.status_code in (404, 403):
             logger.warning("Fetch %d for %s — skipping", resp.status_code, url[:80])
             return None
+        if resp.status_code == 429 and attempt < max_retries:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                wait = float(retry_after) if retry_after else _backoff(attempt, base=10)
+            except ValueError:
+                wait = _backoff(attempt, base=10)
+            logger.warning("Fetch 429 rate limit for %s — retry %d in %.1fs",
+                           url[:80], attempt + 1, wait)
+            _time.sleep(wait)
+            continue
         if resp.status_code >= 500 and attempt < max_retries:
-            wait = 2 ** attempt * 5
-            logger.warning("Fetch %d for %s — retry %d in %ds", resp.status_code, url[:80], attempt + 1, wait)
+            wait = _backoff(attempt)
+            logger.warning("Fetch %d for %s — retry %d in %.1fs",
+                           resp.status_code, url[:80], attempt + 1, wait)
             _time.sleep(wait)
             continue
         resp.raise_for_status()
-        break
-    rows = resp.json()
-    if not rows:
-        return None
-    table = pa.Table.from_pylist(rows)
-    del rows
-    return table
+
+        try:
+            rows = resp.json()
+        except json.JSONDecodeError as exc:
+            if attempt >= max_retries:
+                raise
+            wait = _backoff(attempt)
+            logger.warning("Fetch JSON decode error for %s — retry %d in %.1fs: %s",
+                           url[:80], attempt + 1, wait, exc)
+            _time.sleep(wait)
+            continue
+
+        if not rows:
+            return None
+        table = pa.Table.from_pylist(rows)
+        del rows
+        return table
+    return None
 
 
 def parallel_fetch_json(urls: list[str], max_workers: int = 10) -> pa.Table | None:
