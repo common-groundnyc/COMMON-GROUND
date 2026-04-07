@@ -74,6 +74,26 @@ Ad-hoc helpers: dedup (`dedup_*.py`), investigation (`investigate_*.py`), ingest
 ### `memory/`
 Repo-specific auto-memory, committed to git. Index at `memory/MEMORY.md`.
 
+## Machine-discovered graph (second opinion)
+
+`graphify-out/` (gitignored) holds an AST + semantic knowledge graph of the whole repo: **1614 nodes, 2046 edges, 115 communities** across 320 files. Regenerate with:
+
+```bash
+graphify .
+open graphify-out/graph.html
+```
+
+Top connected abstractions per the graph — these are the actual centers of gravity and match what the ADRs describe:
+
+| Rank | Node | Edges | Referenced ADR |
+|---|---|---|---|
+| 1 | `CursorPool` | 31 | [0008](adr/0008-cursor-pool.md) |
+| 2 | `PercentileMiddleware` | 30 | [0006](adr/0006-fastmcp-for-rest.md) |
+| 3 | `OutputFormatterMiddleware` | 29 | [0006](adr/0006-fastmcp-for-rest.md) |
+| 4 | `DuckLakeResource` | 23 | [0002](adr/0002-ducklake-catalog-convention.md) |
+
+Read `graphify-out/GRAPH_REPORT.md` for community clustering and surprising connections.
+
 ## External dependencies
 
 - **Hetzner** — bare metal in Nuremberg at `178.156.228.119`

@@ -235,3 +235,8 @@ raw_datasets/
 
 # Local duckdb cheatsheet
 duckdb-cheatsheet.pdf
+
+# Graphify knowledge-graph artifacts (regenerable)
+.graphify_*
+.graphifyignore
+graphify-out/
