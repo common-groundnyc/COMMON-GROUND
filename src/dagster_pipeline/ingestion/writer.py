@@ -259,11 +259,35 @@ def write_streaming_merge(conn: duckdb.DuckDBPyConnection,
     return written
 
 
+def _get_table_row_count(conn: duckdb.DuckDBPyConnection, dataset_name: str) -> int | None:
+    """Query the actual row count of a lake table by its 'schema.table' name."""
+    parts = dataset_name.split(".", 1)
+    if len(parts) != 2:
+        return None
+    schema, table = parts
+    try:
+        result = conn.execute(
+            "SELECT estimated_size FROM duckdb_tables() "
+            "WHERE database_name = 'lake' AND schema_name = ? AND table_name = ?",
+            [schema, table],
+        ).fetchone()
+        return result[0] if result else None
+    except Exception:
+        return None
+
+
 def update_cursor(conn: duckdb.DuckDBPyConnection,
                   dataset_name: str, row_count: int) -> None:
     """Update pipeline state with latest cursor.
+
+    Stores the actual table row count (from duckdb_tables) rather than
+    just the rows written in this run, so the freshness sensor can
+    accurately compare lake size vs Socrata source size.
     DuckLake doesn't support PRIMARY KEY — use DELETE + INSERT.
     """
+    actual_rows = _get_table_row_count(conn, dataset_name)
+    stored_rows = actual_rows if actual_rows is not None else row_count
+
     def _do_cursor():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS lake._pipeline_state (
@@ -281,17 +305,17 @@ def update_cursor(conn: duckdb.DuckDBPyConnection,
             INSERT INTO lake._pipeline_state
                 (dataset_name, last_updated_at, row_count, last_run_at)
             VALUES (?, current_timestamp, ?, current_timestamp)
-        """, [dataset_name, row_count])
+        """, [dataset_name, stored_rows])
 
     _retry(_do_cursor, f"cursor:{dataset_name}")
 
 
 def touch_cursor(conn: duckdb.DuckDBPyConnection, dataset_name: str) -> None:
-    """Update only last_run_at, preserving the existing data cursor and row count.
+    """Update last_run_at and refresh row_count from the actual table.
 
     Use when an asset checks for new data but finds none (delta_skip).
     Proves the asset ran successfully — data is confirmed current.
-    If no row exists yet, inserts one with current_timestamp as cursor.
+    Also corrects any stale row_count by reading duckdb_tables().
     """
     def _do_touch():
         conn.execute("""
@@ -302,7 +326,6 @@ def touch_cursor(conn: duckdb.DuckDBPyConnection, dataset_name: str) -> None:
                 last_run_at TIMESTAMP DEFAULT current_timestamp
             )
         """)
-        # Read existing cursor values before deleting
         existing = conn.execute(
             "SELECT last_updated_at, row_count FROM lake._pipeline_state WHERE dataset_name = ? LIMIT 1",
             [dataset_name],
@@ -310,6 +333,9 @@ def touch_cursor(conn: duckdb.DuckDBPyConnection, dataset_name: str) -> None:
 
         old_cursor = existing[0] if existing else None
         old_rows = existing[1] if existing else 0
+
+        actual_rows = _get_table_row_count(conn, dataset_name)
+        stored_rows = actual_rows if actual_rows is not None else old_rows
 
         conn.execute(
             "DELETE FROM lake._pipeline_state WHERE dataset_name = ?",
@@ -319,6 +345,6 @@ def touch_cursor(conn: duckdb.DuckDBPyConnection, dataset_name: str) -> None:
             INSERT INTO lake._pipeline_state
                 (dataset_name, last_updated_at, row_count, last_run_at)
             VALUES (?, ?, ?, current_timestamp)
-        """, [dataset_name, old_cursor, old_rows])
+        """, [dataset_name, old_cursor, stored_rows])
 
     _retry(_do_touch, f"touch:{dataset_name}")

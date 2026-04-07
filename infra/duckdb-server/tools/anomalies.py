@@ -84,7 +84,7 @@ ANOMALY_METRICS: list[AnomalyMetric] = [
         name="restaurant_failures",
         description="Restaurant inspection failures by borough",
         sql_current="""
-            SELECT boro AS group_key, COUNT(DISTINCT camis) AS current_value
+            SELECT boro AS group_key, approx_count_distinct(camis) AS current_value
             FROM lake.health.restaurant_inspections
             WHERE grade IN ('C', 'Z', 'P')
               AND TRY_CAST(inspection_date AS DATE) >= CURRENT_DATE - INTERVAL '30 days'
@@ -98,7 +98,7 @@ ANOMALY_METRICS: list[AnomalyMetric] = [
             FROM (
                 SELECT boro,
                        DATE_TRUNC('month', TRY_CAST(inspection_date AS DATE)) AS month,
-                       COUNT(DISTINCT camis) AS monthly_count
+                       approx_count_distinct(camis) AS monthly_count
                 FROM lake.health.restaurant_inspections
                 WHERE grade IN ('C', 'Z', 'P')
                   AND TRY_CAST(inspection_date AS DATE) >= CURRENT_DATE - INTERVAL '365 days'

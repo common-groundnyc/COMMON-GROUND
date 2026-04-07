@@ -62,7 +62,7 @@ def parse_adr_row(row: dict) -> dict | None:
     lot = lot_raw.zfill(4)
     bbl = f"{boro}{block}{lot}"
 
-    street_std = row.get("stname", "").strip()
+    street_std = " ".join(row.get("stname", "").split())  # collapse whitespace
     if not street_std:
         return None
 

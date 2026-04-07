@@ -56,9 +56,9 @@ ssh -i ~/.ssh/id_ed25519_hetzner fattie@178.156.228.119 \
 ## 10. Embedding Pipeline Check
 ```bash
 ssh -i ~/.ssh/id_ed25519_hetzner fattie@178.156.228.119 \
-  "cd /opt/common-ground && docker compose logs duckdb-server | grep 'Lance embedding'"
+  "cd /opt/common-ground && docker compose logs duckdb-server | grep 'hnsw_acorn'"
 ```
-**Verify:** Shows "Lance embedding pipeline complete".
+**Verify:** Shows "hnsw_acorn loaded in embeddings DB".
 
 ---
 
@@ -72,4 +72,4 @@ ssh -i ~/.ssh/id_ed25519_hetzner fattie@178.156.228.119 \
 | External S3 URLs in rent stabilization | Tradeoff: stale data vs startup reliability. Not a security issue. |
 | Test coverage for tool functions | Needed but large effort. Separate phase. |
 | DuckPGQ MATCH pattern parameterization | PGQ MATCH syntax doesn't support ? params. Inputs are regex-validated. |
-| Lance vector search parameterization | Lance SQL may not support ? params. Inputs validated against frozensets. |
+| hnsw_acorn vector search parameterization | hnsw_acorn requires inlined vector literals. Inputs validated against frozensets. |

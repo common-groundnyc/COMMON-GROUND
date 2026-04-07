@@ -12,7 +12,15 @@ See: .planning/PROJECT.md (updated 2026-03-25)
 Phase: 11 of 21 (Entity Master)
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-04-01 — v3.0 milestone created from 5-agent innovation audit
+Last activity: 2026-04-07 — Lake→public catalog convergence completed (332 tables in unified catalog); MCP server redeployed; CLAUDE.md rewritten against ground truth
+
+## 2026-04-07 Notes
+
+- Dual-catalog issue resolved: `lake.*` schema dropped after batched migration; all tables now in `public.*`
+- MCP server container rebuilt without METADATA_SCHEMA references
+- 84 lake-only tables flagged for re-ingestion via freshness sensor (sensor cursor reset, 19+ runs completed)
+- Repo cruft purged (~710 MB of test_*.duckdb, bobaadr.txt, pad.zip, .tmp_dagster_home_*)
+- pm-skills marketplace installed (8 plugins) for PM workflow layered on top of `.planning/`
 
 Progress: ██████████░░░░░░░░░░ 50% (20/40 total plans across all milestones)
 

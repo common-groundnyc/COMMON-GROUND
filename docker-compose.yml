@@ -1,7 +1,3 @@
-volumes:
-  dlt-pipelines:
-    name: dagster-pipeline-dlt-state
-
 networks:
   frontend:
     driver: bridge
@@ -28,7 +24,6 @@ services:
     volumes:
       - ./dagster-home:/dagster-home
       - ./src/dagster_pipeline:/app/src/dagster_pipeline
-      - ./.dlt/config.toml:/app/.dlt/config.toml:ro
       - ./models:/app/models:ro
     networks:
       - backend

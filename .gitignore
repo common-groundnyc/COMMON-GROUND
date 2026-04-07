@@ -209,3 +209,11 @@ storage/
 
 # Decrypted secrets (never commit — .env.secrets.enc is the encrypted version)
 .env.secrets
+
+# Local cruft
+.DS_Store
+test_*.duckdb
+bobaadr.txt
+pad.zip
+.tmp/
+.tmp_dagster_home_*

@@ -37,7 +37,13 @@ _CATEGORY_NAMES = frozenset({
     "status", "complaint_type", "violation_type", "type", "grade",
     "disposition", "outcome", "offense_description", "law_cat_cd",
     "building_class", "zoning_district", "community_board",
+    # Socrata-style compound names (no underscores)
+    "violationstatus", "currentstatus", "novtype", "class",
+    "rentimpairing", "inspectiontype",
 })
+
+# Suffixes that indicate a category column (VARCHAR only)
+_CATEGORY_SUFFIXES = ("status", "type", "grade", "class")
 
 _NUMERIC_SUFFIXES = ("_amount", "_count", "_score", "_total", "_penalty", "_fine")
 
@@ -57,19 +63,25 @@ def classify_column(name: str, dtype: str) -> FilterType | None:
     if lower in _GEOGRAPHY_NAMES or lower.endswith("_zip"):
         return FilterType.GEOGRAPHY
 
-    # Date: match by type, or VARCHAR columns ending in _date
+    # Date: match by type, or columns with "date" in the name
     if dtype in _DATE_TYPES:
         return FilterType.DATE_RANGE
-    if lower.endswith("_date"):
+    if lower.endswith("_date") or lower.endswith("date"):
         return FilterType.DATE_RANGE
 
-    # Category: name match, VARCHAR only
-    if lower in _CATEGORY_NAMES and dtype == "VARCHAR":
-        return FilterType.CATEGORY
+    # Category: exact name match OR ends with a category suffix (VARCHAR only)
+    if dtype == "VARCHAR":
+        if lower in _CATEGORY_NAMES:
+            return FilterType.CATEGORY
+        if any(lower.endswith(s) for s in _CATEGORY_SUFFIXES) and lower not in _TEXT_SEARCH_NAMES:
+            return FilterType.CATEGORY
 
-    # Text search: name match, VARCHAR only
-    if lower in _TEXT_SEARCH_NAMES and dtype == "VARCHAR":
-        return FilterType.TEXT_SEARCH
+    # Text search: name match, or contains "description"/"name" (VARCHAR only)
+    if dtype == "VARCHAR":
+        if lower in _TEXT_SEARCH_NAMES:
+            return FilterType.TEXT_SEARCH
+        if "description" in lower or (lower.endswith("name") and lower != "streetname"):
+            return FilterType.TEXT_SEARCH
 
     # Numeric: name or suffix match, numeric types only
     if dtype in _NUMERIC_TYPES:
@@ -188,6 +200,57 @@ def _cors_headers(cors_origin: str) -> dict:
     }
 
 
+def _build_provenance(
+    schema_name: str,
+    table_name: str,
+    pool,
+) -> dict:
+    """Build provenance metadata from source_registry + pipeline state."""
+    from source_registry import SOURCE_REGISTRY
+    from source_links import DATASET_URLS
+
+    full_key = f"{schema_name}.{table_name}"
+    provenance: dict = {"table": full_key}
+
+    # Look up in the comprehensive registry (334 tables, all providers)
+    reg = SOURCE_REGISTRY.get(full_key)
+    if reg:
+        provenance["provider"] = reg["provider"]
+        if "source_url" in reg:
+            provenance["source_url"] = reg["source_url"]
+        if "api_url" in reg:
+            provenance["api_url"] = reg["api_url"]
+        if "dataset_id" in reg:
+            provenance["dataset_id"] = reg["dataset_id"]
+    else:
+        provenance["provider"] = "unknown"
+
+    # Add key_column from source_links if available (for row-level linking)
+    sl_entry = DATASET_URLS.get(table_name)
+    if sl_entry and "key_col" in sl_entry:
+        provenance["key_column"] = sl_entry["key_col"]
+
+    # Pipeline state for ingestion metadata
+    from shared.db import execute
+    try:
+        _, ps_rows = execute(pool, """
+            SELECT last_updated_at, row_count, last_run_at,
+                   source_rows, sync_status, source_checked_at
+            FROM lake._pipeline_state
+            WHERE dataset_name = ?
+        """, [full_key])
+        if ps_rows:
+            row = ps_rows[0]
+            provenance["last_ingested"] = str(row[2]) if row[2] else None
+            provenance["rows_ingested"] = row[1]
+            provenance["source_rows"] = row[3]
+            provenance["sync_status"] = row[4]
+    except Exception:
+        pass
+
+    return provenance
+
+
 async def handle_table_meta(
     request: Request,
     pool,
@@ -227,11 +290,9 @@ async def handle_table_meta(
     from shared.db import execute  # local import to avoid circular deps at module level
 
     try:
-        _, col_rows = execute(
+        col_cols, col_rows = execute(
             pool,
-            "SELECT column_name, data_type FROM duckdb_columns() "
-            "WHERE schema_name = ? AND table_name = ? ORDER BY column_index",
-            [schema_name, table_name],
+            f"DESCRIBE lake.{schema_name}.{table_name}",
         )
     except Exception as exc:
         return JSONResponse(
@@ -240,8 +301,10 @@ async def handle_table_meta(
             headers=_cors_headers(cors_origin),
         )
 
+    # DESCRIBE returns: column_name, column_type, null, key, default, extra
     columns = []
-    for col_name, data_type in col_rows:
+    for row in col_rows:
+        col_name, data_type = row[0], row[1]
         filter_type = classify_column(col_name, data_type)
         columns.append({
             "name": col_name,
@@ -249,11 +312,14 @@ async def handle_table_meta(
             "filterable": filter_type.value if filter_type is not None else None,
         })
 
+    provenance = _build_provenance(schema_name, table_name, pool)
+
     return JSONResponse(
         {
             "table": table_param,
             "row_count": row_count,
             "comment": comment,
+            "provenance": provenance,
             "columns": columns,
         },
         headers=_cors_headers(cors_origin),
