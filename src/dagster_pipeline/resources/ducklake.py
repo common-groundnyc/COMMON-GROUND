@@ -12,8 +12,9 @@ _conn_cache: duckdb.DuckDBPyConnection | None = None
 
 class DuckLakeResource(dg.ConfigurableResource):
     catalog_url: str
-    memory_limit: str = "2GB"
+    memory_limit: str = "8GB"
     threads: int = 4
+    temp_directory: str = "/tmp/duckdb_spill"
 
     def get_connection(self) -> duckdb.DuckDBPyConnection:
         global _conn_cache
@@ -24,6 +25,9 @@ class DuckLakeResource(dg.ConfigurableResource):
             except Exception:
                 _conn_cache = None
 
+        import os
+        os.makedirs(self.temp_directory, exist_ok=True)
+
         conn = duckdb.connect(":memory:", config={"allow_unsigned_extensions": "true"})
         conn.execute("LOAD ducklake")
         conn.execute("LOAD postgres")
@@ -31,6 +35,9 @@ class DuckLakeResource(dg.ConfigurableResource):
         conn.execute("SET preserve_insertion_order=false")
         conn.execute(f"SET memory_limit='{self.memory_limit}'")
         conn.execute(f"SET threads={self.threads}")
+        # Spill to disk instead of OOM-killing the container on big joins
+        conn.execute(f"SET temp_directory='{self.temp_directory}'")
+        conn.execute("SET max_temp_directory_size='100GB'")
 
         # DuckLake catalog retry — snapshot ID is global, all writers contend
         # even across different schemas (confirmed architectural in issue #512)
