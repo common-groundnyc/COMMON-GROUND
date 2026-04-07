@@ -46,7 +46,9 @@ class DuckLakeResource(dg.ConfigurableResource):
         conn.execute("SET ducklake_retry_backoff=2.0")
 
         url = self._build_attach_url()
-        conn.execute(f"ATTACH '{url}' AS lake (METADATA_SCHEMA 'lake')")
+        # Default schema (no METADATA_SCHEMA) — single catalog convergence after
+        # the lake/public split was discovered 2026-04-07.
+        conn.execute(f"ATTACH '{url}' AS lake")
 
         _conn_cache = conn
         return conn

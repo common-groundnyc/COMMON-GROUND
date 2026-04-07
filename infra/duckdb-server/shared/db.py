@@ -254,7 +254,7 @@ def execute(
                                 pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
                                 rc.execute(f"""
                                     ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-                                    AS lake (METADATA_SCHEMA 'lake')
+                                    AS lake
                                 """)
                             print("Auto-reconnect: DuckLake re-attached successfully", flush=True)
                             with pool.cursor() as retry_cur:

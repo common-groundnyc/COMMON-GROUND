@@ -354,7 +354,7 @@ async def app_lifespan(server):
     pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
     conn.execute(f"""
         ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-        AS lake (METADATA_SCHEMA 'lake')
+        AS lake
     """)
     print("DuckLake catalog attached", flush=True)
 
@@ -378,7 +378,7 @@ async def app_lifespan(server):
         conn.execute("SET default_collation = 'NOCASE'")
         conn.execute(f"""
             ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-            AS lake (METADATA_SCHEMA 'lake')
+            AS lake
         """)
         print("DuckLake reconnected after warm-up failure", flush=True)
     # Note: enable_compaction option removed in DuckLake 1.5.1 — compaction runs automatically
@@ -1743,7 +1743,7 @@ async def app_lifespan(server):
                         bg_conn.execute("LOAD ducklake")
                         bg_conn.execute(f"""
                             ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={tok_pg_pass} host=postgres'
-                            AS lake (METADATA_SCHEMA 'lake')
+                            AS lake
                         """)
                         tmp_path = "/data/common-ground/lake/_tmp_routes.parquet"
                         bg_conn.execute(f"""
