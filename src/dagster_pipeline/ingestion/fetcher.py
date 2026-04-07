@@ -16,11 +16,28 @@ logger = logging.getLogger(__name__)
 _CLIENT = httpx.Client(timeout=300, headers={"Accept-Encoding": "gzip"}, follow_redirects=True)
 
 
-def fetch_json_page(url: str, max_retries: int = 3) -> pa.Table | None:
-    """Fetch one JSON page, return as Arrow table. Retries on 5xx."""
+def fetch_json_page(url: str, max_retries: int = 5) -> pa.Table | None:
+    """Fetch one JSON page, return as Arrow table.
+
+    Retries on 5xx AND on network/timeout errors. Without timeout retries
+    a single Socrata hiccup truncated the entire ingest at the page that
+    happened to fail, leaving lake counts at exact multiples of PAGE_SIZE.
+    """
     import time as _time
+    last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
-        resp = _CLIENT.get(url)
+        try:
+            resp = _CLIENT.get(url)
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            last_exc = exc
+            if attempt >= max_retries:
+                raise
+            wait = 2 ** attempt * 5
+            logger.warning("Fetch network error for %s — retry %d in %ds: %s",
+                           url[:80], attempt + 1, wait, exc)
+            _time.sleep(wait)
+            continue
+
         if resp.status_code in (404, 403):
             logger.warning("Fetch %d for %s — skipping", resp.status_code, url[:80])
             return None
