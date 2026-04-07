@@ -2477,6 +2477,8 @@ async def neighborhood_route(request: Request) -> JSONResponse:
                 "Access-Control-Max-Age": "86400",
             },
         )
+    if _shared_pool is None or not _shared_catalog:
+        return JSONResponse({"error": "Server starting up"}, status_code=503)
     response = await _explore_neighborhood(request)
     response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
     response.headers["Vary"] = "Origin"
@@ -2496,6 +2498,8 @@ async def zips_search_route(request: Request) -> JSONResponse:
                 "Access-Control-Max-Age": "86400",
             },
         )
+    if _shared_pool is None or not _shared_catalog:
+        return JSONResponse({"error": "Server starting up"}, status_code=503)
     response = await _explore_zips_search(request)
     response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
     response.headers["Vary"] = "Origin"
@@ -2515,6 +2519,8 @@ async def worst_buildings_route(request: Request) -> JSONResponse:
                 "Access-Control-Max-Age": "86400",
             },
         )
+    if _shared_pool is None or not _shared_catalog:
+        return JSONResponse({"error": "Server starting up"}, status_code=503)
     response = await _explore_worst_buildings(request)
     response.headers["Access-Control-Allow-Origin"] = _cors_origin(request)
     response.headers["Vary"] = "Origin"
