@@ -3,12 +3,16 @@
 These are Starlette handlers registered via @mcp.custom_route in mcp_server.py.
 They wrap the existing query builders + DuckDB connection pool.
 """
+import asyncio
+import logging
 import re
 from datetime import date, datetime
 from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 from shared.db import execute
 from shared.explore_queries import (
@@ -56,7 +60,11 @@ async def neighborhood_endpoint(request: Request) -> JSONResponse:
 
     days = _clamp_days(request.query_params.get("days"))
     sql, params = build_zip_overview_query(zip_code=zip_code, days=days)
-    rows = execute(sql, params)
+    try:
+        rows = await asyncio.to_thread(execute, sql, params)
+    except Exception:
+        logger.exception("explore endpoint failed: zip=%s", zip_code)
+        return JSONResponse({"error": "Internal error"}, status_code=500)
     if not rows:
         return JSONResponse({"error": "No data"}, status_code=404)
 
@@ -82,7 +90,11 @@ async def zips_search_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Missing query parameter 'q'"}, status_code=400)
 
     sql, params = build_zip_search_query(prefix=q)
-    rows = execute(sql, params)
+    try:
+        rows = await asyncio.to_thread(execute, sql, params)
+    except Exception:
+        logger.exception("explore endpoint failed: q=%s", q)
+        return JSONResponse({"error": "Internal error"}, status_code=500)
     body = {
         "query": q,
         "results": [
@@ -103,7 +115,11 @@ async def worst_buildings_endpoint(request: Request) -> JSONResponse:
     limit = _clamp_limit(request.query_params.get("limit"))
 
     sql, params = build_worst_buildings_query(zip_code=zip_code, days=days, limit=limit)
-    rows = execute(sql, params)
+    try:
+        rows = await asyncio.to_thread(execute, sql, params)
+    except Exception:
+        logger.exception("explore endpoint failed: zip=%s", zip_code)
+        return JSONResponse({"error": "Internal error"}, status_code=500)
 
     body = {
         "zip": zip_code,
