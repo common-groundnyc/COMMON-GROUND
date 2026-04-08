@@ -1,6 +1,7 @@
 """Aggregate CaseGrade lists into metrics."""
 from collections import defaultdict
 
+from evals.cases import ToolEvalCase
 from evals.verifier import CaseGrade
 
 
@@ -42,7 +43,9 @@ def error_rate(grades: list[CaseGrade]) -> float:
     return errors / len(grades)
 
 
-def per_tool_accuracy(grades: list[CaseGrade], cases: list) -> dict:
+def per_tool_accuracy(
+    grades: list[CaseGrade], cases: list[ToolEvalCase]
+) -> dict[str, float]:
     """Returns {tool_name: accuracy} grouped by expected_tool."""
     by_tool: dict[str, list[CaseGrade]] = defaultdict(list)
     case_lookup = {c.id: c for c in cases}
@@ -52,6 +55,6 @@ def per_tool_accuracy(grades: list[CaseGrade], cases: list) -> dict:
             continue
         by_tool[case.expected_tool].append(g)
     return {
-        tool: sum(1 for g in grades if g.passed) / len(grades)
-        for tool, grades in by_tool.items()
+        tool: sum(1 for tg in tool_grades if tg.passed) / len(tool_grades)
+        for tool, tool_grades in by_tool.items()
     }

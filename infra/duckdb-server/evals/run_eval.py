@@ -83,11 +83,18 @@ async def main():
     print()
 
     all_grades = []
+    all_runs = []
     for case in cases:
         for trial in range(args.trials):
             print(f"  [{case.id}] trial {trial + 1}/{args.trials}...", end=" ", flush=True)
             result = await run_case(case, mcp_url=mcp_url, trial=trial, model=MODEL)
-            grade = grade_case(case, tool_calls=result.tool_calls, error=result.error, trial=trial)
+            all_runs.append(result)
+            grade = grade_case(
+                case,
+                tool_calls=list(result.tool_calls),
+                error=result.error,
+                trial=trial,
+            )
             all_grades.append(grade)
             status = "PASS" if grade.passed else ("ERROR" if grade.error else "FAIL")
             print(status)
@@ -132,6 +139,17 @@ async def main():
                 "error": g.error,
             }
             for g in all_grades
+        ],
+        "runs": [
+            {
+                "case_id": r.case_id,
+                "trial": r.trial,
+                "turns": r.turns,
+                "tool_calls": list(r.tool_calls),
+                "final_text": r.final_text,
+                "error": r.error,
+            }
+            for r in all_runs
         ],
     }, indent=2))
     print()
