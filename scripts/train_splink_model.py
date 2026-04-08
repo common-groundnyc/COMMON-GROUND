@@ -65,7 +65,17 @@ def main():
 
     linker.training.estimate_u_using_random_sampling(max_pairs=5_000_000)
 
-    for rule in [block_on("last_name", "first_name"), block_on("last_name", "zip")]:
+    # EM training: train on multiple blocking rules so each column gets variance
+    # in candidate pairs. CRITICAL: at least one rule must NOT include last_name,
+    # otherwise EM has zero variance on last_name across candidate pairs and
+    # cannot estimate last_name's m_probabilities (they end up as None and the
+    # entire last_name comparison contributes nothing to match scoring).
+    em_rules = [
+        block_on("last_name", "first_name"),
+        block_on("last_name", "zip"),
+        block_on("first_name", "zip"),  # excludes last_name → EM can estimate it
+    ]
+    for rule in em_rules:
         linker.training.estimate_parameters_using_expectation_maximisation(rule)
 
     elapsed = time.time() - t0
