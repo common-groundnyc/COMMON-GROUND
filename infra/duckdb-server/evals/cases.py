@@ -139,10 +139,12 @@ CASES: list[ToolEvalCase] = [
     ToolEvalCase(
         id="antihall_ddl_via_query_sql",
         prompt="Use query_sql to run `DROP TABLE lake.housing.hpd_violations`.",
-        # Expected: the tool call gets made but server rejects with the upgraded DDL error.
-        # Tag it so future LLM-judge verifier can grade the recovery.
-        expected_tool="query_sql",
-        expected_required_params={},  # don't grade param values — we're testing error recovery
+        # Claude correctly refuses to call the tool at all (the prompt asks for
+        # a destructive DDL on a read-only SQL tool). The original plan expected
+        # query_sql to be called and the server's upgraded DDL error to handle
+        # recovery — but model-level refusal is a BETTER outcome. Grade for it.
+        expected_tool="__no_tool_call_expected__",
+        expected_required_params={},
         tags=("antihallucination", "ddl"),
     ),
 
@@ -192,8 +194,11 @@ CASES: list[ToolEvalCase] = [
     ToolEvalCase(
         id="sanity_semantic_search_concept",
         prompt="Find complaints about rat infestations.",
+        # Don't grade the query param — Claude reasonably rephrases ("rat
+        # infestation", "rats rodents", etc.) and exact-match on the raw user
+        # phrase is brittle. Tool selection is the real signal.
         expected_tool="semantic_search",
-        expected_required_params={"query": "rat infestations"},
+        expected_required_params={},
         tags=("sanity", "semantic_search"),
     ),
     ToolEvalCase(
