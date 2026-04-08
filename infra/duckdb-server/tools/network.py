@@ -662,7 +662,7 @@ def _landlord_network_core(bbl: str, pool: object) -> tuple[str, dict]:
                 b2.bbl,
                 b2.housenumber || ' ' || b2.streetname AS address,
                 b2.zip,
-                b2.total_units,
+                b2.units AS total_units,
                 b2.stories
             )
         )
@@ -1187,6 +1187,8 @@ def _political_core(name: str, ctx: Context) -> tuple[str, dict]:
     _, nyc_rows = safe_query(pool, MONEY_NYC_DONATIONS_SQL, [name, name])
     _, contract_rows = safe_query(pool, MONEY_CONTRACTS_SQL, [name])
     _, procurement_rows = safe_query(pool, MONEY_PROCUREMENT_SQL, [name])
+    _, federal_award_rows = safe_query(pool, MONEY_USASPENDING_SQL, [name, name])
+    _, power_map_rows = safe_query(pool, MONEY_LITTLESIS_SQL, [name, name])
 
     # Fuzzy FEC
     fuzzy_fec = []
@@ -1213,7 +1215,12 @@ def _political_core(name: str, ctx: Context) -> tuple[str, dict]:
     except (ToolError, Exception):
         pass
 
-    total_sections = sum(1 for r in [nys_rows, fec_rows, nyc_rows, contract_rows, procurement_rows] if r)
+    total_sections = sum(
+        1 for r in [
+            nys_rows, fec_rows, nyc_rows, contract_rows, procurement_rows,
+            federal_award_rows, power_map_rows,
+        ] if r
+    )
     if total_sections == 0 and not p2p_lines:
         return "", {}
 
@@ -1257,6 +1264,26 @@ def _political_core(name: str, ctx: Context) -> tuple[str, dict]:
             vendor, amount, agency, desc = r
             lines.append(f"  {vendor}: ${float(amount or 0):,.0f} — {agency or '?'}")
 
+    if federal_award_rows:
+        fed_total = sum(float(r[3] or 0) for r in federal_award_rows)
+        lines.append(f"\nFEDERAL AWARDS — USASPENDING (${fed_total:,.0f} total):")
+        for r in federal_award_rows[:8]:
+            recipient, agency, kind, total, count, first_d, last_d = r
+            lines.append(
+                f"  -> {recipient} ({kind}): ${float(total or 0):,.0f} "
+                f"— {agency or '?'} ({count} awards, {first_d or '?'}-{last_d or '?'})"
+            )
+
+    if power_map_rows:
+        lines.append(f"\nPOWER MAP — LITTLESIS ({len(power_map_rows)} relationships):")
+        for r in power_map_rows[:10]:
+            subject, counterpart, category, description, amount, start_d, end_d = r
+            amt_str = f" ${float(amount):,.0f}" if amount else ""
+            desc_str = f" — {description[:80]}" if description else ""
+            lines.append(
+                f"  -> {subject} [{category}] {counterpart or '?'}{amt_str}{desc_str}"
+            )
+
     if fuzzy_fec and not fec_rows:
         lines.append(f"\nFUZZY FEC MATCHES ({len(fuzzy_fec)} — name variants):")
         for r in fuzzy_fec[:5]:
@@ -1277,6 +1304,8 @@ def _political_core(name: str, ctx: Context) -> tuple[str, dict]:
             "nyc_donations": len(nyc_rows),
             "contracts": len(contract_rows),
             "procurement": len(procurement_rows),
+            "federal_awards": len(federal_award_rows),
+            "power_map_relationships": len(power_map_rows),
         },
         **p2p_data,
     }
@@ -1611,7 +1640,7 @@ def _contractor(name: str, depth: int, borough: str, top_n: int, ctx: Context) -
 
     bldg_cols, bldg_rows = execute(pool, """
         SELECT pe.bbl, pe.permit_count, pe.job_type, pe.first_date, pe.last_date, pe.owner_name,
-               b.housenumber || ' ' || b.streetname AS address, b.zip, b.total_units
+               b.housenumber || ' ' || b.streetname AS address, b.zip, b.units AS total_units
         FROM main.graph_permit_edges pe
         LEFT JOIN main.graph_buildings b ON pe.bbl = b.bbl
         WHERE pe.license = ?
@@ -1925,7 +1954,7 @@ def _clusters(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> 
         )
         SELECT c.componentid, c.cluster_size, c.boroughs,
                b.bbl, b.housenumber || ' ' || b.streetname AS address, b.zip,
-               b.boroid, b.total_units,
+               b.boroid, b.units AS total_units,
                ow.owner_name
         FROM clusters c
         JOIN wcc w ON c.componentid = w.componentid
@@ -1987,39 +2016,56 @@ def _cliques(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> T
     t0 = time.time()
     limit = max(1, min(top_n, 100))
 
+    # NOTE: Previously used DuckPGQ's local_clustering_coefficient table function
+    # to compute true LCC (triangle density per node). That function is not
+    # available in the installed duckpgq community extension build for DuckDB
+    # 1.5.x — calls fail with "Catalog Error: Table Function with name
+    # local_clustering_coefficient does not exist". Substituted a degree-based
+    # heuristic that uses graph_shared_owner directly. The metric is no longer
+    # triangle density — it's the count of shared-owner edges per BBL, which
+    # still surfaces buildings most-connected in the ownership network.
+    # Also fixed a related bug: graph_shared_owner uses src_bbl/dst_bbl, not
+    # bbl1/bbl2 which the old code referenced. Both bugs were silently masked
+    # by the phantom nyc_building_network graph until 2026-04-08.
+    # To restore true LCC: install/build a duckpgq variant that exposes the
+    # local_clustering_coefficient table function.
     cols, rows = execute(pool, f"""
-        WITH lcc AS (
-            SELECT * FROM local_clustering_coefficient(nyc_ownership, Building, SharedOwner)
+        WITH degree AS (
+            SELECT bbl, COUNT(*) AS neighbor_count
+            FROM (
+                SELECT src_bbl AS bbl FROM main.graph_shared_owner
+                UNION ALL
+                SELECT dst_bbl AS bbl FROM main.graph_shared_owner
+            )
+            GROUP BY bbl
         )
-        SELECT l.local_clustering_coefficient AS lcc, l.bbl,
+        SELECT NULL::DOUBLE AS lcc, d.bbl,
                b.housenumber || ' ' || b.streetname AS address, b.zip,
-               b.boroid, b.total_units,
+               b.boroid, b.units AS total_units,
                ow.owner_name,
-               (SELECT COUNT(*) FROM main.graph_shared_owner
-                WHERE bbl1 = l.bbl OR bbl2 = l.bbl) AS neighbor_count
-        FROM lcc l
-        JOIN main.graph_buildings b ON l.bbl = b.bbl
+               d.neighbor_count
+        FROM degree d
+        JOIN main.graph_buildings b ON d.bbl = b.bbl
         LEFT JOIN main.graph_owns o ON b.bbl = o.bbl
         LEFT JOIN main.graph_owners ow ON o.owner_id = ow.owner_id
-        WHERE l.local_clustering_coefficient > 0
-        ORDER BY l.local_clustering_coefficient DESC, neighbor_count DESC
+        WHERE d.neighbor_count > 1
+        ORDER BY d.neighbor_count DESC
         LIMIT {limit}
     """)
 
     elapsed = round((time.time() - t0) * 1000)
 
     if not rows:
-        return ToolResult(content="No ownership cliques found (all buildings have LCC = 0).", meta={"query_time_ms": elapsed})
+        return ToolResult(content="No ownership cliques found.", meta={"query_time_ms": elapsed})
 
-    lines = [f"OWNERSHIP CLIQUES — Top {len(rows)} by clustering coefficient\n"]
-    lines.append(f"{'LCC':<8} {'BBL':<12} {'Address':<30} {'Owner':<30} {'Neighbors'}")
-    lines.append("-" * 100)
+    lines = [f"OWNERSHIP CLIQUES — Top {len(rows)} by shared-owner edge count\n"]
+    lines.append(f"{'BBL':<12} {'Address':<30} {'Owner':<30} {'Neighbors'}")
+    lines.append("-" * 90)
 
     for r in rows:
-        lcc_val = f"{r[0]:.3f}" if r[0] else "0"
         addr = (r[2] or "?")[:28]
         owner = (r[6] or "?")[:28]
-        lines.append(f"{lcc_val:<8} {r[1]:<12} {addr:<30} {owner:<30} {r[7]}")
+        lines.append(f"{r[1]:<12} {addr:<30} {owner:<30} {r[7]}")
 
     lines.append(f"\n({elapsed}ms)")
 
@@ -2048,7 +2094,7 @@ def _worst(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> Too
         WITH portfolio AS (
             SELECT o.owner_id,
                    COUNT(DISTINCT o.bbl) AS buildings,
-                   SUM(b.total_units) AS total_units
+                   SUM(b.units) AS total_units
             FROM main.graph_owns o
             JOIN main.graph_buildings b ON o.bbl = b.bbl
             WHERE 1=1 {borough_filter}
@@ -2179,7 +2225,7 @@ def _ownership_graph_bfs(bbl: str, depth: int, ctx: Context) -> tuple[str, dict]
                 target.bbl AS to_bbl,
                 target.housenumber || ' ' || target.streetname AS address,
                 target.zip,
-                target.total_units,
+                target.units AS total_units,
                 path_length(p) AS hops
             )
         )
