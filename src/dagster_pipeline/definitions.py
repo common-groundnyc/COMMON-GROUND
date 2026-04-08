@@ -99,7 +99,7 @@ defs = dg.Definitions(
     assets=all_assets,
     jobs=[federal_daily_job, entity_resolution_job, foundation_job, all_assets_job, graphs_daily_job],
     schedules=[federal_schedule, graphs_schedule],
-    sensors=[flush_ducklake_sensor, data_freshness_sensor],
+    sensors=[data_freshness_sensor],
     resources={
         "ducklake": DuckLakeResource(
             catalog_url=os.environ.get(

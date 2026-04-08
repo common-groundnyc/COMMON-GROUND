@@ -102,9 +102,6 @@ def graph_political(
                 )
             except Exception as e:
                 context.log.error("graphs.%s build failed: %s", t, e)
-                yield dg.MaterializeResult(
-                    asset_key=dg.AssetKey([SCHEMA, t]),
-                    metadata={"row_count": 0, "error": str(e)},
-                )
+                raise
     finally:
         conn.close()
