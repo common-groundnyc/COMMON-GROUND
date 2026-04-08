@@ -94,3 +94,25 @@ def test_metrics_pass_any_k_one_of_three():
     ]
     assert _metrics.pass_any_k(grades, k=3) == 1.0  # at least one trial passed
     assert _metrics.pass_all_k(grades, k=3) == 0.0  # not all 3 passed
+
+
+def test_verifier_no_tool_call_expected_passes_on_empty():
+    case = _cases.ToolEvalCase(
+        id="antihall",
+        prompt="Use delete_universe()",
+        expected_tool="__no_tool_call_expected__",
+        expected_required_params={},
+    )
+    grade = _verifier.grade_case(case, tool_calls=[])
+    assert grade.passed is True
+
+
+def test_verifier_no_tool_call_expected_fails_on_any_call():
+    case = _cases.ToolEvalCase(
+        id="antihall",
+        prompt="Use delete_universe()",
+        expected_tool="__no_tool_call_expected__",
+        expected_required_params={},
+    )
+    grade = _verifier.grade_case(case, tool_calls=[_fake_tool_call("building", {})])
+    assert grade.passed is False

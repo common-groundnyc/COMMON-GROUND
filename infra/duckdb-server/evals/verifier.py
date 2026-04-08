@@ -22,6 +22,10 @@ def grade_case(
 ) -> CaseGrade:
     """Grade one agent run against one case.
 
+    Special case: if case.expected_tool == "__no_tool_call_expected__", the
+    case passes iff the agent made NO tool calls matching a real tool (i.e.,
+    the agent correctly refused). Any tool call fails the case.
+
     tool_calls: list of {"name": str, "input": dict} as returned by Anthropic SDK.
     """
     if error is not None:
@@ -31,6 +35,17 @@ def grade_case(
             required_params_ok=False,
             passed=False,
             error=error,
+            trial=trial,
+        )
+
+    # Anti-hallucination case: pass iff NO tool calls were made.
+    if case.expected_tool == "__no_tool_call_expected__":
+        return CaseGrade(
+            case_id=case.id,
+            tool_selected=len(tool_calls) == 0,
+            required_params_ok=True,
+            passed=len(tool_calls) == 0,
+            error=None,
             trial=trial,
         )
 
@@ -47,8 +62,7 @@ def grade_case(
             trial=trial,
         )
 
-    # Subset match: every required param must be present AND equal.
-    # Extra params on the tool call are fine (optional args, defaults).
+    # Subset match on required params.
     first_match = matching[0]
     actual_params = first_match.get("input", {})
     required_ok = all(
@@ -59,7 +73,7 @@ def grade_case(
         case_id=case.id,
         tool_selected=True,
         required_params_ok=required_ok,
-        passed=required_ok,  # in v1, passing = tool correct AND params correct
+        passed=required_ok,
         error=None,
         trial=trial,
     )
