@@ -123,3 +123,28 @@ def test_usaspending_sql_aggregates_contracts_and_grants(lake_conn):
     awards = sum(r[4] for r in acme_rows)
     assert total == 175000.0
     assert awards == 3
+
+
+def test_littlesis_sql_returns_relationships_for_named_entity(lake_conn):
+    """LittleSis SQL must join entities -> relationships and return counterparts."""
+    from tools.network import MONEY_LITTLESIS_SQL
+
+    lake_conn.execute("""
+        INSERT INTO lake.federal.littlesis_entities VALUES
+        (1,'JOHN DOE','dev','Person','politician','J. Doe','2026-01','1960-01',NULL,NULL),
+        (2,'ACME CORP','co','Org','realestate',NULL,'2026-01','1990-01',NULL,5000000.0),
+        (3,'JANE ROE','lobby','Person','lobbyist',NULL,'2026-01','1970-01',NULL,NULL)
+    """)
+    lake_conn.execute("""
+        INSERT INTO lake.federal.littlesis_relationships VALUES
+        (10,1,2,5,'donation','Donor','Recipient',50000.0,'USD','2022-01','2022-12',TRUE,'2026-01'),
+        (11,1,3,7,'lobbying','Client','Lobbyist',NULL,NULL,'2023-01','2023-12',TRUE,'2026-01')
+    """)
+
+    rows = lake_conn.execute(MONEY_LITTLESIS_SQL, ["JOHN DOE", "JOHN DOE"]).fetchall()
+    assert len(rows) == 2
+    cats = {r[2] for r in rows}
+    assert cats == {"donation", "lobbying"}
+    donation = next(r for r in rows if r[2] == "donation")
+    assert donation[1] == "ACME CORP"
+    assert donation[4] == 50000.0

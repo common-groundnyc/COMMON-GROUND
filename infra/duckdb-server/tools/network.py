@@ -235,6 +235,38 @@ ORDER BY total_amount DESC NULLS LAST
 LIMIT 15
 """
 
+MONEY_LITTLESIS_SQL = """
+WITH subjects AS (
+    SELECT id, name FROM lake.federal.littlesis_entities
+    WHERE name ILIKE '%' || ? || '%'
+)
+SELECT s.name AS subject_name,
+       e2.name AS counterpart_name,
+       r.category,
+       COALESCE(r.description1, r.description2) AS description,
+       r.amount,
+       r.start_date,
+       r.end_date
+FROM subjects s
+JOIN lake.federal.littlesis_relationships r ON r.entity1_id = s.id
+LEFT JOIN lake.federal.littlesis_entities e2 ON e2.id = r.entity2_id
+WHERE r.category IN ('donation','lobbying','transaction','ownership','position')
+UNION ALL
+SELECT s.name AS subject_name,
+       e1.name AS counterpart_name,
+       r.category,
+       COALESCE(r.description2, r.description1) AS description,
+       r.amount,
+       r.start_date,
+       r.end_date
+FROM (SELECT id, name FROM lake.federal.littlesis_entities WHERE name ILIKE '%' || ? || '%') s
+JOIN lake.federal.littlesis_relationships r ON r.entity2_id = s.id
+LEFT JOIN lake.federal.littlesis_entities e1 ON e1.id = r.entity1_id
+WHERE r.category IN ('donation','lobbying','transaction','ownership','position')
+ORDER BY amount DESC NULLS LAST
+LIMIT 25
+"""
+
 
 # ===================================================================
 # Public entry point
