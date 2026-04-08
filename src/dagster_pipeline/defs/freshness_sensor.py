@@ -79,22 +79,23 @@ def _parse_iso_ts(s: str | None) -> datetime | None:
         return None
 
 
-def check_socrata_max_updated_at(
+def check_socrata_freshness(
     domain: str,
     dataset_id: str,
     app_token: str | None,
     timeout: int = 15,
-) -> datetime | None:
-    """Fetch ``max(:updated_at)`` from a Socrata dataset.
+) -> tuple[int | None, datetime | None]:
+    """Single Socrata request that returns both row count AND the upstream
+    ``max(:updated_at)``.
 
-    This is the authoritative upstream modification timestamp — any row with
-    ``:updated_at > cursor`` will be picked up by the delta-merge query in
-    socrata_direct_assets, so comparing this value against our cursor is an
-    exact predictor of "should we re-ingest".
+    Combining the two probes into one SoQL query (``$select=count(*), max(:updated_at)``)
+    keeps the sensor under the 60s gRPC deadline — doubling HTTP calls per
+    dataset previously blew the tick.
 
-    Returns a UTC datetime or None on error/missing.
+    Returns ``(count, max_updated_at_utc)``; either field may be None on
+    parse/HTTP error.
     """
-    url = f"https://{domain}/resource/{dataset_id}.json?$select=max(:updated_at)"
+    url = f"https://{domain}/resource/{dataset_id}.json?$select=count(*),max(:updated_at)&$limit=1"
     headers = {"Accept": "application/json"}
     if app_token:
         headers["X-App-Token"] = app_token
@@ -103,14 +104,37 @@ def check_socrata_max_updated_at(
         with urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
     except (HTTPError, URLError, OSError) as exc:
-        logger.warning("max(:updated_at) failed for %s/%s: %s", domain, dataset_id, exc)
-        return None
+        logger.warning("freshness probe failed for %s/%s: %s", domain, dataset_id, exc)
+        return (None, None)
     if not data:
-        return None
-    row = data[0]
-    # Socrata returns the column under any of these keys depending on SoQL version
-    ts = row.get("max_updated_at") or row.get("max__updated_at") or next(iter(row.values()), None)
-    return _parse_iso_ts(ts) if isinstance(ts, str) else None
+        return (None, None)
+
+    row = data[0] if isinstance(data, list) else data
+
+    # Count can appear under count(*), count_1 (post-SoQL change), or a numeric fallback
+    count_raw = row.get("count(*)") or row.get("count_1")
+    if count_raw is None:
+        # Fallback: first value that's a numeric string with no letters
+        for v in row.values():
+            if isinstance(v, str) and v.isdigit():
+                count_raw = v
+                break
+    try:
+        count = int(count_raw) if count_raw is not None else None
+    except (TypeError, ValueError):
+        count = None
+
+    # max(:updated_at) can appear as max_updated_at or max__updated_at
+    ts_raw = row.get("max_updated_at") or row.get("max__updated_at")
+    if ts_raw is None:
+        # Fallback: first ISO-8601-looking string value in the row
+        for v in row.values():
+            if isinstance(v, str) and "T" in v and "-" in v and ":" in v:
+                ts_raw = v
+                break
+    max_updated = _parse_iso_ts(ts_raw) if isinstance(ts_raw, str) else None
+
+    return (count, max_updated)
 
 
 def check_socrata_count(
@@ -277,12 +301,12 @@ def data_freshness_sensor(context):
     freshness_rows = []
     new_cursor = dict(cursor)
 
-    # Parallel-fetch BOTH row count AND max(:updated_at) for the whole chunk.
-    # Per-tick we issue 2 requests per dataset × CHUNK_SIZE datasets; at
-    # COUNT_CHECK_WORKERS=10 that's ~40-50 HTTP calls overlapped in ~5-15s.
+    # One HTTP request per dataset — count AND max(:updated_at) in a single
+    # SoQL $select so we stay under the 60s gRPC deadline for the tick.
     def _fetch(entry):
-        src_count = check_socrata_count(entry["domain"], entry["dataset_id"], app_token)
-        src_upd = check_socrata_max_updated_at(entry["domain"], entry["dataset_id"], app_token)
+        src_count, src_upd = check_socrata_freshness(
+            entry["domain"], entry["dataset_id"], app_token
+        )
         return entry, src_count, src_upd
 
     with ThreadPoolExecutor(max_workers=COUNT_CHECK_WORKERS) as pool:
