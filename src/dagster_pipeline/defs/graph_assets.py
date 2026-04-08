@@ -79,7 +79,7 @@ POL_SQL_BY_TABLE = {
     op_tags={"schema": SCHEMA},
 )
 def graph_political(
-    context: dg.AssetExecutionContext,
+    context,
     ducklake: DuckLakeResource,
 ):
     """Build the four political-network graph tables from city_government sources.
