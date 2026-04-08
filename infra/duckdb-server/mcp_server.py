@@ -2353,7 +2353,7 @@ async def catalog_json(request: Request) -> JSONResponse:
             try:
                 _, ps_rows = execute(pool, """
                     SELECT dataset_name, last_updated_at, row_count, last_run_at,
-                           source_rows, sync_status, source_checked_at
+                           source_rows, sync_status, source_checked_at, source_updated_at
                     FROM lake._pipeline_state
                 """)
                 for psr in ps_rows:
@@ -2364,19 +2364,38 @@ async def catalog_json(request: Request) -> JSONResponse:
                         "source_rows": psr[4],
                         "sync_status": psr[5],
                         "source_checked_at": str(psr[6]) if psr[6] else None,
+                        "source_updated_at": str(psr[7]) if psr[7] else None,
                     }
             except Exception:
-                _, ps_rows = execute(pool, """
-                    SELECT dataset_name, last_updated_at, row_count, last_run_at
-                    FROM lake._pipeline_state
-                """)
-                for psr in ps_rows:
-                    pipeline_state[psr[0]] = {
-                        "cursor": str(psr[1]) if psr[1] else None,
-                        "rows_written": psr[2],
-                        "last_run_at": str(psr[3]) if psr[3] else None,
-                        "source_rows": None, "sync_status": None, "source_checked_at": None,
-                    }
+                try:
+                    _, ps_rows = execute(pool, """
+                        SELECT dataset_name, last_updated_at, row_count, last_run_at,
+                               source_rows, sync_status, source_checked_at
+                        FROM lake._pipeline_state
+                    """)
+                    for psr in ps_rows:
+                        pipeline_state[psr[0]] = {
+                            "cursor": str(psr[1]) if psr[1] else None,
+                            "rows_written": psr[2],
+                            "last_run_at": str(psr[3]) if psr[3] else None,
+                            "source_rows": psr[4],
+                            "sync_status": psr[5],
+                            "source_checked_at": str(psr[6]) if psr[6] else None,
+                            "source_updated_at": None,
+                        }
+                except Exception:
+                    _, ps_rows = execute(pool, """
+                        SELECT dataset_name, last_updated_at, row_count, last_run_at
+                        FROM lake._pipeline_state
+                    """)
+                    for psr in ps_rows:
+                        pipeline_state[psr[0]] = {
+                            "cursor": str(psr[1]) if psr[1] else None,
+                            "rows_written": psr[2],
+                            "last_run_at": str(psr[3]) if psr[3] else None,
+                            "source_rows": None, "sync_status": None,
+                            "source_checked_at": None, "source_updated_at": None,
+                        }
         except Exception:
             pass
 
@@ -2418,6 +2437,7 @@ async def catalog_json(request: Request) -> JSONResponse:
                 "source_rows": ps.get("source_rows"),
                 "sync_status": ps.get("sync_status"),
                 "source_checked_at": ps.get("source_checked_at"),
+                "source_updated_at": ps.get("source_updated_at"),
             })
             total_rows += (est_size or 0)
             if schema not in schema_stats:

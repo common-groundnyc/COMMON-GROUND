@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -64,6 +65,54 @@ def build_dataset_manifest() -> list[dict]:
     return manifest
 
 
+def _parse_iso_ts(s: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp (with or without trailing Z) into UTC datetime."""
+    if not s:
+        return None
+    try:
+        s2 = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s2)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def check_socrata_max_updated_at(
+    domain: str,
+    dataset_id: str,
+    app_token: str | None,
+    timeout: int = 15,
+) -> datetime | None:
+    """Fetch ``max(:updated_at)`` from a Socrata dataset.
+
+    This is the authoritative upstream modification timestamp — any row with
+    ``:updated_at > cursor`` will be picked up by the delta-merge query in
+    socrata_direct_assets, so comparing this value against our cursor is an
+    exact predictor of "should we re-ingest".
+
+    Returns a UTC datetime or None on error/missing.
+    """
+    url = f"https://{domain}/resource/{dataset_id}.json?$select=max(:updated_at)"
+    headers = {"Accept": "application/json"}
+    if app_token:
+        headers["X-App-Token"] = app_token
+    req = Request(url, headers=headers)
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+    except (HTTPError, URLError, OSError) as exc:
+        logger.warning("max(:updated_at) failed for %s/%s: %s", domain, dataset_id, exc)
+        return None
+    if not data:
+        return None
+    row = data[0]
+    # Socrata returns the column under any of these keys depending on SoQL version
+    ts = row.get("max_updated_at") or row.get("max__updated_at") or next(iter(row.values()), None)
+    return _parse_iso_ts(ts) if isinstance(ts, str) else None
+
+
 def check_socrata_count(
     domain: str,
     dataset_id: str,
@@ -96,28 +145,52 @@ def check_socrata_count(
         return None
 
 
-def compute_sync_status(lake_rows: int, source_rows: int | None) -> str:
-    """Compare lake vs source count using percentage drift AND absolute gap.
+def compute_sync_status(
+    lake_rows: int,
+    source_rows: int | None,
+    lake_cursor: datetime | None = None,
+    source_updated_at: datetime | None = None,
+) -> str:
+    """Compare lake vs source using BOTH row count and row-level modification time.
 
     Returns 'synced', 'stale', or 'unknown'.
-    A dataset is stale if source has more rows AND either:
-      - drift exceeds SYNC_THRESHOLD (5%), OR
-      - absolute missing rows exceed SYNC_MIN_MISSING (1000)
+
+    A dataset is **stale** if EITHER:
+      * source has more rows and drift exceeds SYNC_THRESHOLD (5%) or absolute
+        gap exceeds SYNC_MIN_MISSING (1000); OR
+      * source has rows modified more recently than our cursor (captures
+        in-place row updates where count doesn't change — crucial for data
+        correctness, since Socrata frequently edits existing rows).
+
+    'unknown' only if BOTH probes returned None.
     """
-    if source_rows is None:
+    # Row-count staleness -----------------------------------------------------
+    count_stale = False
+    if source_rows is not None:
+        if source_rows == 0:
+            pass  # source empty; nothing to be stale about
+        elif lake_rows == 0 and source_rows > 0:
+            count_stale = True
+        elif source_rows > lake_rows:
+            missing = source_rows - lake_rows
+            drift_pct = missing / max(lake_rows, 1)
+            if drift_pct > SYNC_THRESHOLD or missing > SYNC_MIN_MISSING:
+                count_stale = True
+
+    # Modification-time staleness --------------------------------------------
+    time_stale = False
+    if source_updated_at is not None and lake_cursor is not None:
+        # Normalize both to aware UTC datetimes before comparing
+        lc = lake_cursor
+        if lc.tzinfo is None:
+            lc = lc.replace(tzinfo=timezone.utc)
+        if source_updated_at > lc:
+            time_stale = True
+
+    if count_stale or time_stale:
+        return "stale"
+    if source_rows is None and source_updated_at is None:
         return "unknown"
-    if source_rows == 0 and lake_rows == 0:
-        return "synced"
-    if source_rows == 0:
-        return "synced"  # source reports 0 but lake has rows — trust lake
-    if lake_rows == 0 and source_rows > 0:
-        return "stale"
-    if source_rows <= lake_rows:
-        return "synced"
-    missing = source_rows - lake_rows
-    drift_pct = missing / lake_rows
-    if drift_pct > SYNC_THRESHOLD or missing > SYNC_MIN_MISSING:
-        return "stale"
     return "synced"
 
 
@@ -186,40 +259,59 @@ def data_freshness_sensor(context):
         for row in lake_rows_result
     }
 
+    # Load per-dataset cursor timestamps so we can detect in-place row edits
+    lake_cursors_by_key: dict[str, datetime | None] = {}
+    try:
+        ps_rows = conn.execute(
+            "SELECT dataset_name, last_updated_at FROM lake._pipeline_state"
+        ).fetchall()
+        for name, ts in ps_rows:
+            if ts is None:
+                continue
+            lc = ts if isinstance(ts, datetime) else _parse_iso_ts(str(ts))
+            lake_cursors_by_key[name] = lc
+    except Exception as exc:
+        context.log.warning("Could not read _pipeline_state cursors: %s", exc)
+
     run_requests = []
     freshness_rows = []
     new_cursor = dict(cursor)
 
-    # Parallel-fetch source row counts for the whole chunk — serial loop blew the
-    # 60s gRPC deadline because Socrata latency dominates each tick.
+    # Parallel-fetch BOTH row count AND max(:updated_at) for the whole chunk.
+    # Per-tick we issue 2 requests per dataset × CHUNK_SIZE datasets; at
+    # COUNT_CHECK_WORKERS=10 that's ~40-50 HTTP calls overlapped in ~5-15s.
     def _fetch(entry):
-        return entry, check_socrata_count(entry["domain"], entry["dataset_id"], app_token)
+        src_count = check_socrata_count(entry["domain"], entry["dataset_id"], app_token)
+        src_upd = check_socrata_max_updated_at(entry["domain"], entry["dataset_id"], app_token)
+        return entry, src_count, src_upd
 
     with ThreadPoolExecutor(max_workers=COUNT_CHECK_WORKERS) as pool:
         fetched = list(pool.map(_fetch, chunk))
 
-    for entry, source_rows in fetched:
+    for entry, source_rows, source_updated_at in fetched:
         schema = entry["schema"]
         table_name = entry["table_name"]
         dataset_id = entry["dataset_id"]
 
         dataset_key = f"{schema}.{table_name}"
         lake_rows = lake_counts_by_key.get(dataset_key, 0)
+        lake_cursor = lake_cursors_by_key.get(dataset_key)
 
-        if source_rows is None:
+        if source_rows is None and source_updated_at is None:
             freshness_rows.append({
                 "schema": schema,
                 "table_name": table_name,
                 "dataset_id": dataset_id,
                 "lake_rows": lake_rows,
                 "source_rows": None,
+                "source_updated_at": None,
                 "sync_status": "unknown",
                 "checked_at": time.time(),
-                "error": "count_fetch_failed",
+                "error": "probe_failed",
             })
             continue
 
-        sync_status = compute_sync_status(lake_rows, source_rows)
+        sync_status = compute_sync_status(lake_rows, source_rows, lake_cursor, source_updated_at)
         is_stale = sync_status == "stale"
         prev = cursor.get(dataset_id, {})
         prev_source_rows = prev.get("source_rows") if isinstance(prev, dict) else prev
@@ -231,13 +323,18 @@ def data_freshness_sensor(context):
             "dataset_id": dataset_id,
             "lake_rows": lake_rows,
             "source_rows": source_rows,
+            "source_updated_at": source_updated_at,
             "sync_status": sync_status,
             "checked_at": time.time(),
             "error": None,
         })
 
         if is_stale:
-            source_changed = source_rows != prev_source_rows
+            source_changed = (
+                source_rows != prev_source_rows
+                or (source_updated_at is not None and lake_cursor is not None
+                    and source_updated_at > lake_cursor)
+            )
             still_stale = prev_triggered_at is not None
             # Don't re-trigger if we fired recently — the run is likely still ingesting
             cooldown_active = (
@@ -254,7 +351,7 @@ def data_freshness_sensor(context):
                 new_cursor[dataset_id] = {"source_rows": source_rows, "triggered_at": prev_triggered_at}
             elif source_changed or still_stale:
                 # Include timestamp so run_key is unique per sensor tick — allows retries
-                run_key = f"{dataset_id}_{source_rows}_{int(time.time())}"
+                run_key = f"{dataset_id}_{source_rows or 0}_{int(time.time())}"
                 run_requests.append(
                     RunRequest(
                         run_key=run_key,
@@ -262,10 +359,18 @@ def data_freshness_sensor(context):
                         tags={"triggered_by": "freshness_sensor", "dataset_id": dataset_id},
                     )
                 )
-                drift_pct = (source_rows - lake_rows) / max(lake_rows, 1)
+                reasons = []
+                if source_rows is not None and source_rows > lake_rows:
+                    drift_pct = (source_rows - lake_rows) / max(lake_rows, 1) * 100
+                    reasons.append(f"row-gap lake={lake_rows} source={source_rows} ({drift_pct:.1f}%)")
+                if (source_updated_at is not None and lake_cursor is not None
+                        and source_updated_at > lake_cursor):
+                    reasons.append(
+                        f"source-mod {source_updated_at.isoformat()} > cursor {lake_cursor.isoformat()}"
+                    )
                 context.log.info(
-                    "Stale: %s/%s — lake=%d source=%d drift=%.1f%% (retry=%s)",
-                    schema, table_name, lake_rows, source_rows, drift_pct * 100,
+                    "Stale: %s/%s — %s (retry=%s)",
+                    schema, table_name, "; ".join(reasons) or "unknown-reason",
                     "yes" if still_stale and not source_changed else "no",
                 )
                 new_cursor[dataset_id] = {"source_rows": source_rows, "triggered_at": time.time()}
@@ -279,7 +384,12 @@ def data_freshness_sensor(context):
     try:
         # Ensure freshness columns exist
         existing_cols = {r[0] for r in conn.execute("DESCRIBE lake._pipeline_state").fetchall()}
-        for col, typ in [("source_rows", "BIGINT"), ("sync_status", "VARCHAR"), ("source_checked_at", "TIMESTAMP")]:
+        for col, typ in [
+            ("source_rows", "BIGINT"),
+            ("sync_status", "VARCHAR"),
+            ("source_checked_at", "TIMESTAMP"),
+            ("source_updated_at", "TIMESTAMP"),
+        ]:
             if col not in existing_cols:
                 try:
                     conn.execute(f"ALTER TABLE lake._pipeline_state ADD COLUMN {col} {typ}")
@@ -295,9 +405,12 @@ def data_freshness_sensor(context):
                 conn.execute("""
                     UPDATE lake._pipeline_state
                     SET source_rows = ?, sync_status = ?, source_checked_at = current_timestamp,
-                        row_count = ?
+                        source_updated_at = ?, row_count = ?
                     WHERE dataset_name = ?
-                """, [row["source_rows"], row["sync_status"], lake_rows, dataset_key])
+                """, [
+                    row["source_rows"], row["sync_status"],
+                    row.get("source_updated_at"), lake_rows, dataset_key,
+                ])
                 updated += 1
             except Exception:
                 pass  # row may not exist yet (never ingested)
