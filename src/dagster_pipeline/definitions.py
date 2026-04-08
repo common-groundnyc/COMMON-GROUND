@@ -23,6 +23,7 @@ from dagster_pipeline.defs.spatial_views_asset import spatial_views
 from dagster_pipeline.defs.address_lookup_asset import address_lookup
 from dagster_pipeline.defs.name_tokens_asset import name_tokens
 from dagster_pipeline.defs.geo_zip_boundaries_asset import geo_zip_boundaries
+from dagster_pipeline.defs.graph_assets import graph_political
 from dagster_pipeline.resources.ducklake import DuckLakeResource
 
 all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, *election_assets, name_index, resolved_entities,
@@ -30,7 +31,7 @@ all_assets = [*all_socrata_direct_assets, *all_federal_direct_assets, *election_
               entity_master, address_lookup,
               mv_building_hub, mv_acris_deeds, mv_zip_stats, mv_crime_precinct, mv_corp_network,
               mv_entity_acris, mv_city_averages, mv_pctile_violations, mv_pctile_311,
-              name_tokens, spatial_views, geo_zip_boundaries]
+              name_tokens, spatial_views, geo_zip_boundaries, graph_political]
 
 # --- Jobs (manual trigger only — automation is sensor/schedule-driven) ---
 
@@ -61,6 +62,17 @@ foundation_job = dg.define_asset_job(
     selection=dg.AssetSelection.groups("foundation"),
 )
 
+graphs_daily_job = dg.define_asset_job(
+    name="graphs_daily",
+    selection=dg.AssetSelection.groups("graphs"),
+)
+
+graphs_schedule = dg.ScheduleDefinition(
+    job=graphs_daily_job,
+    cron_schedule="0 7 * * *",  # 7 AM daily — one hour after federal_daily
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+)
+
 
 # Full: everything (initial load or recovery)
 all_assets_job = dg.define_asset_job(
@@ -85,8 +97,8 @@ federal_schedule = dg.ScheduleDefinition(
 
 defs = dg.Definitions(
     assets=all_assets,
-    jobs=[federal_daily_job, entity_resolution_job, foundation_job, all_assets_job],
-    schedules=[federal_schedule],
+    jobs=[federal_daily_job, entity_resolution_job, foundation_job, all_assets_job, graphs_daily_job],
+    schedules=[federal_schedule, graphs_schedule],
     sensors=[flush_ducklake_sensor, data_freshness_sensor],
     resources={
         "ducklake": DuckLakeResource(
