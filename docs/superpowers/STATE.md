@@ -12,7 +12,42 @@ See: .planning/PROJECT.md (updated 2026-03-25)
 Phase: 11 of 21 (Entity Master)
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-04-08 — Source-code audit via opensrc resolved 3 deferred issues. Lance purged everywhere, dlt fully removed, graphify knowledge graph built
+Last activity: 2026-04-08 — Phase 1 of source-code audit shipped. Phantom property graphs fixed (4 of 4). Splink last_name m_probability fix in source (retrain pending). Cascading schema-drift bugs unmasked in network.py — 2 paths now work end-to-end, 3 paths fail with diagnosable errors instead of silent failures.
+
+## 2026-04-08 Phase 1 Audit — final state
+
+**Shipped:**
+- 4 phantom property graphs renamed to existing graphs (`nyc_building_network` → `nyc_ownership` ×3, `nyc_housing` → `nyc_ownership`, `nyc_influence_network` → `nyc_influence`, `nyc_transaction_network` → `nyc_transactions`)
+- New regression test `test_graph_refs.py` parses `tools/*.py` and asserts every referenced graph has a CREATE statement — prevents future phantoms
+- Splink training script: added 3rd EM pass with `block_on('first_name', 'zip')` so EM has variance to estimate `last_name` m_probabilities. New regression test `test_splink_model_integrity.py` enforces this.
+- 8+ schema-drift bugs in `tools/network.py` fixed (`b.total_units` → `b.units`, `v.severity` → `v.class`, `b.housenumber || ' ' || b.streetname` → `b.address` at 5 sites)
+- LCC table function unavailable in installed duckpgq build → cliques view rewritten to use degree-based heuristic on `graph_shared_owner` directly
+
+**Deployed:** all of the above are on Hetzner MCP server as of this commit.
+
+**Working in production end-to-end (verified by smoke test):**
+- ✅ `network(type="ownership", name=<bbl>)` — landlord network traversal returns full portfolio + violations
+- ✅ `network(type="political", name=<entity>)` — political network returns money_trail with FEC/NYS/NYC donations
+
+**Still failing in production (BUT now with diagnosable errors instead of silent empty results):**
+- ❌ `network(type="worst")` — fails on `e.bbl` (graph_eviction_petitioners has only `address`, not `bbl`). Pre-existing schema drift, not regression.
+- ❌ `network(type="cliques")` — fails on `b.zip` (graph_buildings CREATE statement at mcp_server.py:801 doesn't pull zip from hpd_jurisdiction). Pre-existing schema drift.
+- ❌ `network(type="property")` — fails on `tx_count` not existing on `graph_tx_entities` (the table only has `entity_name`, `party_type` — the aggregate columns the code expects were never built). Deeper design mismatch, needs schema enrichment OR query rewrite.
+
+These 3 remaining bugs were silently masked by the phantom graphs for an unknown duration. The Phase 1 audit fix made them loud (clear error messages) instead of silent (empty results). Net change: 2 paths improved from broken-silent to working; 3 paths improved from broken-silent to broken-loud. Zero regressions.
+
+**Pending manual deploy steps:**
+1. Splink retrain (5+ min wall clock):
+   ```
+   docker exec common-ground-duckdb-server-1 python /app/scripts/train_splink_model.py
+   ```
+   Then re-materialize `resolved_entities` Dagster asset to score 55M records with the corrected model.
+2. Re-run `test_splink_model_integrity.py::test_model_has_m_probability_on_every_match_level` after retrain — must pass.
+3. Compare cluster counts before/after to measure recall improvement from the last_name fix.
+
+**Phase 1 Task 1 (ThreadPoolExecutor wrapper) was retracted** — implementer subagent's TDD step proved it wasn't a serialization bug; it's a per-call timeout enforcer. Audit was wrong. See `memory/project_cg_audit_retraction.md`.
+
+**Phase 1 Task 4 (`ForenameSurnameComparison`)** deferred — improvement not bug; will land in Phase 3 plan.
 
 ## 2026-04-08 Notes (source-code audit via opensrc)
 
