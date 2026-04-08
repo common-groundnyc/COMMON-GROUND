@@ -1,7 +1,16 @@
 """network() super tool — absorbs 15 graph tools into one dispatch with
 filter semantics.  type="all" (the default) fans out across every edge
 type and returns everything found.  A specific type narrows to one
-relationship family."""
+relationship family.
+
+NOTE ON SQL SAFETY: DuckPGQ MATCH WHERE clauses cannot be parameterized with
+`?` placeholders — this is an architectural limitation, not a bug. WHERE
+clauses are parsed as ParsedExpression AST nodes at compile time (see
+cwida/duckpgq-extension/src/core/functions/table/match.cpp:780-827), with
+no runtime defer hook. All dynamic values in MATCH patterns MUST be either
+(a) regex-validated (BBLs via BBL_PATTERN), (b) sourced from trusted DB
+results, or (c) manually escaped via `.replace("'", "''")`. Regular SQL
+queries (outside GRAPH_TABLE MATCH) use `?` parameters normally."""
 
 import time
 from typing import Annotated, Literal

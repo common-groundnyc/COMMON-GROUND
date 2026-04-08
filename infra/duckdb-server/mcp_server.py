@@ -728,8 +728,19 @@ async def app_lifespan(server):
         print(f"  Description embeddings: {total_new} new rows", flush=True)
 
     def _create_hnsw_indexes(emb_conn):
-        """Create HNSW indexes — disabled until hnsw_acorn segfault is resolved.
-        Brute-force array_cosine_distance works fine for current data volumes."""
+        """Create HNSW indexes — PERMANENTLY DISABLED. Do not re-enable.
+
+        Root cause audit 2026-04-08 (via opensrc on duckdb/duckdb + cwida/duckpgq-extension):
+        DuckDB connections are not thread-safe (see mcp_server.py:1736 — "MUST NOT share
+        the main conn — concurrent access causes pure virtual crash"). HNSW index build
+        needs a write lock that collides with concurrent read queries on the same
+        emb_conn, triggering a C++ pure virtual method call → segfault.
+
+        Brute-force array_cosine_distance (shared/vector_search.py) is O(n) but faster
+        than HNSW would be at current scale (<5K rows per table, sub-10ms queries).
+        HNSW only helps above ~50K vectors. Revisit then — and if so, switch from
+        hnsw_acorn (community fork) to official vss extension and isolate index build
+        to a dedicated connection (not emb_conn)."""
         for table in ["entity_names", "description_embeddings", "catalog_embeddings"]:
             try:
                 count = emb_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
