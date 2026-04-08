@@ -2295,20 +2295,39 @@ async def catalog_json(request: Request) -> JSONResponse:
         )
 
     pool = _shared_pool
-    if pool is None or not _shared_catalog:
+    if pool is None:
         return JSONResponse({"error": "Server starting up"}, status_code=503)
 
     try:
-        # Build table list from _shared_catalog (pure dict, no SQL view evaluation)
+        # Build table list from a FRESH catalog query each request so row counts
+        # reflect re-ingests. The _shared_catalog cache is only for tools/SQL
+        # rewriting — it should NOT drive the public data-health page.
         _skip = {'staging', 'test', 'ducklake', 'information_schema', 'pg_catalog', 'lake', 'foundation'}
         rows = []
-        for schema in sorted(_shared_catalog):
-            if schema in _skip or 'staging' in schema or schema.startswith('test'):
-                continue
-            for table, info in sorted(_shared_catalog[schema].items(), key=lambda x: -(x[1].get("row_count", 0))):
+        try:
+            _, fresh_rows = execute(pool, """
+                SELECT schema_name, table_name, estimated_size, column_count
+                FROM duckdb_tables()
+                WHERE database_name = 'lake'
+                  AND schema_name NOT IN ('information_schema', 'pg_catalog')
+                ORDER BY estimated_size DESC
+            """)
+            for schema, table, est, col_count in fresh_rows:
+                if schema in _skip or 'staging' in schema or schema.startswith('test'):
+                    continue
                 if table.startswith('_dlt_') or table.startswith('_pipeline') or table.endswith('__null') or table.endswith('__footnotes'):
                     continue
-                rows.append((schema, table, info.get("row_count", 0), info.get("column_count", 0)))
+                rows.append((schema, table, est or 0, col_count or 0))
+        except Exception as e:
+            # Fallback to cached catalog if fresh query fails
+            print(f"catalog_json: fresh query failed, falling back to cache: {e}", flush=True)
+            for schema in sorted(_shared_catalog):
+                if schema in _skip or 'staging' in schema or schema.startswith('test'):
+                    continue
+                for table, info in sorted(_shared_catalog[schema].items(), key=lambda x: -(x[1].get("row_count", 0))):
+                    if table.startswith('_dlt_') or table.startswith('_pipeline') or table.endswith('__null') or table.endswith('__footnotes'):
+                        continue
+                    rows.append((schema, table, info.get("row_count", 0), info.get("column_count", 0)))
 
         ducklake_info = {}
         try:
