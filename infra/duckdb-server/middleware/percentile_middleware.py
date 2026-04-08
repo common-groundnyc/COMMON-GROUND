@@ -11,6 +11,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools.tool import ToolResult
 
 from percentiles import lookup_percentiles, get_population_count, format_percentile_block
+from middleware.budget import extract_budget, truncate_to_budget
 
 DISCLAIMER = (
     "\nNote: Percentiles rank this entity among ALL NYC peers. "
@@ -81,24 +82,24 @@ class PercentileMiddleware(Middleware):
 
         tool_name = context.message.name
         if tool_name in _SKIP_TOOLS:
-            return result
+            return self._apply_budget(context, result)
 
         try:
             lifespan = context.fastmcp_context.lifespan_context
             if not lifespan.get("percentiles_ready"):
-                return result
+                return self._apply_budget(context, result)
 
             pool = lifespan.get("pool")
             if not pool:
-                return result
+                return self._apply_budget(context, result)
 
             entity_type, key = detect_entity(result.structured_content, tool_name)
             if entity_type is None:
-                return result
+                return self._apply_budget(context, result)
 
             percentiles = lookup_percentiles(pool, entity_type, key)
             if not percentiles:
-                return result
+                return self._apply_budget(context, result)
 
             population = get_population_count(pool, entity_type)
             pctile_text = format_percentile_block(percentiles, entity_type, population)
@@ -117,11 +118,19 @@ class PercentileMiddleware(Middleware):
             new_sc["percentiles"] = percentiles
             new_sc["percentile_population"] = population
 
-            return ToolResult(
+            result = ToolResult(
                 content=new_text,
                 structured_content=new_sc,
                 meta=result.meta,
             )
+            return self._apply_budget(context, result)
 
         except Exception:
-            return result
+            return self._apply_budget(context, result)
+
+    def _apply_budget(self, context, result):
+        args = getattr(context.message, "arguments", None) or {}
+        budget = extract_budget(args)
+        if budget is not None:
+            return truncate_to_budget(result, budget)
+        return result
