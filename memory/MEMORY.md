@@ -14,3 +14,4 @@ Each entry is a pointer to a file with the full detail. Keep this index under 20
 ## Tooling
 - [Tool parameter Literals](tool_parameter_literals.md) — April 2026 audit: codebase already at gold standard, one parameter fixed
 - [Eval harness](eval_harness.md) — how to run the MCP tool-use eval harness before deploys and after PostHog regressions
+- [Political network sources](network_political_sources.md) — every table `network(type="political")` reads from
