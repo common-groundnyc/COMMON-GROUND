@@ -164,7 +164,20 @@ def _sql(pool: CursorPool, sql: str, fmt: str, ctx: Context) -> ToolResult | str
     """Execute a read-only SQL query, optionally exporting to xlsx/csv."""
     validate_sql(sql)
     t0 = time.time()
-    cols, rows = execute(pool, sql.strip().rstrip(";"))
+    try:
+        cols, rows = execute(pool, sql.strip().rstrip(";"))
+    except Exception as exc:
+        msg = str(exc)
+        # Binder errors include a candidate list from DuckDB itself — surface
+        # actionable guidance pointing the model at describe_table.
+        if "not found in FROM clause" in msg or "Binder Error" in msg:
+            hint = (
+                "\n\nHINT: Call describe_table(schema, table) to see the real "
+                "column names before writing SQL. Column names in the lake are "
+                "often abbreviated (e.g. 'lic_expir_dd' not 'license_expiry_date')."
+            )
+            raise ToolError(f"SQL error: {msg}{hint}") from exc
+        raise ToolError(f"SQL error: {msg}") from exc
     elapsed = round((time.time() - t0) * 1000)
 
     if fmt == "text":

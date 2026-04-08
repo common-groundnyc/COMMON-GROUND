@@ -35,7 +35,11 @@ def validate_sql(sql: str) -> None:
 
     if _UNSAFE_SQL.match(stripped):
         raise ToolError(
-            "Only SELECT, WITH, EXPLAIN, DESCRIBE, SHOW, and PRAGMA queries are allowed."
+            "This tool is read-only and only accepts SELECT, WITH, EXPLAIN, DESCRIBE, "
+            "SHOW, and PRAGMA statements. For DDL (CREATE VIEW, etc.), use "
+            "query(mode='admin', input='CREATE OR REPLACE VIEW ...'). "
+            "To explore schema structure, use list_schemas(), list_tables(schema), "
+            "or describe_table(schema, table) instead."
         )
 
     if _UNSAFE_FUNCTIONS.search(stripped):
