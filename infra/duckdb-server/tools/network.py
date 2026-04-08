@@ -662,7 +662,7 @@ def _landlord_network_core(bbl: str, pool: object) -> tuple[str, dict]:
                 owner.owner_id,
                 owner.owner_name,
                 b2.bbl,
-                b2.housenumber || ' ' || b2.streetname AS address,
+                b2.address,
                 b2.zip,
                 b2.units AS total_units,
                 b2.stories
@@ -682,8 +682,8 @@ def _landlord_network_core(bbl: str, pool: object) -> tuple[str, dict]:
     v_cols, v_rows = execute(pool, f"""
         SELECT
             bbl, COUNT(*) AS total_violations,
-            COUNT(*) FILTER (WHERE severity = 'C') AS class_c,
-            COUNT(*) FILTER (WHERE severity = 'B') AS class_b,
+            COUNT(*) FILTER (WHERE class = 'C') AS class_c,
+            COUNT(*) FILTER (WHERE class = 'B') AS class_b,
             COUNT(*) FILTER (WHERE status = 'Open') AS open_violations
         FROM main.graph_violations
         WHERE bbl IN ({placeholders})
@@ -1642,7 +1642,7 @@ def _contractor(name: str, depth: int, borough: str, top_n: int, ctx: Context) -
 
     bldg_cols, bldg_rows = execute(pool, """
         SELECT pe.bbl, pe.permit_count, pe.job_type, pe.first_date, pe.last_date, pe.owner_name,
-               b.housenumber || ' ' || b.streetname AS address, b.zip, b.units AS total_units
+               b.address, b.zip, b.units AS total_units
         FROM main.graph_permit_edges pe
         LEFT JOIN main.graph_buildings b ON pe.bbl = b.bbl
         WHERE pe.license = ?
@@ -1955,7 +1955,7 @@ def _clusters(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> 
             HAVING COUNT(*) >= {min_buildings}
         )
         SELECT c.componentid, c.cluster_size, c.boroughs,
-               b.bbl, b.housenumber || ' ' || b.streetname AS address, b.zip,
+               b.bbl, b.address, b.zip,
                b.boroid, b.units AS total_units,
                ow.owner_name
         FROM clusters c
@@ -2042,7 +2042,7 @@ def _cliques(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> T
             GROUP BY bbl
         )
         SELECT NULL::DOUBLE AS lcc, d.bbl,
-               b.housenumber || ' ' || b.streetname AS address, b.zip,
+               b.address, b.zip,
                b.boroid, b.units AS total_units,
                ow.owner_name,
                d.neighbor_count
@@ -2107,7 +2107,7 @@ def _worst(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> Too
             SELECT o.owner_id,
                    COUNT(*) AS total_violations,
                    COUNT(*) FILTER (WHERE v.status = 'Open') AS open_violations,
-                   COUNT(*) FILTER (WHERE v.severity = 'C') AS class_c
+                   COUNT(*) FILTER (WHERE v.class = 'C') AS class_c
             FROM main.graph_owns o
             JOIN main.graph_violations v ON o.bbl = v.bbl
             WHERE o.owner_id IN (SELECT owner_id FROM portfolio)
@@ -2225,7 +2225,7 @@ def _ownership_graph_bfs(bbl: str, depth: int, ctx: Context) -> tuple[str, dict]
             COLUMNS (
                 start.bbl AS from_bbl,
                 target.bbl AS to_bbl,
-                target.housenumber || ' ' || target.streetname AS address,
+                target.address,
                 target.zip,
                 target.units AS total_units,
                 path_length(p) AS hops
