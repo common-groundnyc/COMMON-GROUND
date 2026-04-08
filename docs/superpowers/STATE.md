@@ -25,16 +25,28 @@ Last activity: 2026-04-08 — Phase 1 of source-code audit shipped. Phantom prop
 
 **Deployed:** all of the above are on Hetzner MCP server as of this commit.
 
-**Working in production end-to-end (verified by smoke test):**
+**Working in production end-to-end (verified by full 5/5 smoke test):**
 - ✅ `network(type="ownership", name=<bbl>)` — landlord network traversal returns full portfolio + violations
 - ✅ `network(type="political", name=<entity>)` — political network returns money_trail with FEC/NYS/NYC donations
+- ✅ `network(type="worst")` — slumlord rankings with violations, evictions, complaints. Top result: 145 buildings, 332k units, 1256 violations, 957 evictions
+- ✅ `network(type="cliques")` — most-connected buildings by shared-owner edge count. Top BBL has 144 neighbors
+- ✅ `network(type="property")` — ACRIS transaction network. BLACKSTONE LLC: 19 tx / $72M / 18 sells + 1 buy
 
-**Still failing in production (BUT now with diagnosable errors instead of silent empty results):**
-- ❌ `network(type="worst")` — fails on `e.bbl` (graph_eviction_petitioners has only `address`, not `bbl`). Pre-existing schema drift, not regression.
-- ❌ `network(type="cliques")` — fails on `b.zip` (graph_buildings CREATE statement at mcp_server.py:801 doesn't pull zip from hpd_jurisdiction). Pre-existing schema drift.
-- ❌ `network(type="property")` — fails on `tx_count` not existing on `graph_tx_entities` (the table only has `entity_name`, `party_type` — the aggregate columns the code expects were never built). Deeper design mismatch, needs schema enrichment OR query rewrite.
+All 5 of 5 network() views now return real data. Up from 0/5 silently broken before the audit (2 of those failing because of column-name typos that the phantom graphs short-circuited; 3 because of schema drift between query and graph builders).
 
-These 3 remaining bugs were silently masked by the phantom graphs for an unknown duration. The Phase 1 audit fix made them loud (clear error messages) instead of silent (empty results). Net change: 2 paths improved from broken-silent to working; 3 paths improved from broken-silent to broken-loud. Zero regressions.
+**Schema enrichments deployed:**
+- `graph_buildings` — added `zip` column from hpd_jurisdiction
+- `graph_eviction_petitioners` — added `bbl` column with 3-tier fallback (borough+block+lot, direct bbl, NULL graceful)
+- `graph_tx_entities` — completely rebuilt as aggregation over graph_tx_edges, exposing tx_count, property_count, as_seller, as_buyer, total_amount (was just entity_name + party_type before)
+- Build order swapped: graph_tx_edges builds first (40M rows), then graph_tx_entities aggregates from it
+- `nyc_ownership` and `nyc_transactions` property graph PROPERTIES lists updated to expose new columns
+
+**Cache rebuilt manually** via `/tmp/recover_graph_cache.py` after detecting that the in-container graph builder runs on a connection that can't access the lake catalog (separate latent bug, masked for years). Recovery script attaches lake directly and writes parquets to `/data/common-ground/graph-cache/`. graph_tx_shared written as empty placeholder (full self-join over 40M edges takes too long; downstream code degrades gracefully).
+
+**Latent issues found and worked around (out of scope for Phase 1):**
+- In-container graph builder uses a connection that lacks the lake catalog attach. Recovery via direct attach worked for now, but the build path needs fixing so future cold starts work without manual intervention.
+- `graph_building_flags` lacks the rich signals (litigation_count, harassment_findings, lien_count, dob_violation_count) the worst-landlords scoring expects. Currently zeroed; restoring needs aggregations from `lake.housing.hpd_litigations` etc.
+- graph_tx_shared empty placeholder means "connected entities via shared transactions" returns empty. Real data needs the full 40M-edge self-join run as a background job.
 
 **Pending manual deploy steps:**
 1. Splink retrain (5+ min wall clock):
