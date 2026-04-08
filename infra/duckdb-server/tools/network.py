@@ -209,6 +209,32 @@ ORDER BY TRY_CAST(contract_amount AS DOUBLE) DESC NULLS LAST
 LIMIT 10
 """
 
+MONEY_USASPENDING_SQL = """
+SELECT recipient_name,
+       awarding_agency,
+       'contract' AS award_kind,
+       SUM(TRY_CAST(award_amount AS DOUBLE)) AS total_amount,
+       COUNT(*) AS awards,
+       MIN(start_date) AS first_date,
+       MAX(end_date)   AS last_date
+FROM lake.federal.usaspending_contracts
+WHERE recipient_name ILIKE '%' || ? || '%'
+GROUP BY recipient_name, awarding_agency
+UNION ALL
+SELECT recipient_name,
+       awarding_agency,
+       'grant' AS award_kind,
+       SUM(TRY_CAST(award_amount AS DOUBLE)) AS total_amount,
+       COUNT(*) AS awards,
+       MIN(start_date) AS first_date,
+       MAX(end_date)   AS last_date
+FROM lake.federal.usaspending_grants
+WHERE recipient_name ILIKE '%' || ? || '%'
+GROUP BY recipient_name, awarding_agency
+ORDER BY total_amount DESC NULLS LAST
+LIMIT 15
+"""
+
 
 # ===================================================================
 # Public entry point

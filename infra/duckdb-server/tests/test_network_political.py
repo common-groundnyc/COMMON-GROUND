@@ -99,3 +99,27 @@ def test_fixture_has_all_required_tables(lake_conn):
     assert "city_government.campaign_contributions" in names
     assert "city_government.contract_awards" in names
     assert "financial.nys_procurement_state" in names
+
+
+def test_usaspending_sql_aggregates_contracts_and_grants(lake_conn):
+    """USAspending SQL must UNION contracts+grants and group by recipient + agency."""
+    from tools.network import MONEY_USASPENDING_SQL
+
+    lake_conn.execute("""
+        INSERT INTO lake.federal.usaspending_contracts VALUES
+        ('A1','ACME CORP',100000.0,90000.0,'2023-01-01','2024-01-01','DOD','Navy','A','r1'),
+        ('A2','ACME CORP',50000.0,50000.0,'2024-01-01','2025-01-01','DOD','Navy','A','r1'),
+        ('A3','OTHER LLC',9999.0,9999.0,'2024-01-01','2025-01-01','HHS','CDC','B','r2')
+    """)
+    lake_conn.execute("""
+        INSERT INTO lake.federal.usaspending_grants VALUES
+        ('G1','ACME CORP',25000.0,25000.0,'2023-06-01','2024-06-01','NSF','Bio','02','r1')
+    """)
+
+    rows = lake_conn.execute(MONEY_USASPENDING_SQL, ["ACME", "ACME"]).fetchall()
+    acme_rows = [r for r in rows if r[0] == "ACME CORP"]
+    assert len(acme_rows) == 2
+    total = sum(r[3] for r in acme_rows)
+    awards = sum(r[4] for r in acme_rows)
+    assert total == 175000.0
+    assert awards == 3
