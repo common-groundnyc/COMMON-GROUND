@@ -1,0 +1,636 @@
+{
+  "name": "baseline_2026-04-08",
+  "description": "First full baseline: 25 cases \u00d7 1 trial against live production MCP, Sonnet 4.6. Two cases (workflow_health_equity_*) re-ran after initial 502 tunnel spikes. Regraded with post-fix verifier and case definitions.",
+  "timestamp": "2026-04-08T22:07:00Z",
+  "mode": "remote",
+  "model": "claude-sonnet-4-6",
+  "mcp_url": "https://mcp.common-ground.nyc/mcp",
+  "n_cases": 25,
+  "n_trials": 1,
+  "metrics": {
+    "pass_at_1": 1.0,
+    "error_rate": 0.04,
+    "per_tool": {
+      "__no_tool_call_expected__": 1.0,
+      "address_report": 1.0,
+      "entity": 1.0,
+      "neighborhood": 1.0,
+      "network": 1.0,
+      "building": 1.0,
+      "legal": 1.0,
+      "list_schemas": 1.0,
+      "safety": 1.0,
+      "semantic_search": 1.0,
+      "suggest": 1.0,
+      "transit": 1.0,
+      "health": 1.0,
+      "services": 1.0,
+      "civic": 1.0,
+      "school": 1.0,
+      "catalog_search": 1.0
+    }
+  },
+  "notes": [
+    "100% tool-selection accuracy with the eval-mode system prompt ('call once, summarize, stop').",
+    "Without the system prompt, Claude called 20+ tools per case doing deep investigation.",
+    "Two 502 Bad Gateway errors hit during the first run on workflow_health_equity_*; both passed cleanly on retry after the tunnel recovered.",
+    "One case (workflow_landlord_step3_network_ownership) still hits MAX_TURNS=4 but calls the expected tool correctly."
+  ],
+  "grades": [
+    {
+      "case_id": "antihall_ddl_via_query_sql",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "antihall_national_scope",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "antihall_no_such_tool",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "routing_address_vs_report",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "routing_cop_by_name",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "routing_judge_by_name",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "routing_restaurants_in_neighborhood",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "routing_worst_landlords",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "sanity_building_bbl",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "sanity_entity_person",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "sanity_legal_settlements",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "sanity_list_schemas_lake_question",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "sanity_neighborhood_zip",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "sanity_safety_precinct",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "sanity_semantic_search_concept",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "sanity_suggest_unsure",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "sanity_transit_parking",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "workflow_health_equity_health",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "workflow_health_equity_services",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "workflow_landlord_step1_building",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "workflow_landlord_step3_network_ownership",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": "max_turns_exceeded (4)"
+    },
+    {
+      "case_id": "workflow_money_step2_network_political",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "workflow_money_step3_civic_contracts",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "workflow_school_compare_dbns",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    },
+    {
+      "case_id": "workflow_unknown_table_catalog_search",
+      "passed": true,
+      "tool_selected": true,
+      "required_params_ok": true,
+      "error": null
+    }
+  ],
+  "runs": [
+    {
+      "case_id": "antihall_ddl_via_query_sql",
+      "turns": 1,
+      "tool_calls": [],
+      "error": null
+    },
+    {
+      "case_id": "antihall_national_scope",
+      "turns": 1,
+      "tool_calls": [],
+      "error": null
+    },
+    {
+      "case_id": "antihall_no_such_tool",
+      "turns": 1,
+      "tool_calls": [],
+      "error": null
+    },
+    {
+      "case_id": "routing_address_vs_report",
+      "turns": 3,
+      "tool_calls": [
+        {
+          "name": "address_report",
+          "input": {
+            "address": "305 Linden Blvd, Brooklyn"
+          }
+        },
+        {
+          "name": "building",
+          "input": {
+            "identifier": "305 Linden Blvd, Brooklyn",
+            "view": "full"
+          }
+        },
+        {
+          "name": "neighborhood",
+          "input": {
+            "location": "11203",
+            "view": "full"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "routing_cop_by_name",
+      "turns": 3,
+      "tool_calls": [
+        {
+          "name": "entity",
+          "input": {
+            "name": "Daniel Pantaleo",
+            "role": "cop"
+          }
+        },
+        {
+          "name": "entity",
+          "input": {
+            "name": "Daniel Pantaleo",
+            "role": "auto"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "routing_judge_by_name",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "entity",
+          "input": {
+            "name": "Lewis Kaplan",
+            "role": "judge"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "routing_restaurants_in_neighborhood",
+      "turns": 3,
+      "tool_calls": [
+        {
+          "name": "neighborhood",
+          "input": {
+            "location": "11201",
+            "view": "restaurants"
+          }
+        },
+        {
+          "name": "health",
+          "input": {
+            "location": "11201",
+            "view": "inspections"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "routing_worst_landlords",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "network",
+          "input": {
+            "name": "worst landlords NYC",
+            "type": "worst",
+            "top_n": 25
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "sanity_building_bbl",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "building",
+          "input": {
+            "identifier": "1000670001",
+            "view": "full"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "sanity_entity_person",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "entity",
+          "input": {
+            "name": "Jane Smith",
+            "role": "background"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "sanity_legal_settlements",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "legal",
+          "input": {
+            "query": "NYPD",
+            "view": "settlements"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "sanity_list_schemas_lake_question",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "list_schemas",
+          "input": {}
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "sanity_neighborhood_zip",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "neighborhood",
+          "input": {
+            "location": "10003",
+            "view": "full"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "sanity_safety_precinct",
+      "turns": 3,
+      "tool_calls": [
+        {
+          "name": "safety",
+          "input": {
+            "location": "75",
+            "view": "crashes"
+          }
+        },
+        {
+          "name": "safety",
+          "input": {
+            "location": "11207",
+            "view": "crashes"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "sanity_semantic_search_concept",
+      "turns": 4,
+      "tool_calls": [
+        {
+          "name": "semantic_search",
+          "input": {
+            "query": "rat infestation",
+            "domain": "complaints"
+          }
+        },
+        {
+          "name": "semantic_search",
+          "input": {
+            "query": "rats rodents pest infestation complaints",
+            "domain": "complaints"
+          }
+        },
+        {
+          "name": "query",
+          "input": {
+            "input": "SELECT complaint_type, descriptor, borough, created_date, incident_address, status\nFROM lake.social_services.n311_service_requests\nWHERE complaint_type ILIKE '%rat%' OR descriptor ILIKE '%rat%' OR complaint_type ILIKE '%rodent%' OR descriptor ILIKE '%rodent%'\nORDER BY created_date DESC\nLIMIT 50",
+            "mode": "sql"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "sanity_suggest_unsure",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "suggest",
+          "input": {}
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "sanity_transit_parking",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "transit",
+          "input": {
+            "location": "11201",
+            "view": "parking"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "workflow_health_equity_health",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "health",
+          "input": {
+            "location": "10456",
+            "view": "full"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "workflow_health_equity_services",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "services",
+          "input": {
+            "location": "10456",
+            "view": "full"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "workflow_landlord_step1_building",
+      "turns": 3,
+      "tool_calls": [
+        {
+          "name": "address_report",
+          "input": {
+            "address": "305 Linden Blvd, Brooklyn"
+          }
+        },
+        {
+          "name": "building",
+          "input": {
+            "identifier": "305 Linden Blvd, Brooklyn",
+            "view": "full"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "workflow_landlord_step3_network_ownership",
+      "turns": 4,
+      "tool_calls": [
+        {
+          "name": "network",
+          "input": {
+            "name": "Steven Croman",
+            "type": "ownership",
+            "depth": 3
+          }
+        },
+        {
+          "name": "network",
+          "input": {
+            "name": "Steven Croman",
+            "type": "all",
+            "depth": 3
+          }
+        },
+        {
+          "name": "entity",
+          "input": {
+            "name": "Steven Croman",
+            "role": "background"
+          }
+        },
+        {
+          "name": "network",
+          "input": {
+            "name": "CROMAN",
+            "type": "corporate",
+            "depth": 3
+          }
+        },
+        {
+          "name": "query",
+          "input": {
+            "input": "SELECT * FROM lake.housing.hpd_registrations WHERE lower(contact_last_name) LIKE '%croman%' OR lower(corp_name) LIKE '%croman%' LIMIT 50",
+            "mode": "sql"
+          }
+        }
+      ],
+      "error": "max_turns_exceeded (4)"
+    },
+    {
+      "case_id": "workflow_money_step2_network_political",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "network",
+          "input": {
+            "name": "Steven Croman",
+            "type": "political",
+            "depth": 3
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "workflow_money_step3_civic_contracts",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "civic",
+          "input": {
+            "query": "Blackstone Group",
+            "view": "contracts"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "workflow_school_compare_dbns",
+      "turns": 2,
+      "tool_calls": [
+        {
+          "name": "school",
+          "input": {
+            "query": "02M475,02M001"
+          }
+        }
+      ],
+      "error": null
+    },
+    {
+      "case_id": "workflow_unknown_table_catalog_search",
+      "turns": 4,
+      "tool_calls": [
+        {
+          "name": "catalog_search",
+          "input": {
+            "keyword": "eviction"
+          }
+        },
+        {
+          "name": "query",
+          "input": {
+            "input": "eviction",
+            "mode": "catalog"
+          }
+        },
+        {
+          "name": "query_sql",
+          "input": {
+            "sql": "SELECT table_schema, table_name FROM information_schema.tables WHERE LOWER(table_name) LIKE '%evict%' ORDER BY table_schema, table_name"
+          }
+        }
+      ],
+      "error": null
+    }
+  ]
+}
