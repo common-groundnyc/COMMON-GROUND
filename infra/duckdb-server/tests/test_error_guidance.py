@@ -16,7 +16,7 @@ def test_ddl_error_points_at_admin_mode():
     msg = str(exc.value)
     assert "SELECT" in msg
     assert "admin" in msg.lower() or "read-only" in msg.lower()
-    assert "describe_table" in msg or "query_sql" in msg
+    assert "describe_table" in msg
 
 
 def test_ddl_error_explains_what_to_do_instead():

@@ -170,7 +170,7 @@ def _sql(pool: CursorPool, sql: str, fmt: str, ctx: Context) -> ToolResult | str
         msg = str(exc)
         # Binder errors include a candidate list from DuckDB itself — surface
         # actionable guidance pointing the model at describe_table.
-        if "not found in FROM clause" in msg or "Binder Error" in msg:
+        if "not found in FROM clause" in msg or "Referenced column" in msg:
             hint = (
                 "\n\nHINT: Call describe_table(schema, table) to see the real "
                 "column names before writing SQL. Column names in the lake are "
