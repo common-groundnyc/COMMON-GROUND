@@ -1528,7 +1528,9 @@ def _property_core(name: str, ctx: Context) -> tuple[str, dict]:
     primary_name = primary[0]
 
     prop_cols, prop_rows = execute(pool, """
-        SELECT bbl, role, amount, doc_date, document_id
+        SELECT bbl,
+               CASE party_type WHEN '1' THEN 'seller' WHEN '2' THEN 'buyer' ELSE party_type END AS role,
+               amount, doc_date, document_id
         FROM main.graph_tx_edges
         WHERE entity_name = ?
         ORDER BY doc_date DESC
@@ -1552,18 +1554,25 @@ def _property_core(name: str, ctx: Context) -> tuple[str, dict]:
             LIMIT 50
         """)
     except Exception:
+        # Fallback: graph_tx_shared has columns (src, dst, document_id), so
+        # shared_docs is computed as COUNT(document_id) GROUPED BY counterparty.
         graph_cols, graph_rows = execute(pool, """
-            SELECT entity2 AS connected_entity, e.shared_docs AS tx_count,
+            WITH counterparts AS (
+                SELECT dst AS connected_entity, COUNT(DISTINCT document_id) AS shared_docs
+                FROM main.graph_tx_shared
+                WHERE src = ?
+                GROUP BY dst
+                UNION ALL
+                SELECT src AS connected_entity, COUNT(DISTINCT document_id) AS shared_docs
+                FROM main.graph_tx_shared
+                WHERE dst = ?
+                GROUP BY src
+            )
+            SELECT c.connected_entity, c.shared_docs AS tx_count,
                    t.property_count, t.as_seller, t.as_buyer, t.total_amount, NULL
-            FROM main.graph_tx_shared e
-            JOIN main.graph_tx_entities t ON e.entity2 = t.entity_name
-            WHERE e.entity1 = ?
-            UNION ALL
-            SELECT entity1, e.shared_docs, t.property_count, t.as_seller, t.as_buyer, t.total_amount, NULL
-            FROM main.graph_tx_shared e
-            JOIN main.graph_tx_entities t ON e.entity1 = t.entity_name
-            WHERE e.entity2 = ?
-            ORDER BY 2 DESC
+            FROM counterparts c
+            JOIN main.graph_tx_entities t ON c.connected_entity = t.entity_name
+            ORDER BY c.shared_docs DESC
             LIMIT 50
         """, [primary_name, primary_name])
 

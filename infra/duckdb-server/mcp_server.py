@@ -180,7 +180,7 @@ def _define_property_graphs(conn) -> None:
             CREATE OR REPLACE PROPERTY GRAPH nyc_ownership
             VERTEX TABLES (
                 main.graph_owners PROPERTIES (owner_name, registrationid) LABEL Owner,
-                main.graph_buildings PROPERTIES (bbl, borough, address, stories, units, year_built) LABEL Building,
+                main.graph_buildings PROPERTIES (bbl, borough, address, zip, stories, units, year_built) LABEL Building,
                 main.graph_violations PROPERTIES (violation_id, bbl, class, status, description, issued_date) LABEL Violation
             )
             EDGE TABLES (
@@ -201,7 +201,7 @@ def _define_property_graphs(conn) -> None:
         ("nyc_transactions", """
             CREATE OR REPLACE PROPERTY GRAPH nyc_transactions
             VERTEX TABLES (
-                main.graph_tx_entities PROPERTIES (entity_name, party_type) LABEL TxEntity
+                main.graph_tx_entities PROPERTIES (entity_name, party_type, tx_count, property_count, as_seller, as_buyer, total_amount) LABEL TxEntity
             )
             EDGE TABLES (
                 main.graph_tx_shared
@@ -800,6 +800,7 @@ async def app_lifespan(server):
                     boroid || LPAD(block::VARCHAR, 5, '0') || LPAD(lot::VARCHAR, 4, '0') AS bbl,
                     boroid AS borough,
                     COALESCE(housenumber, '') || ' ' || COALESCE(streetname, '') AS address,
+                    COALESCE(zip, '') AS zip,
                     1 AS num_buildings,
                     COALESCE(TRY_CAST(lifecycle AS VARCHAR), '') AS lifecycle,
                     0 AS stories, 0 AS units, 0 AS year_built
@@ -994,20 +995,54 @@ async def app_lifespan(server):
                 conn.execute("CREATE OR REPLACE TABLE main.graph_dob_owners (bbl VARCHAR, owner_name VARCHAR, business_name VARCHAR)")
                 print(f"Warning: DOB owners: {e}", flush=True)
 
-            # Eviction petitioners
+            # Eviction petitioners — try multiple BBL column patterns since
+            # lake.housing.evictions schema may use different conventions across
+            # source datasets. Falls back to address-only with NULL bbl if no
+            # bbl column found (tools that join on bbl will degrade gracefully).
             try:
+                # Try the canonical NYC pattern: bbl computed from boro/block/lot
                 conn.execute("""
                     CREATE OR REPLACE TABLE main.graph_eviction_petitioners AS
                     SELECT DISTINCT
+                        (borough || LPAD(borough_block::VARCHAR, 5, '0') || LPAD(borough_lot::VARCHAR, 4, '0')) AS bbl,
                         eviction_address AS address,
                         court_index_number,
                         executed_date
                     FROM lake.housing.evictions
                     WHERE eviction_address IS NOT NULL
+                      AND borough IS NOT NULL AND borough_block IS NOT NULL AND borough_lot IS NOT NULL
                 """)
-            except Exception as e:
-                conn.execute("CREATE OR REPLACE TABLE main.graph_eviction_petitioners (address VARCHAR, court_index_number VARCHAR, executed_date VARCHAR)")
-                print(f"Warning: eviction petitioners: {e}", flush=True)
+            except Exception:
+                try:
+                    # Fallback 1: direct bbl column if it exists
+                    conn.execute("""
+                        CREATE OR REPLACE TABLE main.graph_eviction_petitioners AS
+                        SELECT DISTINCT
+                            CAST(bbl AS VARCHAR) AS bbl,
+                            eviction_address AS address,
+                            court_index_number,
+                            executed_date
+                        FROM lake.housing.evictions
+                        WHERE eviction_address IS NOT NULL
+                    """)
+                except Exception:
+                    try:
+                        # Fallback 2: graceful degradation — NULL bbl, address only.
+                        # Worst-landlords join on bbl will produce 0 eviction
+                        # matches but the query compiles and runs.
+                        conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_eviction_petitioners AS
+                            SELECT DISTINCT
+                                NULL::VARCHAR AS bbl,
+                                eviction_address AS address,
+                                court_index_number,
+                                executed_date
+                            FROM lake.housing.evictions
+                            WHERE eviction_address IS NOT NULL
+                        """)
+                    except Exception as e:
+                        conn.execute("CREATE OR REPLACE TABLE main.graph_eviction_petitioners (bbl VARCHAR, address VARCHAR, court_index_number VARCHAR, executed_date VARCHAR)")
+                        print(f"Warning: eviction petitioners: {e}", flush=True)
 
             # Doing business
             try:
@@ -1074,14 +1109,12 @@ async def app_lifespan(server):
             def _build_extended_graph():
                 try:
                     # --- Transaction network ---
+                    # Build order: edges first (the source of truth from acris),
+                    # then entities AS an aggregation over edges (so the entity
+                    # table has tx_count / property_count / as_seller / as_buyer
+                    # / total_amount columns that the property network query
+                    # depends on), then shared as a self-join on edges.
                     try:
-                        conn.execute("""
-                            CREATE OR REPLACE TABLE main.graph_tx_entities AS
-                            SELECT DISTINCT name AS entity_name, party_type
-                            FROM lake.housing.acris_parties
-                            WHERE name IS NOT NULL AND LENGTH(name) > 1
-                            AND party_type IN ('1', '2')
-                        """)
                         conn.execute("""
                             CREATE OR REPLACE TABLE main.graph_tx_edges AS
                             SELECT
@@ -1096,6 +1129,19 @@ async def app_lifespan(server):
                             AND m.doc_type IN ('DEED', 'DEEDO', 'DEED, RP', 'MTGE', 'AGMT', 'ASST')
                         """)
                         conn.execute("""
+                            CREATE OR REPLACE TABLE main.graph_tx_entities AS
+                            SELECT
+                                entity_name,
+                                MIN(party_type) AS party_type,
+                                COUNT(DISTINCT document_id) AS tx_count,
+                                COUNT(DISTINCT bbl) AS property_count,
+                                COUNT(*) FILTER (WHERE party_type = '1') AS as_seller,
+                                COUNT(*) FILTER (WHERE party_type = '2') AS as_buyer,
+                                SUM(amount) AS total_amount
+                            FROM main.graph_tx_edges
+                            GROUP BY entity_name
+                        """)
+                        conn.execute("""
                             CREATE OR REPLACE TABLE main.graph_tx_shared AS
                             SELECT DISTINCT a.entity_name AS src, b.entity_name AS dst, a.document_id
                             FROM main.graph_tx_edges a
@@ -1103,11 +1149,33 @@ async def app_lifespan(server):
                             AND a.entity_name < b.entity_name
                         """)
                     except Exception as e:
-                        for t in ["graph_tx_entities", "graph_tx_edges", "graph_tx_shared"]:
-                            try:
-                                conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
-                            except Exception:
-                                pass
+                        # Real-schema empty placeholders. The previous version
+                        # wrote (dummy VARCHAR) which made downstream queries
+                        # fail with "candidate bindings: dummy" — silently
+                        # broken until 2026-04-08. Now placeholders match the
+                        # actual columns the query layer expects so failures
+                        # produce empty results instead of binder errors.
+                        try:
+                            conn.execute("""
+                                CREATE OR REPLACE TABLE main.graph_tx_edges (
+                                    entity_name VARCHAR, party_type VARCHAR, bbl VARCHAR,
+                                    document_id VARCHAR, doc_date DATE, amount DOUBLE, doc_type VARCHAR
+                                )
+                            """)
+                            conn.execute("""
+                                CREATE OR REPLACE TABLE main.graph_tx_entities (
+                                    entity_name VARCHAR, party_type VARCHAR,
+                                    tx_count BIGINT, property_count BIGINT,
+                                    as_seller BIGINT, as_buyer BIGINT, total_amount DOUBLE
+                                )
+                            """)
+                            conn.execute("""
+                                CREATE OR REPLACE TABLE main.graph_tx_shared (
+                                    src VARCHAR, dst VARCHAR, document_id VARCHAR
+                                )
+                            """)
+                        except Exception:
+                            pass
                         print(f"Warning: transaction network: {e}", flush=True)
 
                     # --- Corporate web ---
