@@ -5,7 +5,7 @@ tools/query.py. The motivation is agent ergonomics: LLMs consistently guess
 tool names like `list_tables`, `describe_table`, `list_schemas`, so we expose
 them directly instead of hiding them behind `query(mode='...')`.
 """
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
@@ -138,7 +138,7 @@ def query_sql(
         ),
     ],
     format: Annotated[
-        str,
+        Literal["text", "xlsx", "csv"],
         Field(
             description="'text' for in-conversation results, 'xlsx' for Excel download, 'csv' for CSV download.",
             default="text",
