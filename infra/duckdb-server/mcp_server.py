@@ -1821,45 +1821,64 @@ INSTRUCTIONS = """Common Ground -- NYC open data lake. 294 tables, 60M+ rows, 14
 
 ROUTING -- pick the FIRST match:
 * Street address or "where I live"       -> address_report()
-* Address + specific question (violations, history) -> building()
-* BBL (10-digit number)                  -> building()
-* Person or company name                 -> entity()
-* Cop by name                            -> entity(role="cop")
-* Judge by name                          -> entity(role="judge")
-* Birth/death/marriage records           -> entity(role="vitals")
-* ZIP code or "this neighborhood"        -> neighborhood()
-* Compare ZIPs                           -> neighborhood(view="compare")
-* Restaurants in an area                 -> neighborhood(view="restaurants")
-* Landlord portfolio or slumlord score   -> network(type="ownership")
-* LLC piercing or shell companies        -> network(type="corporate")
-* Campaign donations or lobbying         -> network(type="political")
-* Worst landlords ranking                -> network(type="worst")
-* School by name, DBN, or ZIP            -> school()
-* "Find complaints about X" or concepts  -> semantic_search()
-* Crime, crashes, shootings              -> safety()
-* Health data, COVID, hospitals          -> health()
-* Court cases, settlements, hearings     -> legal()
-* City contracts, permits, jobs, budget  -> civic()
-* Parking tickets, MTA, traffic          -> transit()
-* Childcare, shelters, food pantries     -> services()
-* "What can I explore?" or unsure        -> suggest()
-* Custom SQL or "what tables have X"     -> query()
-* Download or export data               -> query(format="xlsx")
+* Address + specific question             -> building()
+* BBL (10-digit number)                   -> building()
+* Person or company name                  -> entity()
+* Cop by name                             -> entity(role="cop")
+* Judge by name                           -> entity(role="judge")
+* Birth/death/marriage records            -> entity(role="vitals")
+* ZIP code or "this neighborhood"         -> neighborhood()
+* Compare ZIPs                            -> neighborhood(view="compare")
+* Restaurants in an area                  -> neighborhood(view="restaurants")
+* Landlord portfolio or slumlord score    -> network(type="ownership")
+* LLC piercing or shell companies         -> network(type="corporate")
+* Campaign donations or lobbying          -> network(type="political")
+* Worst landlords ranking                 -> network(type="worst")
+* School by name, DBN, or ZIP             -> school()
+* "Find complaints about X" or concepts   -> semantic_search()
+* Crime, crashes, shootings               -> safety()
+* Health data, COVID, hospitals           -> health()
+* Court cases, settlements, hearings      -> legal()
+* City contracts, permits, jobs, budget   -> civic()
+* Parking tickets, MTA, traffic           -> transit()
+* Childcare, shelters, food pantries      -> services()
+* "What can I explore?" or unsure         -> suggest()
+
+EXPLORING THE LAKE (when the domain tools don't cover the question):
+* "What schemas exist?"                   -> list_schemas()
+* "What tables are in X?"                 -> list_tables(schema="X")
+* "What columns does T have?"             -> describe_table(schema="X", table="T")
+* "Which tables mention <concept>?"       -> catalog_search(keyword="...")
+* "Is this table fresh?"                  -> health_check()
+* Custom SQL                              -> query_sql(sql="SELECT ...")
+* Download/export data                    -> query_sql(sql="...", format="xlsx")
+
+BEFORE WRITING CUSTOM SQL: call describe_table(schema, table) to get real
+column names. The lake often uses abbreviated names (e.g. 'lic_expir_dd',
+not 'lic_expiry_dd'). Guessing column names causes Binder Errors.
 
 WORKFLOWS -- chain tools for deep investigations:
 * Landlord investigation: building() -> entity() -> network(type="ownership")
 * Follow the money: entity() -> network(type="political") -> civic(view="contracts")
 * School comparison: school("02M475,02M001")
 * Health equity: health("10456") -> services("10456") -> neighborhood("10456")
+* Unknown table: catalog_search("eviction") -> describe_table(...) -> query_sql(...)
 
 PRESENTATION -- how to show Common Ground data to users:
-* Every tool returns a complete, pre-formatted report. Present ALL sections to the user.
-* Do NOT summarize, compress, or omit sections. Each section has independent data the user needs.
-* Use interactive visualizations (charts, tables) when data contains numeric comparisons, rankings, or percentiles.
-* Percentile bars and rankings should be shown visually, not described in prose.
-* Preserve the tool's section headers and structure — they are designed for readability.
-* When a report has a "Drill deeper" footer, show it — those are actionable tool calls the user can request.
+* Every tool returns a complete, pre-formatted report. Present ALL sections.
+* Do NOT summarize, compress, or omit sections. Each section has independent data.
+* Use interactive visualizations for numeric comparisons, rankings, or percentiles.
+* Preserve the tool's section headers and structure.
+* When a report has a "Drill deeper" footer, show it -- those are actionable tool calls.
 * If the response includes a PRESENTATION directive, follow it exactly.
+
+TOOL DISCIPLINE:
+* Use only the tools listed above. If no available tool can complete the
+  request, say so clearly. Do NOT invent tool names, simulate tool results,
+  or guess at tools that "should" exist.
+* The legacy query() tool is deprecated -- prefer the discrete catalog tools
+  (list_schemas, list_tables, describe_table, catalog_search, health_check,
+  query_sql) for clarity.
 
 This is NYC-only data. Do not query for national/federal statistics."""
 
@@ -1881,11 +1900,30 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 from tools import (
-    address_report, building, entity, neighborhood, network, school,
-    semantic_search, query, safety, health, legal,
-    civic, transit, services, suggest,
+    address_report,
+    building,
+    catalog_search,
+    civic,
+    describe_table,
+    entity,
+    health,
+    health_check,
+    legal,
+    list_schemas,
+    list_tables,
+    neighborhood,
+    network,
+    query,
+    query_sql,
+    safety,
+    school,
+    semantic_search,
+    services,
+    suggest,
+    transit,
 )
 
+# Domain super-tools
 mcp.tool(annotations=READONLY)(address_report)
 mcp.tool(annotations=READONLY)(building)
 mcp.tool(annotations=READONLY)(entity)
@@ -1893,7 +1931,6 @@ mcp.tool(annotations=READONLY)(neighborhood)
 mcp.tool(annotations=READONLY)(network)
 mcp.tool(annotations=READONLY)(school)
 mcp.tool(annotations=READONLY)(semantic_search)
-mcp.tool(annotations=READONLY)(query)
 mcp.tool(annotations=READONLY)(safety)
 mcp.tool(annotations=READONLY)(health)
 mcp.tool(annotations=READONLY)(legal)
@@ -1901,6 +1938,17 @@ mcp.tool(annotations=READONLY)(civic)
 mcp.tool(annotations=READONLY)(transit)
 mcp.tool(annotations=READONLY)(services)
 mcp.tool(annotations=READONLY)(suggest)
+
+# Catalog + SQL tools (split from the legacy query() super-tool)
+mcp.tool(annotations=READONLY)(list_schemas)
+mcp.tool(annotations=READONLY)(list_tables)
+mcp.tool(annotations=READONLY)(describe_table)
+mcp.tool(annotations=READONLY)(catalog_search)
+mcp.tool(annotations=READONLY)(health_check)
+mcp.tool(annotations=READONLY)(query_sql)
+
+# Legacy query() kept for backwards compatibility with existing clients
+mcp.tool(annotations=READONLY)(query)
 
 
 # ---------------------------------------------------------------------------

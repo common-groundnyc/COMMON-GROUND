@@ -1,5 +1,13 @@
 from tools.address_report import address_report
 from tools.building import building
+from tools.catalog_tools import (
+    catalog_search,
+    describe_table,
+    health_check,
+    list_schemas,
+    list_tables,
+    query_sql,
+)
 from tools.civic import civic
 from tools.entity import entity
 from tools.health import health
