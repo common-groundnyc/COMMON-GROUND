@@ -79,60 +79,74 @@ def _parse_iso_ts(s: str | None) -> datetime | None:
         return None
 
 
-def check_socrata_freshness(
-    domain: str,
-    dataset_id: str,
-    app_token: str | None,
-    timeout: int = 15,
-) -> tuple[int | None, datetime | None]:
-    """Single Socrata request that returns both row count AND the upstream
-    ``max(:updated_at)``.
-
-    Combining the two probes into one SoQL query (``$select=count(*), max(:updated_at)``)
-    keeps the sensor under the 60s gRPC deadline — doubling HTTP calls per
-    dataset previously blew the tick.
-
-    Returns ``(count, max_updated_at_utc)``; either field may be None on
-    parse/HTTP error.
-    """
-    url = f"https://{domain}/resource/{dataset_id}.json?$select=count(*),max(:updated_at)&$limit=1"
+def _socrata_get(url: str, app_token: str | None, timeout: int):
     headers = {"Accept": "application/json"}
     if app_token:
         headers["X-App-Token"] = app_token
     req = Request(url, headers=headers)
+    with urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def check_socrata_freshness(
+    domain: str,
+    dataset_id: str,
+    app_token: str | None,
+    count_timeout: int = 8,
+    max_timeout: int = 8,
+) -> tuple[int | None, datetime | None]:
+    """Fetch ``count(*)`` and ``max(:updated_at)`` as two separate short-timeout
+    queries.
+
+    Why two calls: combining them into one SoQL query (``$select=count(*),max(:updated_at)``)
+    forces Socrata to scan all rows and can take 40+ seconds for the largest
+    datasets (e.g. property_charges 100M rows), blowing the sensor tick.
+    ``max(:updated_at)`` alone is always sub-second because Socrata indexes it,
+    and ``count(*)`` alone is a straight stat.
+
+    Returns ``(count, max_updated_at_utc)``; either field may be None on error.
+    """
+    count = None
+    max_updated: datetime | None = None
+
+    # 1) max(:updated_at) — authoritative upstream mod timestamp, always fast
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
+        data = _socrata_get(
+            f"https://{domain}/resource/{dataset_id}.json?$select=max(:updated_at)",
+            app_token, timeout=max_timeout,
+        )
+        if data:
+            row = data[0] if isinstance(data, list) else data
+            ts_raw = row.get("max_updated_at") or row.get("max__updated_at")
+            if ts_raw is None:
+                for v in row.values():
+                    if isinstance(v, str) and "T" in v and "-" in v and ":" in v:
+                        ts_raw = v
+                        break
+            max_updated = _parse_iso_ts(ts_raw) if isinstance(ts_raw, str) else None
     except (HTTPError, URLError, OSError) as exc:
-        logger.warning("freshness probe failed for %s/%s: %s", domain, dataset_id, exc)
-        return (None, None)
-    if not data:
-        return (None, None)
+        logger.warning("max_updated_at failed for %s/%s: %s", domain, dataset_id, exc)
 
-    row = data[0] if isinstance(data, list) else data
-
-    # Count can appear under count(*), count_1 (post-SoQL change), or a numeric fallback
-    count_raw = row.get("count(*)") or row.get("count_1")
-    if count_raw is None:
-        # Fallback: first value that's a numeric string with no letters
-        for v in row.values():
-            if isinstance(v, str) and v.isdigit():
-                count_raw = v
-                break
+    # 2) count(*) — can time out on very large tables; treat as best-effort
     try:
-        count = int(count_raw) if count_raw is not None else None
-    except (TypeError, ValueError):
-        count = None
-
-    # max(:updated_at) can appear as max_updated_at or max__updated_at
-    ts_raw = row.get("max_updated_at") or row.get("max__updated_at")
-    if ts_raw is None:
-        # Fallback: first ISO-8601-looking string value in the row
-        for v in row.values():
-            if isinstance(v, str) and "T" in v and "-" in v and ":" in v:
-                ts_raw = v
-                break
-    max_updated = _parse_iso_ts(ts_raw) if isinstance(ts_raw, str) else None
+        data = _socrata_get(
+            f"https://{domain}/resource/{dataset_id}.json?$select=count(*)&$limit=1",
+            app_token, timeout=count_timeout,
+        )
+        if data:
+            row = data[0] if isinstance(data, list) else data
+            count_raw = row.get("count(*)") or row.get("count_1") or row.get("count")
+            if count_raw is None:
+                for v in row.values():
+                    if isinstance(v, str) and v.isdigit():
+                        count_raw = v
+                        break
+            try:
+                count = int(count_raw) if count_raw is not None else None
+            except (TypeError, ValueError):
+                count = None
+    except (HTTPError, URLError, OSError) as exc:
+        logger.warning("count failed for %s/%s: %s", domain, dataset_id, exc)
 
     return (count, max_updated)
 
