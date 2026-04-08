@@ -4,10 +4,8 @@ Issue: four branches return str instead of ToolResult, crashing the wrapper.
 PostHog error: "'str' object has no attribute 'content'"
 """
 import importlib
-import sys
 from unittest.mock import MagicMock
 
-import pytest
 from fastmcp.tools.tool import ToolResult
 
 # Import the module directly, bypassing tools/__init__.py which shadows it.
