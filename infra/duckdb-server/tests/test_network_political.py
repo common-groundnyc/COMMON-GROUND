@@ -148,3 +148,60 @@ def test_littlesis_sql_returns_relationships_for_named_entity(lake_conn):
     donation = next(r for r in rows if r[2] == "donation")
     assert donation[1] == "ACME CORP"
     assert donation[4] == 50000.0
+
+
+class _StubPool:
+    """Minimal pool that hands out the test connection."""
+    def __init__(self, conn): self._conn = conn
+    def cursor(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def _cm():
+            yield self._conn
+        return _cm()
+
+
+class _StubCtx:
+    def __init__(self, pool):
+        self.lifespan_context = {"pool": pool}
+
+
+def test_political_core_includes_usaspending_and_littlesis_sections(lake_conn, monkeypatch):
+    import importlib
+    network = importlib.import_module("tools.network")
+
+    lake_conn.execute("""
+        INSERT INTO lake.federal.usaspending_contracts VALUES
+        ('A1','ACME CORP',500000.0,500000.0,'2023-01','2024-01','DOD','Navy','A','r1')
+    """)
+    lake_conn.execute("""
+        INSERT INTO lake.federal.littlesis_entities VALUES
+        (1,'ACME CORP','co','Org','realestate',NULL,'2026-01','1990-01',NULL,5000000.0),
+        (2,'JANE ROE','lobby','Person','lobbyist',NULL,'2026-01','1970-01',NULL,NULL)
+    """)
+    lake_conn.execute("""
+        INSERT INTO lake.federal.littlesis_relationships VALUES
+        (10,1,2,7,'lobbying','Client','Lobbyist',NULL,NULL,'2023-01','2023-12',TRUE,'2026-01')
+    """)
+
+    def fake_safe_query(_pool, sql, params):
+        rows = lake_conn.execute(sql, params).fetchall()
+        cols = [d[0] for d in lake_conn.description]
+        return cols, rows
+    monkeypatch.setattr(network, "safe_query", fake_safe_query)
+    monkeypatch.setattr(network, "execute", fake_safe_query)
+    monkeypatch.setattr(network, "vector_expand_names", lambda *a, **k: set())
+    def _no_graph(*a, **k):
+        raise Exception("no graph")
+    monkeypatch.setattr(network, "require_graph", _no_graph)
+
+    ctx = _StubCtx(pool=object())
+    text, data = network._political_core("ACME", ctx)
+
+    assert "FEDERAL AWARDS" in text
+    assert "ACME CORP" in text
+    assert "$500,000" in text
+    assert "POWER MAP" in text
+    assert "lobbying" in text.lower()
+    assert data["money_trail"]["federal_awards"] == 1
+    assert data["money_trail"]["power_map_relationships"] == 1
