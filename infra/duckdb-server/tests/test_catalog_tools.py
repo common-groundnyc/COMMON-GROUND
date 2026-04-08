@@ -48,9 +48,8 @@ def test_list_schemas_returns_schema_summary():
 
     assert isinstance(result, ToolResult)
     text = _text(result)
-    assert "housing" in text
-    assert "public_safety" in text
-    assert "2 tables" in text  # housing has 2
+    assert "housing: 2 tables" in text
+    assert "public_safety: 1 tables" in text
 
 
 def test_list_tables_returns_tables_in_schema(monkeypatch):

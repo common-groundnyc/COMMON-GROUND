@@ -1821,7 +1821,7 @@ INSTRUCTIONS = """Common Ground -- NYC open data lake. 294 tables, 60M+ rows, 14
 
 ROUTING -- pick the FIRST match:
 * Street address or "where I live"       -> address_report()
-* Address + specific question             -> building()
+* Address + specific question (violations, history) -> building()
 * BBL (10-digit number)                   -> building()
 * Person or company name                  -> entity()
 * Cop by name                             -> entity(role="cop")
