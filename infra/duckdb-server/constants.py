@@ -33,3 +33,11 @@ TOOL_SOURCES = {
     "entity_xray": ["business.nys_corporations", "housing.acris_parties", "city_government.campaign_contributions", "city_government.citywide_payroll"],
     "pay_to_play": ["city_government.campaign_contributions", "city_government.nys_lobbyist_registration", "city_government.contract_awards"],
 }
+
+# Tools that should NOT get confidence scores — discovery/meta tools
+# where "confidence" is meaningless (there's no data being asserted).
+CONFIDENCE_SKIP_TOOLS = frozenset({
+    "list_schemas", "list_tables", "describe_table", "data_catalog",
+    "search_tools", "call_tool", "suggest_explorations",
+    "graph_health", "lake_health",
+})

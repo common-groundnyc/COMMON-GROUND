@@ -20,6 +20,7 @@ from middleware.response_middleware import OutputFormatterMiddleware
 from middleware.citation_middleware import CitationMiddleware
 from middleware.freshness_middleware import FreshnessMiddleware
 from middleware.percentile_middleware import PercentileMiddleware
+from middleware.confidence_middleware import ConfidenceMiddleware
 
 from percentiles import build_percentile_tables, build_lake_percentile_tables
 from cursor_pool import CursorPool
@@ -2309,6 +2310,7 @@ mcp.add_middleware(ResponseLimitingMiddleware(max_size=50_000))
 mcp.add_middleware(OutputFormatterMiddleware())
 mcp.add_middleware(CitationMiddleware())
 mcp.add_middleware(FreshnessMiddleware())
+mcp.add_middleware(ConfidenceMiddleware())
 mcp.add_middleware(PercentileMiddleware())
 mcp.add_middleware(PostHogMiddleware())
 
