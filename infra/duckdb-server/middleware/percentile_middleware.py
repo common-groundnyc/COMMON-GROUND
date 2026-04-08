@@ -78,28 +78,32 @@ def detect_entity(structured_content, tool_name) -> tuple[str | None, str | None
 
 class PercentileMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next) -> ToolResult:
+        # Strip budget BEFORE call_next so tool validators (additionalProperties=False)
+        # don't reject `max_tokens` as an unknown argument.
+        budget = self._pop_budget(context)
+
         result = await call_next(context)
 
         tool_name = context.message.name
         if tool_name in _SKIP_TOOLS:
-            return self._apply_budget(context, result)
+            return self._apply_budget(result, budget)
 
         try:
             lifespan = context.fastmcp_context.lifespan_context
             if not lifespan.get("percentiles_ready"):
-                return self._apply_budget(context, result)
+                return self._apply_budget(result, budget)
 
             pool = lifespan.get("pool")
             if not pool:
-                return self._apply_budget(context, result)
+                return self._apply_budget(result, budget)
 
             entity_type, key = detect_entity(result.structured_content, tool_name)
             if entity_type is None:
-                return self._apply_budget(context, result)
+                return self._apply_budget(result, budget)
 
             percentiles = lookup_percentiles(pool, entity_type, key)
             if not percentiles:
-                return self._apply_budget(context, result)
+                return self._apply_budget(result, budget)
 
             population = get_population_count(pool, entity_type)
             pctile_text = format_percentile_block(percentiles, entity_type, population)
@@ -123,14 +127,28 @@ class PercentileMiddleware(Middleware):
                 structured_content=new_sc,
                 meta=result.meta,
             )
-            return self._apply_budget(context, result)
+            return self._apply_budget(result, budget)
 
         except Exception:
-            return self._apply_budget(context, result)
+            return self._apply_budget(result, budget)
 
-    def _apply_budget(self, context, result):
-        args = getattr(context.message, "arguments", None) or {}
+    @staticmethod
+    def _pop_budget(context) -> int | None:
+        """Extract budget AND strip max_tokens from arguments so tool validators
+        with additionalProperties=False don't reject it."""
+        args = getattr(context.message, "arguments", None)
+        if not isinstance(args, dict):
+            return None
         budget = extract_budget(args)
+        # Remove from top-level and nested options so the tool never sees it
+        args.pop("max_tokens", None)
+        nested = args.get("options")
+        if isinstance(nested, dict):
+            nested.pop("max_tokens", None)
+        return budget
+
+    @staticmethod
+    def _apply_budget(result, budget: int | None):
         if budget is not None:
             return truncate_to_budget(result, budget)
         return result
