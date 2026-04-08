@@ -34,6 +34,48 @@ TOOL_SOURCES = {
     "pay_to_play": ["city_government.campaign_contributions", "city_government.nys_lobbyist_registration", "city_government.contract_awards"],
 }
 
+# Super-tool aliases: the production tools are "building", "neighborhood", "entity",
+# etc. (super-tools that absorbed the old per-domain tools). We re-map them here so
+# FreshnessMiddleware and CitationMiddleware can look up sources by the live tool
+# names, not the pre-refactor names.
+_SUPER_TOOL_ALIASES = {
+    "building": sorted(set(
+        TOOL_SOURCES["building_profile"]
+        + TOOL_SOURCES["landlord_watchdog"]
+        + TOOL_SOURCES["owner_violations"]
+        + TOOL_SOURCES["enforcement_web"]
+        + TOOL_SOURCES["property_history"]
+    )),
+    "entity": sorted(set(
+        TOOL_SOURCES["entity_xray"]
+        + TOOL_SOURCES["due_diligence"]
+        + TOOL_SOURCES["pay_to_play"]
+    )),
+    "neighborhood": list(TOOL_SOURCES["neighborhood_portrait"]),
+    "network": sorted(set(
+        TOOL_SOURCES["landlord_watchdog"]
+        + TOOL_SOURCES["enforcement_web"]
+    )),
+    "safety": list(TOOL_SOURCES["safety_report"]),
+    "school": sorted(set(
+        TOOL_SOURCES["school_report"] + TOOL_SOURCES["school_search"]
+    )),
+    "legal": sorted(set(
+        TOOL_SOURCES["judge_profile"] + TOOL_SOURCES["cop_sheet"]
+    )),
+    "civic": sorted(set(
+        TOOL_SOURCES["pay_to_play"] + TOOL_SOURCES["money_trail"]
+    )),
+    "health": list(TOOL_SOURCES["climate_risk"]),
+    "services": list(TOOL_SOURCES["neighborhood_portrait"]),
+    "address_report": sorted(set(
+        TOOL_SOURCES["building_profile"]
+        + TOOL_SOURCES["owner_violations"]
+        + TOOL_SOURCES["enforcement_web"]
+    )),
+}
+TOOL_SOURCES.update(_SUPER_TOOL_ALIASES)
+
 # Tools that should NOT get confidence scores — discovery/meta tools
 # where "confidence" is meaningless (there's no data being asserted).
 CONFIDENCE_SKIP_TOOLS = frozenset({
