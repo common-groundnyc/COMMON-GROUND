@@ -36,8 +36,8 @@ SYNC_THRESHOLD = 0.05  # 5% drift triggers stale
 SYNC_MIN_MISSING = 1000  # absolute row gap also triggers stale
 RETRIGGER_COOLDOWN = 6 * 3600  # 6 hours — don't re-trigger while a run is likely still ingesting
 MAX_RUNS_PER_TICK = 10  # cap queued runs per sensor tick to avoid flooding
-CHUNK_SIZE = 20  # datasets to check per tick — keeps each tick under 60s grpc deadline
-COUNT_CHECK_WORKERS = 10  # parallel HTTP threads inside one tick
+CHUNK_SIZE = 15  # datasets to check per tick — keeps each tick under 60s grpc deadline
+COUNT_CHECK_WORKERS = 15  # parallel HTTP threads inside one tick
 
 DOMAINS = {
     "nyc": "data.cityofnewyork.us",
@@ -92,8 +92,8 @@ def check_socrata_freshness(
     domain: str,
     dataset_id: str,
     app_token: str | None,
-    count_timeout: int = 8,
-    max_timeout: int = 8,
+    count_timeout: int = 4,
+    max_timeout: int = 4,
 ) -> tuple[int | None, datetime | None]:
     """Fetch ``count(*)`` and ``max(:updated_at)`` as two separate short-timeout
     queries.
