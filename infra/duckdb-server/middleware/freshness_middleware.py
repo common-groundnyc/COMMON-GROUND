@@ -39,22 +39,40 @@ class FreshnessMiddleware(Middleware):
             pipeline_state = lifespan.get("pipeline_state", {})
             now = time.time()
 
-            stale_tables = []
+            from datetime import datetime
+
+            max_age_hours: float | None = None
+            stale_tables: list[tuple[str, int]] = []
             for table_key in sources:
                 ps = pipeline_state.get(table_key)
                 if not ps or not ps.get("last_run_at"):
                     continue
                 try:
-                    from datetime import datetime
                     last_run = datetime.fromisoformat(ps["last_run_at"].replace("Z", "+00:00"))
-                    age_days = (now - last_run.timestamp()) / 86400
+                    age_hours = (now - last_run.timestamp()) / 3600
+                    if max_age_hours is None or age_hours > max_age_hours:
+                        max_age_hours = age_hours
+                    age_days = age_hours / 24
                     if age_days > STALE_THRESHOLD_DAYS:
                         stale_tables.append((table_key, int(age_days)))
                 except (ValueError, TypeError):
                     pass
 
+            # Always write freshness_hours to meta when we have a measurement —
+            # ConfidenceMiddleware reads this to score the response.
+            new_meta = result.meta
+            if max_age_hours is not None:
+                new_meta = dict(result.meta or {})
+                new_meta["freshness_hours"] = round(max_age_hours, 2)
+
             if not stale_tables:
-                return result
+                if new_meta is result.meta:
+                    return result
+                return ToolResult(
+                    content=result.content,
+                    structured_content=result.structured_content,
+                    meta=new_meta,
+                )
 
             warning_parts = [f"{t} ({d}d old)" for t, d in stale_tables]
             warning = f"Data freshness warning: {', '.join(warning_parts)} — last refreshed over {STALE_THRESHOLD_DAYS} days ago."
@@ -70,7 +88,7 @@ class FreshnessMiddleware(Middleware):
             return ToolResult(
                 content=new_text,
                 structured_content=result.structured_content,
-                meta=result.meta,
+                meta=new_meta,
             )
         except Exception:
             return result
