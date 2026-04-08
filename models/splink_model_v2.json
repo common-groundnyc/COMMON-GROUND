@@ -5,7 +5,7 @@
     "retain_intermediate_calculation_columns": false,
     "additional_columns_to_retain": [],
     "sql_dialect": "duckdb",
-    "linker_uid": "a5qn6z5r",
+    "linker_uid": "3u7ptk5n",
     "em_convergence": 0.0001,
     "max_iterations": 15,
     "bayes_factor_column_prefix": "bf_",
@@ -41,8 +41,8 @@
                 {
                     "sql_condition": "\"first_name_l\" = \"first_name_r\"",
                     "label_for_charts": "Exact match on first_name",
-                    "m_probability": 0.6526845720571681,
-                    "u_probability": 0.0030274473991640212,
+                    "m_probability": 0.9970167160606623,
+                    "u_probability": 0.07301968043977627,
                     "fix_m_probability": false,
                     "fix_u_probability": false,
                     "tf_adjustment_column": "first_name",
@@ -51,32 +51,26 @@
                 {
                     "sql_condition": "jaro_winkler_similarity(\"first_name_l\", \"first_name_r\") >= 0.92",
                     "label_for_charts": "Jaro-Winkler distance of first_name >= 0.92",
-                    "m_probability": 0.006227014166015226,
-                    "u_probability": 0.0014222404648967495,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 },
                 {
                     "sql_condition": "jaro_winkler_similarity(\"first_name_l\", \"first_name_r\") >= 0.88",
                     "label_for_charts": "Jaro-Winkler distance of first_name >= 0.88",
-                    "m_probability": 0.006657037439981866,
-                    "u_probability": 0.0008840680732416396,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 },
                 {
                     "sql_condition": "jaro_winkler_similarity(\"first_name_l\", \"first_name_r\") >= 0.7",
                     "label_for_charts": "Jaro-Winkler distance of first_name >= 0.7",
-                    "m_probability": 0.02054795607120364,
-                    "u_probability": 0.021343726800296958,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 },
                 {
                     "sql_condition": "ELSE",
                     "label_for_charts": "All other comparisons",
-                    "m_probability": 0.31388342026563115,
-                    "u_probability": 0.9733225172624006,
+                    "m_probability": 0.0029832839393377102,
+                    "u_probability": 0.9269803195602238,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 }
@@ -96,7 +90,8 @@
                 {
                     "sql_condition": "\"last_name_l\" = \"last_name_r\"",
                     "label_for_charts": "Exact match on last_name",
-                    "u_probability": 0.0004438556054530485,
+                    "m_probability": 0.924272116817478,
+                    "u_probability": 0.0010934204758599022,
                     "fix_m_probability": false,
                     "fix_u_probability": false,
                     "tf_adjustment_column": "last_name",
@@ -105,28 +100,32 @@
                 {
                     "sql_condition": "jaro_winkler_similarity(\"last_name_l\", \"last_name_r\") >= 0.92",
                     "label_for_charts": "Jaro-Winkler distance of last_name >= 0.92",
-                    "u_probability": 0.00020867082955863792,
+                    "m_probability": 0.0008430741232321577,
+                    "u_probability": 0.00025849272777555155,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 },
                 {
                     "sql_condition": "jaro_winkler_similarity(\"last_name_l\", \"last_name_r\") >= 0.88",
                     "label_for_charts": "Jaro-Winkler distance of last_name >= 0.88",
-                    "u_probability": 0.000337799820109958,
+                    "m_probability": 0.00046151327653564696,
+                    "u_probability": 0.0003939474322867576,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 },
                 {
                     "sql_condition": "jaro_winkler_similarity(\"last_name_l\", \"last_name_r\") >= 0.7",
                     "label_for_charts": "Jaro-Winkler distance of last_name >= 0.7",
-                    "u_probability": 0.014265919904404067,
+                    "m_probability": 0.001388385647551508,
+                    "u_probability": 0.015548883157148152,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 },
                 {
                     "sql_condition": "ELSE",
                     "label_for_charts": "All other comparisons",
-                    "u_probability": 0.9847437538404743,
+                    "m_probability": 0.07303491013520264,
+                    "u_probability": 0.9827052562069296,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 }
@@ -146,8 +145,8 @@
                 {
                     "sql_condition": "\"address_l\" = \"address_r\"",
                     "label_for_charts": "Exact match on address",
-                    "m_probability": 0.3392522659415157,
-                    "u_probability": 1.9643200898872873e-05,
+                    "m_probability": 0.7229401881539954,
+                    "u_probability": 0.0031746031746031746,
                     "fix_m_probability": false,
                     "fix_u_probability": false,
                     "tf_adjustment_column": "address",
@@ -156,8 +155,8 @@
                 {
                     "sql_condition": "ELSE",
                     "label_for_charts": "All other comparisons",
-                    "m_probability": 0.6607477340584844,
-                    "u_probability": 0.9999803567991011,
+                    "m_probability": 0.2770598118460046,
+                    "u_probability": 0.9968253968253968,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 }
@@ -177,8 +176,8 @@
                 {
                     "sql_condition": "\"city_l\" = \"city_r\"",
                     "label_for_charts": "Exact match on city",
-                    "m_probability": 0.898066941053683,
-                    "u_probability": 0.11392504678880572,
+                    "m_probability": 0.7184787170414648,
+                    "u_probability": 0.11589213998852553,
                     "fix_m_probability": false,
                     "fix_u_probability": false,
                     "tf_adjustment_column": "city",
@@ -187,8 +186,8 @@
                 {
                     "sql_condition": "ELSE",
                     "label_for_charts": "All other comparisons",
-                    "m_probability": 0.10193305894631699,
-                    "u_probability": 0.8860749532111943,
+                    "m_probability": 0.2815212829585351,
+                    "u_probability": 0.8841078600114745,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 }
@@ -208,8 +207,8 @@
                 {
                     "sql_condition": "\"zip_l\" = \"zip_r\"",
                     "label_for_charts": "Exact match on zip",
-                    "m_probability": 0.519053230709612,
-                    "u_probability": 0.007546432062561095,
+                    "m_probability": 0.8207664239443762,
+                    "u_probability": 0.005115089514066497,
                     "fix_m_probability": false,
                     "fix_u_probability": false,
                     "tf_adjustment_column": "zip",
@@ -218,8 +217,8 @@
                 {
                     "sql_condition": "ELSE",
                     "label_for_charts": "All other comparisons",
-                    "m_probability": 0.48094676929038793,
-                    "u_probability": 0.9924535679374389,
+                    "m_probability": 0.17923357605562384,
+                    "u_probability": 0.9948849104859335,
                     "fix_m_probability": false,
                     "fix_u_probability": false
                 }

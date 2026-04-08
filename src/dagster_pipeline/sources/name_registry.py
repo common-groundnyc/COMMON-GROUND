@@ -87,8 +87,8 @@ NAME_REGISTRY: list[NameSource] = [
     ),
     NameSource(
         schema="city_government", table="coib_policymakers",
-        pattern=NamePattern.STRUCTURED,
-        name_columns=(("last_name", "first_name"),),
+        pattern=NamePattern.COMBINED_SPACE,
+        name_columns=(("name_of_employee", None),),
     ),
     NameSource(
         schema="city_government", table="coib_legal_defense_trust",
@@ -116,24 +116,24 @@ NAME_REGISTRY: list[NameSource] = [
     NameSource(
         schema="federal", table="nypd_ccrb_officers_current",
         pattern=NamePattern.STRUCTURED,
-        name_columns=(("last_name", "first_name"),),
+        # Source uses literal "Last Name" / "First Name" with capital + space.
+        # The SQL builder must quote these — see get_extraction_sql.
+        name_columns=(('"Last Name"', '"First Name"'),),
     ),
     NameSource(
         schema="federal", table="nypd_ccrb_complaints",
         pattern=NamePattern.STRUCTURED,
-        name_columns=(("last_name", "first_name"),),
+        # Source uses camelCase LastName/FirstName, not snake_case.
+        name_columns=(("LastName", "FirstName"),),
     ),
     NameSource(
         schema="federal", table="nys_death_index",
         pattern=NamePattern.STRUCTURED,
         name_columns=(("last_name", "first_name"),),
     ),
-    NameSource(
-        schema="federal", table="nys_campaign_finance",
-        pattern=NamePattern.STRUCTURED,
-        name_columns=(("flng_ent_last_name", "flng_ent_first_name"),),
-        notes="Federal copy; also has cand_last_name/cand_first_name",
-    ),
+    # federal.nys_campaign_finance — EXCLUDED: table does not exist in lake.
+    # Was registered for the future federal copy with flng_ent_last_name /
+    # flng_ent_first_name columns. Re-add when the source is ingested.
     NameSource(
         schema="financial", table="nys_attorney_registrations",
         pattern=NamePattern.STRUCTURED,
@@ -290,7 +290,8 @@ NAME_REGISTRY: list[NameSource] = [
         schema="city_government", table="city_record",
         pattern=NamePattern.COMBINED_SPACE,
         name_columns=(("contact_name", None),),
-        address_columns={"city": "city", "zip": "zip_code"},
+        # No address columns — table has no city/zip fields, only the
+        # contact_name plus agency/notice metadata.
         notes="Contact person — 'Firstname Lastname' format",
     ),
     NameSource(
@@ -379,7 +380,7 @@ NAME_REGISTRY: list[NameSource] = [
         schema="housing", table="dob_application_owners",
         pattern=NamePattern.STRUCTURED,
         name_columns=(("owner_s_last_name", "owner_s_first_name"),),
-        address_columns={"zip": "zip"},
+        # Table has no zip column — only first/last name + business name + phone + job description.
     ),
     NameSource(
         schema="city_government", table="lobbyist_fundraising",
@@ -407,52 +408,70 @@ def get_extraction_sql(source: NameSource) -> list[str]:
     city_col = source.address_columns.get("city")
     zip_col = source.address_columns.get("zip")
 
+    # Use a table alias 't' and qualify all column references so DuckDB
+    # never confuses a source column with the alias being defined in the
+    # same SELECT (e.g., 'UPPER(city) AS city' fails without qualification).
+    def _qualify(col: str | None) -> str:
+        """Qualify a column reference with the 't' alias.
+
+        Handles bare identifiers ('city' → 't.city'), already-quoted
+        identifiers ('"Last Name"' → 't."Last Name"'), and pass-throughs
+        for None and SQL expressions that already contain a dot or paren.
+        """
+        if not col:
+            return col
+        if "." in col or "(" in col:
+            return col  # already qualified or an expression
+        return f"t.{col}"
+
     def _addr_expr(col: str | None) -> str:
-        return f"UPPER({col})" if col else "NULL"
+        return f"UPPER({_qualify(col)})" if col else "NULL"
 
     def _zip_expr(col: str | None) -> str:
-        return f"CAST({col} AS VARCHAR)" if col else "NULL"
+        return f"CAST({_qualify(col)} AS VARCHAR)" if col else "NULL"
 
     results = []
 
     for last_col, first_col in source.name_columns:
+        last_q = _qualify(last_col)
+        first_q = _qualify(first_col) if first_col else None
         if source.pattern == NamePattern.STRUCTURED:
             if first_col is None:
                 raise ValueError(f"STRUCTURED pattern requires first_col: {source}")
             sql = f"""
                 SELECT
                     '{source_label}' AS source_table,
-                    UPPER(TRIM({last_col})) AS last_name,
-                    UPPER(TRIM({first_col})) AS first_name,
+                    UPPER(TRIM({last_q})) AS last_name,
+                    UPPER(TRIM({first_q})) AS first_name,
                     {_addr_expr(addr_col)} AS address,
                     {_addr_expr(city_col)} AS city,
                     {_zip_expr(zip_col)} AS zip
-                FROM {full_table}
-                WHERE {last_col} IS NOT NULL AND LENGTH(TRIM({last_col})) >= 2
+                FROM {full_table} t
+                WHERE {last_q} IS NOT NULL AND LENGTH(TRIM({last_q})) >= 2
             """
 
         elif source.pattern == NamePattern.COMBINED_COMMA:
             sql = f"""
                 SELECT
                     '{source_label}' AS source_table,
-                    UPPER(TRIM(SPLIT_PART({last_col}, ', ', 1))) AS last_name,
-                    UPPER(TRIM(SPLIT_PART(SPLIT_PART({last_col}, ', ', 2), ' ', 1))) AS first_name,
+                    UPPER(TRIM(SPLIT_PART({last_q}, ', ', 1))) AS last_name,
+                    UPPER(TRIM(SPLIT_PART(SPLIT_PART({last_q}, ', ', 2), ' ', 1))) AS first_name,
                     {_addr_expr(addr_col)} AS address,
                     {_addr_expr(city_col)} AS city,
                     {_zip_expr(zip_col)} AS zip
-                FROM {full_table}
-                WHERE {last_col} IS NOT NULL AND LENGTH(TRIM({last_col})) > 2
-                  AND {last_col} LIKE '%,%'
+                FROM {full_table} t
+                WHERE {last_q} IS NOT NULL AND LENGTH(TRIM({last_q})) > 2
+                  AND {last_q} LIKE '%,%'
             """
 
         elif source.pattern == NamePattern.COMBINED_SPACE:
             if source.last_name_first:
-                ln_expr = f"UPPER(TRIM(SPLIT_PART({last_col}, ' ', 1)))"
-                fn_expr = f"UPPER(TRIM(SPLIT_PART({last_col}, ' ', 2)))"
+                ln_expr = f"UPPER(TRIM(SPLIT_PART({last_q}, ' ', 1)))"
+                fn_expr = f"UPPER(TRIM(SPLIT_PART({last_q}, ' ', 2)))"
             else:
-                ln_expr = f"UPPER(TRIM(SPLIT_PART({last_col}, ' ', -1)))"
-                fn_expr = f"UPPER(TRIM(SPLIT_PART({last_col}, ' ', 1)))"
-            llc_clause = f"\n                  AND {_llc_where(last_col)}" if source.needs_llc_filter else ""
+                ln_expr = f"UPPER(TRIM(SPLIT_PART({last_q}, ' ', -1)))"
+                fn_expr = f"UPPER(TRIM(SPLIT_PART({last_q}, ' ', 1)))"
+            llc_clause = f"\n                  AND {_llc_where(last_q)}" if source.needs_llc_filter else ""
             sql = f"""
                 SELECT
                     '{source_label}' AS source_table,
@@ -461,36 +480,36 @@ def get_extraction_sql(source: NameSource) -> list[str]:
                     {_addr_expr(addr_col)} AS address,
                     {_addr_expr(city_col)} AS city,
                     {_zip_expr(zip_col)} AS zip
-                FROM {full_table}
-                WHERE {last_col} IS NOT NULL AND LENGTH(TRIM({last_col})) > 2{llc_clause}
+                FROM {full_table} t
+                WHERE {last_q} IS NOT NULL AND LENGTH(TRIM({last_q})) > 2{llc_clause}
             """
 
         elif source.pattern == NamePattern.OWNER:
             sql = f"""
                 SELECT
                     '{source_label}' AS source_table,
-                    UPPER(TRIM(SPLIT_PART({last_col}, ', ', 1))) AS last_name,
-                    UPPER(TRIM(SPLIT_PART({last_col}, ', ', 2))) AS first_name,
+                    UPPER(TRIM(SPLIT_PART({last_q}, ', ', 1))) AS last_name,
+                    UPPER(TRIM(SPLIT_PART({last_q}, ', ', 2))) AS first_name,
                     {_addr_expr(addr_col)} AS address,
                     {_addr_expr(city_col)} AS city,
                     {_zip_expr(zip_col)} AS zip
-                FROM {full_table}
-                WHERE {last_col} IS NOT NULL AND LENGTH(TRIM({last_col})) > 2
-                  AND {_llc_where(last_col)}
+                FROM {full_table} t
+                WHERE {last_q} IS NOT NULL AND LENGTH(TRIM({last_q})) > 2
+                  AND {_llc_where(last_q)}
             """
 
         elif source.pattern == NamePattern.RESPONDENT:
             sql = f"""
                 SELECT
                     '{source_label}' AS source_table,
-                    UPPER(TRIM(SPLIT_PART({last_col}, ', ', 1))) AS last_name,
-                    UPPER(TRIM(SPLIT_PART({last_col}, ', ', 2))) AS first_name,
+                    UPPER(TRIM(SPLIT_PART({last_q}, ', ', 1))) AS last_name,
+                    UPPER(TRIM(SPLIT_PART({last_q}, ', ', 2))) AS first_name,
                     {_addr_expr(addr_col)} AS address,
                     {_addr_expr(city_col)} AS city,
                     {_zip_expr(zip_col)} AS zip
-                FROM {full_table}
-                WHERE {last_col} IS NOT NULL AND LENGTH(TRIM({last_col})) > 2
-                  AND {_llc_where(last_col)}
+                FROM {full_table} t
+                WHERE {last_q} IS NOT NULL AND LENGTH(TRIM({last_q})) > 2
+                  AND {_llc_where(last_q)}
             """
 
         elif source.pattern == NamePattern.MULTI:
@@ -499,26 +518,26 @@ def get_extraction_sql(source: NameSource) -> list[str]:
                 sql = f"""
                     SELECT
                         '{source_label}' AS source_table,
-                        UPPER(TRIM({last_col})) AS last_name,
-                        UPPER(TRIM({first_col})) AS first_name,
+                        UPPER(TRIM({last_q})) AS last_name,
+                        UPPER(TRIM({first_q})) AS first_name,
                         {_addr_expr(addr_col)} AS address,
                         {_addr_expr(city_col)} AS city,
                         {_zip_expr(zip_col)} AS zip
-                    FROM {full_table}
-                    WHERE {last_col} IS NOT NULL AND LENGTH(TRIM({last_col})) >= 2
+                    FROM {full_table} t
+                    WHERE {last_q} IS NOT NULL AND LENGTH(TRIM({last_q})) >= 2
                 """
             else:
                 # Combined name within a MULTI table
                 sql = f"""
                     SELECT
                         '{source_label}' AS source_table,
-                        UPPER(TRIM(SPLIT_PART({last_col}, ' ', -1))) AS last_name,
-                        UPPER(TRIM(SPLIT_PART({last_col}, ' ', 1))) AS first_name,
+                        UPPER(TRIM(SPLIT_PART({last_q}, ' ', -1))) AS last_name,
+                        UPPER(TRIM(SPLIT_PART({last_q}, ' ', 1))) AS first_name,
                         {_addr_expr(addr_col)} AS address,
                         {_addr_expr(city_col)} AS city,
                         {_zip_expr(zip_col)} AS zip
-                    FROM {full_table}
-                    WHERE {last_col} IS NOT NULL AND LENGTH(TRIM({last_col})) > 2
+                    FROM {full_table} t
+                    WHERE {last_q} IS NOT NULL AND LENGTH(TRIM({last_q})) > 2
                 """
         else:
             raise ValueError(f"Unknown pattern: {source.pattern}")
