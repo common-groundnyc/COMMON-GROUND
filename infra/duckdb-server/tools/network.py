@@ -692,11 +692,18 @@ def _landlord_network_core(bbl: str, pool: object) -> tuple[str, dict]:
 
     viol_map = {r[0]: {"total": r[1], "class_c": r[2], "class_b": r[3], "open": r[4]} for r in v_rows}
 
+    # graph_building_flags only has (bbl, aep, seven_a, conh) booleans.
+    # The richer signals (litigation_count, etc.) were never built.
+    # Surface what we have and zero the rest so downstream rendering
+    # doesn't crash on missing keys.
     f_cols, f_rows = execute(pool, f"""
-        SELECT bbl, is_aep, litigation_count, harassment_findings, lien_count, dob_violation_count
+        SELECT bbl,
+               CAST(aep AS INT) AS is_aep,
+               0 AS litigation_count, 0 AS harassment_findings,
+               0 AS lien_count, 0 AS dob_violation_count
         FROM main.graph_building_flags
         WHERE bbl IN ({placeholders})
-          AND (is_aep = 1 OR litigation_count > 0 OR lien_count > 0 OR dob_violation_count > 0)
+          AND aep
     """, portfolio_bbls)
     flag_map = {r[0]: {"aep": r[1], "litigations": r[2], "harassment": r[3],
                        "liens": r[4], "dob": r[5]} for r in f_rows}
@@ -1957,7 +1964,7 @@ def _clusters(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> 
         clusters AS (
             SELECT w.componentid,
                    COUNT(*) AS cluster_size,
-                   LISTAGG(DISTINCT b.boroid, ',') AS boroughs
+                   LISTAGG(DISTINCT b.borough, ',') AS boroughs
             FROM wcc w
             JOIN main.graph_buildings b ON w.bbl = b.bbl
             GROUP BY w.componentid
@@ -1965,14 +1972,14 @@ def _clusters(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> 
         )
         SELECT c.componentid, c.cluster_size, c.boroughs,
                b.bbl, b.address, b.zip,
-               b.boroid, b.units AS total_units,
+               b.borough, b.units AS total_units,
                ow.owner_name
         FROM clusters c
         JOIN wcc w ON c.componentid = w.componentid
         JOIN main.graph_buildings b ON w.bbl = b.bbl
         LEFT JOIN main.graph_owns o ON b.bbl = o.bbl
         LEFT JOIN main.graph_owners ow ON o.owner_id = ow.owner_id
-        {"WHERE b.boroid = '" + boro + "'" if boro else ""}
+        {"WHERE b.borough = '" + boro + "'" if boro else ""}
         ORDER BY c.cluster_size DESC, c.componentid, b.bbl
         LIMIT 500
     """)
@@ -2052,7 +2059,7 @@ def _cliques(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> T
         )
         SELECT NULL::DOUBLE AS lcc, d.bbl,
                b.address, b.zip,
-               b.boroid, b.units AS total_units,
+               b.borough, b.units AS total_units,
                ow.owner_name,
                d.neighbor_count
         FROM degree d
@@ -2098,7 +2105,7 @@ def _worst(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> Too
     t0 = time.time()
 
     boro = _boro_code(borough)
-    borough_filter = f"AND b.boroid = '{boro}'" if boro else ""
+    borough_filter = f"AND b.borough = '{boro}'" if boro else ""
     limit = max(1, min(top_n, 100))
 
     cols, rows = execute(pool, f"""
@@ -2138,12 +2145,19 @@ def _worst(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> Too
             GROUP BY o.owner_id
         ),
         flags AS (
+            -- graph_building_flags only has (bbl, aep, seven_a, conh) bools.
+            -- The richer signals (litigation_count, harassment_findings,
+            -- lien_count, dob_violation_count) were never built — they used
+            -- to come from a hypothetical enriched table that doesn't exist.
+            -- Keep the query running by computing what we have and zeroing
+            -- the rest. Restoring the rich signals requires building those
+            -- aggregates from lake.housing.hpd_litigations + dob_violations.
             SELECT o.owner_id,
-                   SUM(f.litigation_count) AS litigations,
-                   SUM(f.harassment_findings) AS harassment_findings,
-                   SUM(f.is_aep) AS aep_buildings,
-                   SUM(f.lien_count) AS tax_liens,
-                   SUM(f.dob_violation_count) AS dob_violations
+                   0::BIGINT AS litigations,
+                   0::BIGINT AS harassment_findings,
+                   COUNT(*) FILTER (WHERE f.aep) AS aep_buildings,
+                   0::BIGINT AS tax_liens,
+                   0::BIGINT AS dob_violations
             FROM main.graph_owns o
             JOIN main.graph_building_flags f ON o.bbl = f.bbl
             WHERE o.owner_id IN (SELECT owner_id FROM portfolio)
