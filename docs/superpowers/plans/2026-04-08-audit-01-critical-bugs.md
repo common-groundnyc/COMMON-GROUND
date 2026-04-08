@@ -21,7 +21,15 @@
 
 ---
 
-## Task 1: Remove `ThreadPoolExecutor(1)` wrapper in `execute()`
+## ~~Task 1: Remove `ThreadPoolExecutor(1)` wrapper in `execute()`~~ — **RETRACTED 2026-04-08**
+
+> **Retraction:** The audit flagged this as a serialization bug. It isn't. The `ThreadPoolExecutor(1)` in `shared/db.py:230` is a **function-local context manager** — each `safe_query()` call creates its own private single-worker pool, tears it down when the function returns, and concurrent callers run in parallel. Empirically verified: two concurrent 200ms calls complete in 205ms total (full overlap), not 400ms.
+>
+> What the wrapper actually does: enforce a 60-second query timeout via `future.result(timeout=QUERY_TIMEOUT_S)`. DuckDB 1.5 has no `statement_timeout` replacement, so removing it removes the only timeout mechanism. **Do not refactor.**
+>
+> See `memory/project_cg_audit_retraction.md` for full analysis. The steps below are left in place for audit trail but are cancelled.
+
+### ~~Original Task 1 steps (cancelled)~~
 
 **Files:**
 - Modify: `infra/duckdb-server/shared/db.py` (the `execute()` and `safe_query()` functions)

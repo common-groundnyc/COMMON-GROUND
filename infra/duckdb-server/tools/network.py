@@ -596,7 +596,7 @@ def _ownership_for_bbl(bbl: str, depth: int, ctx: Context) -> tuple[str, dict]:
 def _landlord_network_core(bbl: str, pool: object) -> tuple[str, dict]:
     """DuckPGQ ownership graph traversal for a single BBL."""
     cols, rows = execute(pool, f"""
-        FROM GRAPH_TABLE (nyc_housing
+        FROM GRAPH_TABLE (nyc_ownership
             MATCH (b1:Building WHERE b1.bbl = '{bbl}')<-[o1:Owns]-(owner:Owner)-[o2:Owns]->(b2:Building)
             COLUMNS (
                 owner.owner_id,
@@ -1244,7 +1244,7 @@ def _pay_to_play_core(search: str, pool: object, extra_names: set) -> tuple[str,
 
     try:
         graph_cols, graph_rows = execute(pool, f"""
-            FROM GRAPH_TABLE (nyc_influence_network
+            FROM GRAPH_TABLE (nyc_influence
                 MATCH (start:PoliticalEntity WHERE start.entity_name = '{primary_name.replace("'", "''")}')-[e]-{{1,2}}(target:PoliticalEntity)
                 COLUMNS (
                     target.entity_name AS connected_entity,
@@ -1447,7 +1447,7 @@ def _property_core(name: str, ctx: Context) -> tuple[str, dict]:
 
     try:
         graph_cols, graph_rows = execute(pool, f"""
-            FROM GRAPH_TABLE (nyc_transaction_network
+            FROM GRAPH_TABLE (nyc_transactions
                 MATCH (start:TxEntity WHERE start.entity_name = '{primary_name.replace("'", "''")}')-[e:SharedTransaction]-{{1,2}}(target:TxEntity)
                 COLUMNS (
                     target.entity_name AS connected_entity,
@@ -1854,7 +1854,7 @@ def _clusters(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> 
 
     cols, rows = execute(pool, f"""
         WITH wcc AS (
-            SELECT * FROM weakly_connected_component(nyc_building_network, Building, SharedOwner)
+            SELECT * FROM weakly_connected_component(nyc_ownership, Building, SharedOwner)
         ),
         clusters AS (
             SELECT w.componentid,
@@ -1931,7 +1931,7 @@ def _cliques(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> T
 
     cols, rows = execute(pool, f"""
         WITH lcc AS (
-            SELECT * FROM local_clustering_coefficient(nyc_building_network, Building, SharedOwner)
+            SELECT * FROM local_clustering_coefficient(nyc_ownership, Building, SharedOwner)
         )
         SELECT l.local_clustering_coefficient AS lcc, l.bbl,
                b.housenumber || ' ' || b.streetname AS address, b.zip,
@@ -2111,7 +2111,7 @@ def _ownership_graph_bfs(bbl: str, depth: int, ctx: Context) -> tuple[str, dict]
     clamped_depth = max(1, min(depth, 6))
 
     cols, rows = execute(pool, f"""
-        FROM GRAPH_TABLE (nyc_building_network
+        FROM GRAPH_TABLE (nyc_ownership
             MATCH p = ANY SHORTEST
                 (start:Building WHERE start.bbl = '{bbl}')
                 -[e:SharedOwner]-{{1,{clamped_depth}}}
