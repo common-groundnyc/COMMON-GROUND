@@ -240,3 +240,10 @@ duckdb-cheatsheet.pdf
 .graphify_*
 .graphifyignore
 graphify-out/
+
+# opensrc - source code for packages
+opensrc/
+
+# Eval harness run artifacts (keep the directory, ignore the files)
+infra/duckdb-server/evals/runs/*.json
+!infra/duckdb-server/evals/runs/.gitkeep
