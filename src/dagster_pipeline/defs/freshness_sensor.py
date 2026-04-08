@@ -297,7 +297,8 @@ def data_freshness_sensor(context):
         for row in lake_rows_result
     }
 
-    # Load per-dataset cursor timestamps so we can detect in-place row edits
+    # Load per-dataset cursor timestamps so we can detect in-place row edits.
+    # Normalize to tz-aware UTC — DuckDB returns naive datetimes.
     lake_cursors_by_key: dict[str, datetime | None] = {}
     try:
         ps_rows = conn.execute(
@@ -306,7 +307,10 @@ def data_freshness_sensor(context):
         for name, ts in ps_rows:
             if ts is None:
                 continue
-            lc = ts if isinstance(ts, datetime) else _parse_iso_ts(str(ts))
+            if isinstance(ts, datetime):
+                lc = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+            else:
+                lc = _parse_iso_ts(str(ts))
             lake_cursors_by_key[name] = lc
     except Exception as exc:
         context.log.warning("Could not read _pipeline_state cursors: %s", exc)
@@ -368,11 +372,12 @@ def data_freshness_sensor(context):
         })
 
         if is_stale:
-            source_changed = (
-                source_rows != prev_source_rows
-                or (source_updated_at is not None and lake_cursor is not None
-                    and source_updated_at > lake_cursor)
-            )
+            time_drift = False
+            if source_updated_at is not None and lake_cursor is not None:
+                lc = lake_cursor if lake_cursor.tzinfo else lake_cursor.replace(tzinfo=timezone.utc)
+                su = source_updated_at if source_updated_at.tzinfo else source_updated_at.replace(tzinfo=timezone.utc)
+                time_drift = su > lc
+            source_changed = (source_rows != prev_source_rows) or time_drift
             still_stale = prev_triggered_at is not None
             # Don't re-trigger if we fired recently — the run is likely still ingesting
             cooldown_active = (
