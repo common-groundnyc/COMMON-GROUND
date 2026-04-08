@@ -1854,7 +1854,7 @@ def _clusters(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> 
 
     cols, rows = execute(pool, f"""
         WITH wcc AS (
-            SELECT * FROM weakly_connected_component(nyc_building_network, Building, SharedOwner)
+            SELECT * FROM weakly_connected_component(nyc_ownership, Building, SharedOwner)
         ),
         clusters AS (
             SELECT w.componentid,
@@ -1931,7 +1931,7 @@ def _cliques(name: str, depth: int, borough: str, top_n: int, ctx: Context) -> T
 
     cols, rows = execute(pool, f"""
         WITH lcc AS (
-            SELECT * FROM local_clustering_coefficient(nyc_building_network, Building, SharedOwner)
+            SELECT * FROM local_clustering_coefficient(nyc_ownership, Building, SharedOwner)
         )
         SELECT l.local_clustering_coefficient AS lcc, l.bbl,
                b.housenumber || ' ' || b.streetname AS address, b.zip,
@@ -2111,7 +2111,7 @@ def _ownership_graph_bfs(bbl: str, depth: int, ctx: Context) -> tuple[str, dict]
     clamped_depth = max(1, min(depth, 6))
 
     cols, rows = execute(pool, f"""
-        FROM GRAPH_TABLE (nyc_building_network
+        FROM GRAPH_TABLE (nyc_ownership
             MATCH p = ANY SHORTEST
                 (start:Building WHERE start.bbl = '{bbl}')
                 -[e:SharedOwner]-{{1,{clamped_depth}}}
