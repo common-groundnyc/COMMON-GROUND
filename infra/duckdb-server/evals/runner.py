@@ -5,6 +5,7 @@ LangChain/LlamaIndex — one less dep to manage. See
 docs/superpowers/plans/2026-04-08-mcp-literal-audit-and-eval-harness.md
 for the rationale.
 """
+import asyncio
 import os
 from dataclasses import dataclass
 
@@ -15,7 +16,24 @@ from mcp.client.streamable_http import streamablehttp_client
 from evals.cases import ToolEvalCase
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
-MAX_TURNS = 10
+MAX_TURNS = 4
+TOOL_CALL_TIMEOUT_S = 60.0
+LLM_CALL_TIMEOUT_S = 90.0
+
+# System prompt that constrains the agent to tool-selection mode. We are
+# measuring whether the model picks the right tool for a prompt, NOT whether
+# it completes a deep investigation. Without this the model chains 20+ tool
+# calls per case and saturates the MCP server.
+EVAL_SYSTEM_PROMPT = (
+    "You are in evaluation mode. For each user prompt, identify the single "
+    "best tool to call and call it ONCE with the correct parameters. After "
+    "the tool returns, produce a brief one-paragraph summary using the tool "
+    "output and stop. Do NOT call additional tools to explore, verify, or "
+    "enrich the answer. Do NOT chain multiple tools. If no tool is "
+    "appropriate, say so and call no tool.\n\n"
+    "If the user's request is out of scope (national data, non-NYC data, "
+    "nonexistent tools), refuse clearly and do not call any tool."
+)
 
 
 @dataclass(frozen=True)
@@ -42,7 +60,9 @@ def _mcp_tools_for_anthropic(mcp_tools) -> list[dict]:
 
 async def _call_tool_on_session(session: ClientSession, name: str, args: dict) -> str:
     """Call one tool via an already-initialized MCP session and extract text."""
-    result = await session.call_tool(name, args)
+    result = await asyncio.wait_for(
+        session.call_tool(name, args), timeout=TOOL_CALL_TIMEOUT_S
+    )
     parts = []
     for c in result.content or []:
         text = getattr(c, "text", None)
@@ -82,11 +102,15 @@ async def run_case(
 
                 while turns < MAX_TURNS:
                     turns += 1
-                    resp = await client.messages.create(
-                        model=model,
-                        max_tokens=4096,
-                        tools=tools,
-                        messages=messages,
+                    resp = await asyncio.wait_for(
+                        client.messages.create(
+                            model=model,
+                            max_tokens=4096,
+                            system=EVAL_SYSTEM_PROMPT,
+                            tools=tools,
+                            messages=messages,
+                        ),
+                        timeout=LLM_CALL_TIMEOUT_S,
                     )
 
                     # Record any tool calls the model emitted this turn.
@@ -145,12 +169,19 @@ async def run_case(
                     final_text="",
                 )
 
-    except Exception as exc:
+    except BaseException as exc:
+        # Recursively unwrap anyio TaskGroup ExceptionGroup to get the real cause.
+        cur = exc
+        while hasattr(cur, "exceptions") and cur.exceptions:
+            cur = cur.exceptions[0]
+        detail = f"{type(cur).__name__}: {cur}"
+        if cur is not exc:
+            detail += f" (wrapped in {type(exc).__name__})"
         return RunResult(
             case_id=case.id,
             trial=trial,
             tool_calls=tuple(tool_calls_made),
             turns=turns,
-            error=f"{type(exc).__name__}: {exc}",
+            error=detail,
             final_text="",
         )

@@ -28,7 +28,12 @@ def grade_case(
 
     tool_calls: list of {"name": str, "input": dict} as returned by Anthropic SDK.
     """
-    if error is not None:
+    # max_turns_exceeded is NOT a tool-selection failure — the agent may have
+    # called the right tool correctly but kept exploring. Grade tool selection
+    # normally and report the error alongside. Other errors (network, auth,
+    # server crash) still fail the case because there's no reliable signal.
+    is_max_turns = error is not None and "max_turns_exceeded" in error
+    if error is not None and not is_max_turns:
         return CaseGrade(
             case_id=case.id,
             tool_selected=False,
@@ -74,6 +79,6 @@ def grade_case(
         tool_selected=True,
         required_params_ok=required_ok,
         passed=required_ok,
-        error=None,
+        error=error if is_max_turns else None,
         trial=trial,
     )

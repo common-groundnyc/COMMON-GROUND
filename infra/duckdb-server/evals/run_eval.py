@@ -23,6 +23,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+INTER_CASE_SLEEP_S = 1.5
+RETRY_ON_502_ATTEMPTS = 3
+RETRY_BACKOFF_S = 4.0
+
 from evals.cases import CASES
 from evals.metrics import error_rate, pass_all_k, pass_any_k, per_tool_accuracy
 from evals.runner import run_case
@@ -82,12 +86,64 @@ async def main():
     print(f"Running eval against {mcp_url} with model {MODEL}")
     print()
 
+    # Checkpoint file — written after every trial so a killed run keeps its data.
+    out_path = Path(args.out) if args.out else Path("evals/runs") / (
+        datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + ".json"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _checkpoint(all_grades, all_runs, is_final=False):
+        out_path.write_text(json.dumps({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": args.mode,
+            "model": MODEL,
+            "n_cases": len(cases),
+            "n_trials": args.trials,
+            "complete": is_final,
+            "metrics": {
+                "pass_at_1": pass_all_k(all_grades, k=1),
+                "pass_any_k": pass_any_k(all_grades, k=args.trials),
+                "pass_all_k": pass_all_k(all_grades, k=args.trials),
+                "error_rate": error_rate(all_grades),
+                "per_tool": per_tool_accuracy(all_grades, cases),
+            },
+            "grades": [
+                {
+                    "case_id": g.case_id,
+                    "trial": g.trial,
+                    "passed": g.passed,
+                    "tool_selected": g.tool_selected,
+                    "required_params_ok": g.required_params_ok,
+                    "error": g.error,
+                }
+                for g in all_grades
+            ],
+            "runs": [
+                {
+                    "case_id": r.case_id,
+                    "trial": r.trial,
+                    "turns": r.turns,
+                    "tool_calls": list(r.tool_calls),
+                    "final_text": r.final_text,
+                    "error": r.error,
+                }
+                for r in all_runs
+            ],
+        }, indent=2))
+
     all_grades = []
     all_runs = []
     for case in cases:
         for trial in range(args.trials):
             print(f"  [{case.id}] trial {trial + 1}/{args.trials}...", end=" ", flush=True)
-            result = await run_case(case, mcp_url=mcp_url, trial=trial, model=MODEL)
+            # Retry loop for transient 502 Bad Gateway from the MCP tunnel.
+            result = None
+            for attempt in range(RETRY_ON_502_ATTEMPTS):
+                result = await run_case(case, mcp_url=mcp_url, trial=trial, model=MODEL)
+                if not result.error or "502" not in result.error:
+                    break
+                if attempt < RETRY_ON_502_ATTEMPTS - 1:
+                    await asyncio.sleep(RETRY_BACKOFF_S * (2 ** attempt))
             all_runs.append(result)
             grade = grade_case(
                 case,
@@ -97,7 +153,12 @@ async def main():
             )
             all_grades.append(grade)
             status = "PASS" if grade.passed else ("ERROR" if grade.error else "FAIL")
-            print(status)
+            tools_hit = ",".join(tc["name"] for tc in result.tool_calls) or "-"
+            print(f"{status} (turns={result.turns}, tools=[{tools_hit}])")
+            if result.error:
+                print(f"      error: {result.error[:200]}")
+            _checkpoint(all_grades, all_runs)
+            await asyncio.sleep(INTER_CASE_SLEEP_S)
 
     # Report
     print()
@@ -111,47 +172,7 @@ async def main():
     for tool, acc in sorted(per_tool_accuracy(all_grades, cases).items()):
         print(f"  {tool:20s} {acc:.1%}")
 
-    # Save artifact
-    out_path = Path(args.out) if args.out else Path("evals/runs") / (
-        datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + ".json"
-    )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "mode": args.mode,
-        "model": MODEL,
-        "n_cases": len(cases),
-        "n_trials": args.trials,
-        "metrics": {
-            "pass_at_1": pass_all_k(all_grades, k=1),
-            "pass_any_k": pass_any_k(all_grades, k=args.trials),
-            "pass_all_k": pass_all_k(all_grades, k=args.trials),
-            "error_rate": error_rate(all_grades),
-            "per_tool": per_tool_accuracy(all_grades, cases),
-        },
-        "grades": [
-            {
-                "case_id": g.case_id,
-                "trial": g.trial,
-                "passed": g.passed,
-                "tool_selected": g.tool_selected,
-                "required_params_ok": g.required_params_ok,
-                "error": g.error,
-            }
-            for g in all_grades
-        ],
-        "runs": [
-            {
-                "case_id": r.case_id,
-                "trial": r.trial,
-                "turns": r.turns,
-                "tool_calls": list(r.tool_calls),
-                "final_text": r.final_text,
-                "error": r.error,
-            }
-            for r in all_runs
-        ],
-    }, indent=2))
+    _checkpoint(all_grades, all_runs, is_final=True)
     print()
     print(f"Artifact: {out_path}")
 
