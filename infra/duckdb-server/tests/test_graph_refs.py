@@ -53,17 +53,7 @@ def test_every_graph_reference_in_tools_has_a_create_in_mcp_server():
     referenced = _extract_graph_references(tool_files)
     created = _extract_created_graphs(mcp_src)
 
-    # Known pre-existing phantom graphs tracked in the audit backlog.
-    # These are OUT OF SCOPE for the nyc_building_network fix (Plan 1 Task 2)
-    # and will be addressed separately. Listed here so this regression test
-    # still guards against NEW phantom graphs being introduced.
-    known_phantoms_out_of_scope = {
-        "nyc_housing",
-        "nyc_influence_network",
-        "nyc_transaction_network",
-    }
-
-    missing = (referenced - created) - known_phantoms_out_of_scope
+    missing = referenced - created
     assert not missing, (
         f"Tool files reference property graphs that are never created in mcp_server.py:\n"
         f"  Missing: {sorted(missing)}\n"
