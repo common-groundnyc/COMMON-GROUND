@@ -59,3 +59,67 @@ async def test_skip_tools_receive_no_confidence():
     out = await mw.on_call_tool(ctx, call_next)
 
     assert "confidence" not in (out.meta or {})
+
+
+@pytest.mark.asyncio
+async def test_completeness_lowers_confidence_for_partial_results():
+    mw = ConfidenceMiddleware()
+    ctx = _make_ctx("entity_xray")
+    call_next = AsyncMock(
+        return_value=_make_result({
+            "freshness_hours": 2,
+            "rows_returned": 5,
+            "rows_expected": 100,
+        })
+    )
+
+    out = await mw.on_call_tool(ctx, call_next)
+
+    assert out.meta["confidence"] < 0.9
+    assert any("5/100" in r for r in out.meta["confidence_reasons"])
+
+
+@pytest.mark.asyncio
+async def test_strong_splink_match_contributes_high_confidence():
+    mw = ConfidenceMiddleware()
+    ctx = _make_ctx("person_crossref")
+    call_next = AsyncMock(
+        return_value=_make_result({
+            "freshness_hours": 2,
+            "match_probability": 0.97,
+        })
+    )
+
+    out = await mw.on_call_tool(ctx, call_next)
+
+    assert out.meta["confidence"] >= 0.9
+    assert any("strong entity match" in r for r in out.meta["confidence_reasons"])
+
+
+@pytest.mark.asyncio
+async def test_weak_splink_match_lowers_confidence():
+    mw = ConfidenceMiddleware()
+    ctx = _make_ctx("person_crossref")
+    call_next = AsyncMock(
+        return_value=_make_result({
+            "freshness_hours": 2,
+            "match_probability": 0.55,
+        })
+    )
+
+    out = await mw.on_call_tool(ctx, call_next)
+
+    assert out.meta["confidence"] < 0.9
+    assert any("p=0.55" in r for r in out.meta["confidence_reasons"])
+
+
+@pytest.mark.asyncio
+async def test_confidence_with_no_signals_defaults_to_one():
+    mw = ConfidenceMiddleware()
+    ctx = _make_ctx("building_profile")
+    call_next = AsyncMock(return_value=_make_result({}))
+
+    out = await mw.on_call_tool(ctx, call_next)
+
+    assert out.meta["confidence"] == 1.0
+    assert out.meta["confidence_reasons"] == ["no signals available"]
