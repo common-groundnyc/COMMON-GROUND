@@ -10,7 +10,7 @@ import time
 
 from dagster import AssetKey, MaterializeResult, MetadataValue, asset
 
-from dagster_pipeline.defs.name_index_asset import _connect_ducklake
+from dagster_pipeline.defs.name_index_asset import _connect_ducklake, _read_ducklake_creds
 
 # Import core logic from the batch script (avoid duplication)
 # These are added to sys.path via PYTHONPATH=src or Docker /app/src
@@ -19,6 +19,26 @@ _MODEL_V2 = "models/splink_model_v2.json"
 _MODEL_V1 = "models/splink_model.json"
 MODEL_PATH = _MODEL_V2 if os.path.exists(_MODEL_V2) else _MODEL_V1
 PREDICT_THRESHOLD = 0.9
+
+
+def _reattach_lake(conn):
+    """Reattach the DuckLake catalog to an existing connection.
+
+    Used after detaching the lake to work around the broken v_nys_notaries
+    view during Splink processing. Uses the same credential parsing as
+    _read_ducklake_creds but calls ATTACH on the existing connection
+    instead of creating a new one.
+    """
+    try:
+        creds = _read_ducklake_creds()
+        conn.execute("INSTALL ducklake; LOAD ducklake; INSTALL postgres; LOAD postgres")
+        conn.execute(
+            f"ATTACH 'ducklake:postgres:dbname={creds['pg_db']} "
+            f"user={creds['pg_user']} password={creds['pg_pass']} "
+            f"host={creds['pg_host']} port={creds['pg_port']}' AS lake"
+        )
+    except Exception:
+        pass  # may already be attached
 CLUSTER_THRESHOLD = 0.92
 
 # Splink temp tables to clean up after each batch
@@ -162,10 +182,7 @@ def _process_batch(conn, group_values, group_col, batch_num, total_batches, firs
 
     # Reattach lake before writing results — we detached it before Splink
     # to avoid the broken v_nys_notaries view in information_schema.
-    try:
-        _connect_ducklake(conn)
-    except Exception:
-        pass  # may already be attached if detach failed earlier
+    _reattach_lake(conn)
 
     # Save results
     clusters_rel = clusters.as_duckdbpyrelation()
