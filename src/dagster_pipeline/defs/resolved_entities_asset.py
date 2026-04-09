@@ -25,20 +25,42 @@ def _reattach_lake(conn):
     """Reattach the DuckLake catalog to an existing connection.
 
     Used after detaching the lake to work around the broken v_nys_notaries
-    view during Splink processing. Uses the same credential parsing as
-    _read_ducklake_creds but calls ATTACH on the existing connection
-    instead of creating a new one.
+    view during Splink processing. Handles both env var formats:
+    - ducklake:postgres:dbname=X user=Y password=Z host=H port=P (key=value)
+    - postgres:user:pass@host:port/db?sslmode=... (dlt-style URI)
     """
-    try:
-        creds = _read_ducklake_creds()
-        conn.execute("INSTALL ducklake; LOAD ducklake; INSTALL postgres; LOAD postgres")
-        conn.execute(
-            f"ATTACH 'ducklake:postgres:dbname={creds['pg_db']} "
-            f"user={creds['pg_user']} password={creds['pg_pass']} "
-            f"host={creds['pg_host']} port={creds['pg_port']}' AS lake"
-        )
-    except Exception:
-        pass  # may already be attached
+    import os
+    catalog = os.environ.get("DESTINATION__DUCKLAKE__CREDENTIALS__CATALOG", "")
+
+    # Try key=value format first (ducklake:postgres:dbname=X ...)
+    if "dbname=" in catalog:
+        import re
+        raw = re.sub(r"^ducklake:postgres:", "", catalog).strip()
+        conn.execute(f"ATTACH 'ducklake:postgres:{raw}' AS lake")
+        return
+
+    # Parse dlt-style URI: postgres:user:pass@host:port/db?sslmode=...
+    s = catalog
+    if s.startswith("postgres://"):
+        s = s[len("postgres://"):]
+    elif s.startswith("postgres:"):
+        s = s[len("postgres:"):]
+    if "?" in s:
+        s = s.split("?", 1)[0]
+    userpass, hostpath = s.split("@", 1)
+    user, password = userpass.split(":", 1)
+    if "/" in hostpath:
+        hostport, db = hostpath.split("/", 1)
+    else:
+        hostport, db = hostpath, "ducklake"
+    if ":" in hostport:
+        host, port = hostport.split(":", 1)
+    else:
+        host, port = hostport, "5432"
+    conn.execute(
+        f"ATTACH 'ducklake:postgres:dbname={db} user={user} "
+        f"password={password} host={host} port={port}' AS lake"
+    )
 CLUSTER_THRESHOLD = 0.92
 
 # Splink temp tables to clean up after each batch
