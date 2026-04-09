@@ -13,7 +13,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.lifespan import lifespan
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
-from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddleware
+from middleware.summarize_middleware import SummarizeMiddleware
 from fastmcp.server.dependencies import get_http_request, get_http_headers
 
 from middleware.response_middleware import OutputFormatterMiddleware
@@ -2306,7 +2306,7 @@ mcp.add_middleware(RateLimitingMiddleware(
     global_limit=True,
 ))
 mcp.add_middleware(ConcurrencyMiddleware())
-mcp.add_middleware(ResponseLimitingMiddleware(max_size=50_000))
+mcp.add_middleware(SummarizeMiddleware(max_size=50_000))
 mcp.add_middleware(OutputFormatterMiddleware())
 mcp.add_middleware(CitationMiddleware())
 mcp.add_middleware(ConfidenceMiddleware())
