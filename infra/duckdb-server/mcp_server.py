@@ -1220,47 +1220,20 @@ async def app_lifespan(server):
                                 pass
                         print(f"Warning: corporate web: {e}", flush=True)
 
-                    # --- Influence network ---
+                    # --- Influence network (loaded from Dagster-built lake.graphs) ---
                     try:
-                        conn.execute("""
-                            CREATE OR REPLACE TABLE main.graph_pol_entities AS
-                            SELECT DISTINCT COALESCE(name, '') AS entity_name, 'donor' AS role
-                            FROM lake.city_government.campaign_contributions WHERE name IS NOT NULL
-                            UNION
-                            SELECT DISTINCT COALESCE(recipname, '') AS entity_name, 'candidate' AS role
-                            FROM lake.city_government.campaign_contributions WHERE recipname IS NOT NULL
-                        """)
-                        conn.execute("""
-                            CREATE OR REPLACE TABLE main.graph_pol_donations AS
-                            SELECT COALESCE(name, '') AS donor, COALESCE(recipname, '') AS recipient,
-                                   TRY_CAST(amnt AS DOUBLE) AS amount, TRY_CAST(date AS DATE) AS date
-                            FROM lake.city_government.campaign_contributions
-                            WHERE name IS NOT NULL AND recipname IS NOT NULL
-                        """)
-                        conn.execute("""
-                            CREATE OR REPLACE TABLE main.graph_pol_contracts AS
-                            SELECT DISTINCT
-                                vendorname AS vendor, agencyname AS agency,
-                                TRY_CAST(currentamount AS DOUBLE) AS amount
-                            FROM lake.city_government.contract_awards
-                            WHERE vendorname IS NOT NULL
-                        """)
-                        conn.execute("""
-                            CREATE OR REPLACE TABLE main.graph_pol_lobbying AS
-                            SELECT DISTINCT
-                                COALESCE(lobbyist_name, '') AS lobbyist,
-                                COALESCE(client_name, '') AS client,
-                                COALESCE(government_body, '') AS target
-                            FROM lake.city_government.nys_lobbyist_registration
-                            WHERE lobbyist_name IS NOT NULL
-                        """)
+                        for t in ("pol_entities", "pol_donations", "pol_contracts", "pol_lobbying"):
+                            conn.execute(
+                                f"CREATE OR REPLACE TABLE main.graph_{t} AS "
+                                f"SELECT * FROM lake.graphs.{t}"
+                            )
                     except Exception as e:
-                        for t in ["graph_pol_entities", "graph_pol_donations", "graph_pol_contracts", "graph_pol_lobbying"]:
+                        for t in ("graph_pol_entities", "graph_pol_donations", "graph_pol_contracts", "graph_pol_lobbying"):
                             try:
                                 conn.execute(f"CREATE OR REPLACE TABLE main.{t} (dummy VARCHAR)")
                             except Exception:
                                 pass
-                        print(f"Warning: influence network: {e}", flush=True)
+                        print(f"Warning: influence network (lake.graphs load): {e}", flush=True)
 
                     # --- Contractor network ---
                     try:

@@ -23,8 +23,7 @@ GRAPH_TABLES = [
     "graph_tx_entities", "graph_tx_edges", "graph_tx_shared",
     # Corporate web
     "graph_corps", "graph_corp_people", "graph_corp_officer_edges", "graph_corp_shared_officer",
-    # Influence network
-    "graph_pol_entities", "graph_pol_donations", "graph_pol_contracts", "graph_pol_lobbying",
+    # Influence network — loaded from lake.graphs by mcp_server.py (not cached)
     # Contractor network
     "graph_contractors", "graph_permit_edges", "graph_contractor_shared",
     "graph_contractor_building_shared",
