@@ -40,7 +40,7 @@ def _get_phonetic_counts(conn):
             SELECT dm_last, COUNT(*) as cnt
             FROM lake.federal.name_index
             WHERE dm_last IS NOT NULL AND first_name IS NOT NULL
-              AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 2
+              AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 1
             GROUP BY dm_last
             ORDER BY cnt DESC
         """).fetchall()
@@ -50,7 +50,7 @@ def _get_phonetic_counts(conn):
             SELECT last_name, COUNT(*) as cnt
             FROM lake.federal.name_index
             WHERE last_name IS NOT NULL AND first_name IS NOT NULL
-              AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 2
+              AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 1
             GROUP BY last_name
             ORDER BY cnt DESC
         """).fetchall()
@@ -106,7 +106,7 @@ def _process_batch(conn, group_values, group_col, batch_num, total_batches, firs
         SELECT * FROM lake.federal.name_index
         WHERE {group_col} IN (SELECT {group_col} FROM __batch_names)
           AND last_name IS NOT NULL AND first_name IS NOT NULL
-          AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 2
+          AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 1
     """)
 
     batch_count = conn.execute("SELECT COUNT(*) FROM batch_data").fetchone()[0]
