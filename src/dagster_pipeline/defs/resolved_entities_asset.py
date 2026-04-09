@@ -124,6 +124,18 @@ def _process_batch(conn, group_values, group_col, batch_num, total_batches, firs
         conn.execute("DROP TABLE IF EXISTS __batch_names")
         return 0, 0
 
+    # Detach the lake catalog before creating the Splink Linker.
+    # Splink's settings validation calls information_schema.columns which
+    # scans every view in every attached catalog. The lake has a broken JSON
+    # view (financial.v_nys_notaries references a non-existent 'georeference'
+    # column) that bombs the scan. We don't need the lake during Splink
+    # processing — batch_data is already a local table. We reattach after
+    # Splink is done so we can write results back.
+    try:
+        conn.execute("DETACH lake")
+    except Exception:
+        pass  # lake wasn't attached (fallback connection style)
+
     # Create Linker with pre-trained model
     db_api = DuckDBAPI(connection=conn)
     linker = Linker("batch_data", settings=MODEL_PATH, db_api=db_api)
@@ -147,6 +159,13 @@ def _process_batch(conn, group_values, group_col, batch_num, total_batches, firs
         results, threshold_match_probability=CLUSTER_THRESHOLD
     )
     clust_time = time.time() - t_clust
+
+    # Reattach lake before writing results — we detached it before Splink
+    # to avoid the broken v_nys_notaries view in information_schema.
+    try:
+        _connect_ducklake(conn)
+    except Exception:
+        pass  # may already be attached if detach failed earlier
 
     # Save results
     clusters_rel = clusters.as_duckdbpyrelation()
