@@ -36,15 +36,19 @@ def _get_phonetic_counts(conn):
     Falls back to exact last_name if dm_last column doesn't exist.
     """
     try:
+        # dm_last is a VARCHAR[] (from double_metaphone). Extract the first
+        # element so the group key is a plain string, not a list — otherwise
+        # the batch VALUES clause fails with 'list has no attribute replace'.
         rows = conn.execute("""
-            SELECT dm_last, COUNT(*) as cnt
+            SELECT dm_last[1] AS dm_last_primary, COUNT(*) as cnt
             FROM lake.federal.name_index
-            WHERE dm_last IS NOT NULL AND first_name IS NOT NULL
+            WHERE dm_last IS NOT NULL AND dm_last[1] IS NOT NULL
+              AND first_name IS NOT NULL
               AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 1
-            GROUP BY dm_last
+            GROUP BY dm_last_primary
             ORDER BY cnt DESC
         """).fetchall()
-        return [(r[0], r[1]) for r in rows], "dm_last"
+        return [(r[0], r[1]) for r in rows], "dm_last[1]"
     except Exception:
         rows = conn.execute("""
             SELECT last_name, COUNT(*) as cnt
@@ -92,9 +96,11 @@ def _process_batch(conn, group_values, group_col, batch_num, total_batches, firs
     except Exception:
         pass  # Fall back to standard blocking if unavailable
 
-    # Build a values table for the IN clause
+    # Build a values table for the IN clause.
+    # group_col may be an expression like 'dm_last[1]' (not a bare column name).
+    # The batch_names table always uses a plain 'group_key' column name.
     conn.execute("DROP TABLE IF EXISTS __batch_names")
-    conn.execute(f"CREATE TABLE __batch_names ({group_col} VARCHAR)")
+    conn.execute("CREATE TABLE __batch_names (group_key VARCHAR)")
     for i in range(0, len(group_values), 1000):
         chunk = group_values[i:i + 1000]
         values = ", ".join(f"('{n.replace(chr(39), chr(39)+chr(39))}')" for n in chunk)
@@ -104,7 +110,7 @@ def _process_batch(conn, group_values, group_col, batch_num, total_batches, firs
     conn.execute(f"""
         CREATE OR REPLACE TABLE batch_data AS
         SELECT * FROM lake.federal.name_index
-        WHERE {group_col} IN (SELECT {group_col} FROM __batch_names)
+        WHERE {group_col} IN (SELECT group_key FROM __batch_names)
           AND last_name IS NOT NULL AND first_name IS NOT NULL
           AND LENGTH(last_name) >= 2 AND LENGTH(first_name) >= 1
     """)
