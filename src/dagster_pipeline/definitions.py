@@ -10,7 +10,6 @@ from dagster_pipeline.defs.federal_direct_assets import all_federal_direct_asset
 from dagster_pipeline.defs.election_assets import election_assets
 from dagster_pipeline.defs.name_index_asset import name_index
 from dagster_pipeline.defs.resolved_entities_asset import resolved_entities
-from dagster_pipeline.defs.flush_sensor import flush_ducklake_sensor
 from dagster_pipeline.defs.freshness_sensor import data_freshness_sensor
 from dagster_pipeline.defs.foundation_assets import h3_index, phonetic_index, row_fingerprints
 from dagster_pipeline.defs.entity_master_asset import entity_master
@@ -92,7 +91,9 @@ federal_schedule = dg.ScheduleDefinition(
 
 # --- Sensors ---
 # data_freshness_sensor: hourly, triggers Socrata assets when source > lake (replaces daily/monthly schedules)
-# flush_ducklake_sensor: post-run, flushes DuckLake inlined data to parquet
+# flush_ducklake_sensor: REMOVED (2026-04-09) — caused parquet file deletion race.
+#   Root cause: implicit CHECKPOINT on conn.close() ran cleanup_old_files.
+#   Fix: data_inlining_row_limit=0 in DuckLakeResource eliminates the need.
 # MVs use AutomationCondition.eager() — evaluated by Dagster's built-in default_automation_condition_sensor
 
 defs = dg.Definitions(

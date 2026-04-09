@@ -50,6 +50,15 @@ class DuckLakeResource(dg.ConfigurableResource):
         # the lake/public split was discovered 2026-04-07.
         conn.execute(f"ATTACH '{url}' AS lake")
 
+        # Disable data inlining — all writes go directly to Parquet.
+        # The default threshold (10 rows) inlines small tables as blobs in the
+        # Postgres catalog. This caused no cross-process issues (Postgres catalog
+        # is shared), but the now-deleted flush_ducklake_sensor that flushed
+        # inlined data triggered implicit CHECKPOINTs on conn.close() which
+        # deleted freshly-written parquet files. Setting to 0 eliminates the
+        # entire problem class. See docs/superpowers/specs/2026-04-09-graph-assets-architecture.md.
+        conn.execute("SET ducklake_default_data_inlining_row_limit = 0")
+
         _conn_cache = conn
         return conn
 
