@@ -71,7 +71,7 @@ def geo_zip_boundaries(context) -> dg.MaterializeResult:
         conn.execute(
             """
             CREATE TABLE lake.foundation.geo_zip_boundaries (
-                modzcta VARCHAR PRIMARY KEY,
+                modzcta VARCHAR,
                 label VARCHAR,
                 borough VARCHAR,
                 centroid_lon DOUBLE,
