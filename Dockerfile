@@ -20,12 +20,8 @@ COPY patches/ patches/
 # Install all deps including dev group (dagster-webserver needed)
 RUN uv sync --frozen
 
-# Apply patches to installed packages
-RUN uv run python patches/dagster_dlt_null_normalize.py && \
-    uv run python patches/duckdb_nullable_add_column.py
-
-# Copy dlt config (secrets are mounted at runtime, not baked in)
-COPY .dlt/config.toml .dlt/config.toml
+# Apply patches to installed packages (dlt patch removed — dlt no longer in stack)
+RUN uv run python patches/duckdb_nullable_add_column.py
 
 # Copy dagster instance config and workspace
 COPY dagster.yaml /dagster-home/dagster.yaml
