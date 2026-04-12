@@ -125,7 +125,7 @@ defs = dg.Definitions(
         data_freshness_sensor,
         dg.AutomationConditionSensorDefinition(
             "default_automation_condition_sensor",
-            asset_selection=dg.AssetSelection.all(),
+            target=dg.AssetSelection.all(),
             default_status=dg.DefaultSensorStatus.RUNNING,
         ),
     ],
