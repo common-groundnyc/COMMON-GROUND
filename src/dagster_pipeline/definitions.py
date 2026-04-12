@@ -66,6 +66,12 @@ graphs_daily_job = dg.define_asset_job(
     selection=dg.AssetSelection.groups("graphs"),
 )
 
+# Elections: vote.nyc ED-level + MEDSL precinct-level results
+election_job = dg.define_asset_job(
+    name="election_ingest",
+    selection=dg.AssetSelection.groups("elections"),
+)
+
 graphs_schedule = dg.ScheduleDefinition(
     job=graphs_daily_job,
     cron_schedule="0 7 * * *",  # 7 AM daily — one hour after federal_daily
@@ -88,19 +94,41 @@ federal_schedule = dg.ScheduleDefinition(
     default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 
+# Foundation: MVs, name_tokens, spatial_views, percentile tables
+# Runs after federal (6 AM) so upstream deps are fresh
+foundation_schedule = dg.ScheduleDefinition(
+    job=foundation_job,
+    cron_schedule="0 8 * * *",  # 8 AM daily
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+)
+
+# Elections: static/slow-moving data, weekly is enough
+election_schedule = dg.ScheduleDefinition(
+    job=election_job,
+    cron_schedule="0 9 * * 1",  # Monday 9 AM
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+)
+
 
 # --- Sensors ---
 # data_freshness_sensor: hourly, triggers Socrata assets when source > lake (replaces daily/monthly schedules)
 # flush_ducklake_sensor: REMOVED (2026-04-09) — caused parquet file deletion race.
 #   Root cause: implicit CHECKPOINT on conn.close() ran cleanup_old_files.
 #   Fix: data_inlining_row_limit=0 in DuckLakeResource eliminates the need.
-# MVs use AutomationCondition.eager() — evaluated by Dagster's built-in default_automation_condition_sensor
+# MVs use AutomationCondition.eager() — requires AutomationConditionSensorDefinition below.
 
 defs = dg.Definitions(
     assets=all_assets,
-    jobs=[federal_daily_job, entity_resolution_job, foundation_job, all_assets_job, graphs_daily_job],
-    schedules=[federal_schedule, graphs_schedule],
-    sensors=[data_freshness_sensor],
+    jobs=[federal_daily_job, entity_resolution_job, foundation_job, election_job, all_assets_job, graphs_daily_job],
+    schedules=[federal_schedule, graphs_schedule, foundation_schedule, election_schedule],
+    sensors=[
+        data_freshness_sensor,
+        dg.AutomationConditionSensorDefinition(
+            "default_automation_condition_sensor",
+            asset_selection=dg.AssetSelection.all(),
+            default_status=dg.DefaultSensorStatus.RUNNING,
+        ),
+    ],
     resources={
         "ducklake": DuckLakeResource(
             catalog_url=os.environ.get(
