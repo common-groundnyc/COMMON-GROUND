@@ -39,67 +39,97 @@ def tokenize_name(name: str | None) -> list[str]:
     ],
 )
 def name_tokens(context) -> MaterializeResult:
-    """Build tokenized name index from 4 sources, sorted by token for fast lookups."""
+    """Build tokenized name index from 4 sources incrementally to avoid OOM.
+
+    Each source is tokenized and inserted separately — peak memory is the
+    largest single source (~46M acris_parties) not all 69M rows at once.
+    """
     conn = _connect_ducklake()
     t0 = time.time()
 
     stopword_list = ", ".join(f"'{w}'" for w in STOPWORDS)
 
-    try:
-        conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
-        conn.execute("DROP TABLE IF EXISTS lake.foundation.name_tokens_staging")
-        conn.execute(f"""
-            CREATE TABLE lake.foundation.name_tokens_staging AS
-            WITH all_names AS (
+    # Each source: (label, SQL that produces full_name, source_table, source_id)
+    sources = [
+        ("federal.name_index", f"""
+            SELECT token, source_table, source_id, full_name
+            FROM (
                 SELECT
-                    UPPER(last_name || ' ' || first_name) AS full_name,
+                    unnest(string_split(UPPER(last_name || ' ' || first_name), ' ')) AS token,
                     source_table,
-                    unique_id AS source_id
+                    unique_id AS source_id,
+                    UPPER(last_name || ' ' || first_name) AS full_name
                 FROM lake.federal.name_index
                 WHERE last_name IS NOT NULL
-
-                UNION ALL
-
+            )
+            WHERE LENGTH(token) >= 2 AND token NOT IN ({stopword_list})
+        """),
+        ("housing.acris_parties", f"""
+            SELECT token, source_table, source_id, full_name
+            FROM (
                 SELECT
-                    UPPER(name) AS full_name,
+                    unnest(string_split(UPPER(name), ' ')) AS token,
                     'housing.acris_parties' AS source_table,
-                    document_id AS source_id
+                    document_id AS source_id,
+                    UPPER(name) AS full_name
                 FROM lake.housing.acris_parties
                 WHERE name IS NOT NULL AND LENGTH(TRIM(name)) > 1
-
-                UNION ALL
-
+            )
+            WHERE LENGTH(token) >= 2 AND token NOT IN ({stopword_list})
+        """),
+        ("city_government.pluto", f"""
+            SELECT token, source_table, source_id, full_name
+            FROM (
                 SELECT
-                    UPPER(ownername) AS full_name,
+                    unnest(string_split(UPPER(ownername), ' ')) AS token,
                     'city_government.pluto' AS source_table,
-                    LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') AS source_id
+                    LPAD(TRY_CAST(TRY_CAST(bbl AS DOUBLE) AS BIGINT)::VARCHAR, 10, '0') AS source_id,
+                    UPPER(ownername) AS full_name
                 FROM lake.city_government.pluto
                 WHERE ownername IS NOT NULL AND LENGTH(TRIM(ownername)) > 1
-
-                UNION ALL
-
+            )
+            WHERE LENGTH(token) >= 2 AND token NOT IN ({stopword_list})
+        """),
+        ("business.nys_corporations", f"""
+            SELECT token, source_table, source_id, full_name
+            FROM (
                 SELECT
-                    UPPER(current_entity_name) AS full_name,
+                    unnest(string_split(UPPER(current_entity_name), ' ')) AS token,
                     'business.nys_corporations' AS source_table,
-                    CAST(dos_id AS VARCHAR) AS source_id
+                    CAST(dos_id AS VARCHAR) AS source_id,
+                    UPPER(current_entity_name) AS full_name
                 FROM lake.business.nys_corporations
                 WHERE current_entity_name IS NOT NULL
                   AND LENGTH(TRIM(current_entity_name)) > 1
-            ),
-            tokenized AS (
-                SELECT
-                    unnest(string_split(full_name, ' ')) AS token,
-                    source_table,
-                    source_id,
-                    full_name
-                FROM all_names
             )
-            SELECT token, source_table, source_id, full_name
-            FROM tokenized
-            WHERE LENGTH(token) >= 2
-              AND token NOT IN ({stopword_list})
-            ORDER BY token
+            WHERE LENGTH(token) >= 2 AND token NOT IN ({stopword_list})
+        """),
+    ]
+
+    try:
+        conn.execute("CREATE SCHEMA IF NOT EXISTS lake.foundation")
+        conn.execute("DROP TABLE IF EXISTS lake.foundation.name_tokens_staging")
+
+        # Create empty table, then INSERT each source separately
+        conn.execute("""
+            CREATE TABLE lake.foundation.name_tokens_staging (
+                token VARCHAR,
+                source_table VARCHAR,
+                source_id VARCHAR,
+                full_name VARCHAR
+            )
         """)
+
+        total = 0
+        for label, sql in sources:
+            context.log.info("Tokenizing %s...", label)
+            conn.execute(f"INSERT INTO lake.foundation.name_tokens_staging {sql}")
+            cnt = conn.execute(
+                "SELECT COUNT(*) FROM lake.foundation.name_tokens_staging"
+            ).fetchone()[0]
+            added = cnt - total
+            total = cnt
+            context.log.info("  %s: +%s tokens (%s total)", label, f"{added:,}", f"{total:,}")
 
         conn.execute("DROP TABLE IF EXISTS lake.foundation.name_tokens")
         conn.execute(
@@ -107,27 +137,21 @@ def name_tokens(context) -> MaterializeResult:
             "RENAME TO name_tokens"
         )
 
-        row_count = conn.execute(
-            "SELECT COUNT(*) FROM lake.foundation.name_tokens"
-        ).fetchone()[0]
         unique_tokens = conn.execute(
             "SELECT COUNT(DISTINCT token) FROM lake.foundation.name_tokens"
-        ).fetchone()[0]
-        source_count = conn.execute(
-            "SELECT COUNT(DISTINCT source_table) FROM lake.foundation.name_tokens"
         ).fetchone()[0]
 
         elapsed = round(time.time() - t0, 1)
         context.log.info(
-            "name_tokens: %s rows, %s unique tokens, %s sources in %ss",
-            f"{row_count:,}", f"{unique_tokens:,}", source_count, elapsed,
+            "name_tokens: %s rows, %s unique tokens, 4 sources in %ss",
+            f"{total:,}", f"{unique_tokens:,}", elapsed,
         )
 
         return MaterializeResult(
             metadata={
-                "row_count": MetadataValue.int(row_count),
+                "row_count": MetadataValue.int(total),
                 "unique_tokens": MetadataValue.int(unique_tokens),
-                "source_tables": MetadataValue.int(source_count),
+                "source_tables": MetadataValue.int(4),
                 "duration_seconds": MetadataValue.float(elapsed),
             }
         )
