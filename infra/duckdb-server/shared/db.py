@@ -77,6 +77,7 @@ def set_catalog_cache(catalog: dict, conn=None) -> None:
                 FROM duckdb_columns()
                 WHERE database_name = 'lake'
                   AND schema_name NOT IN ('information_schema', 'pg_catalog')
+                  AND table_name NOT LIKE 'v!_%' ESCAPE '!'
                 ORDER BY schema_name, table_name, column_index
             """).fetchall()
             for schema, table, col in rows:
@@ -254,7 +255,7 @@ def execute(
                                 pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
                                 rc.execute(f"""
                                     ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-                                    AS lake
+                                    AS lake (AUTOMATIC_MIGRATION TRUE)
                                 """)
                             print("Auto-reconnect: DuckLake re-attached successfully", flush=True)
                             with pool.cursor() as retry_cur:

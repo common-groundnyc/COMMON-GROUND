@@ -48,7 +48,7 @@ class DuckLakeResource(dg.ConfigurableResource):
         url = self._build_attach_url()
         # Default schema (no METADATA_SCHEMA) — single catalog convergence after
         # the lake/public split was discovered 2026-04-07.
-        conn.execute(f"ATTACH '{url}' AS lake")
+        conn.execute(f"ATTACH '{url}' AS lake (AUTOMATIC_MIGRATION TRUE)")
 
         # Disable data inlining — all writes go directly to Parquet.
         # The default threshold (10 rows) inlines small tables as blobs in the

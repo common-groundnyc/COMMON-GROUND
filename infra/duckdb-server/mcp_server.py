@@ -12,7 +12,7 @@ from fastmcp import FastMCP, Context
 from fastmcp.exceptions import ToolError
 from fastmcp.server.lifespan import lifespan
 from fastmcp.server.middleware import Middleware, MiddlewareContext
-from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
+
 from middleware.summarize_middleware import SummarizeMiddleware
 from fastmcp.server.dependencies import get_http_request, get_http_headers
 
@@ -355,7 +355,7 @@ async def app_lifespan(server):
     pg_pass = os.environ.get("DAGSTER_PG_PASSWORD", "").replace("'", "''")
     conn.execute(f"""
         ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-        AS lake
+        AS lake (AUTOMATIC_MIGRATION TRUE)
     """)
     print("DuckLake catalog attached", flush=True)
 
@@ -379,7 +379,7 @@ async def app_lifespan(server):
         conn.execute("SET default_collation = 'NOCASE'")
         conn.execute(f"""
             ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-            AS lake
+            AS lake (AUTOMATIC_MIGRATION TRUE)
         """)
         print("DuckLake reconnected after warm-up failure", flush=True)
     # Note: enable_compaction option removed in DuckLake 1.5.1 — compaction runs automatically
@@ -494,11 +494,30 @@ async def app_lifespan(server):
     for schema, table, col, kind in _JSON_VIEWS:
         _view_groups[(schema, table)].append((col, kind))
 
+    # Pre-fetch actual columns per table so we skip views referencing dropped cols
+    _actual_cols: dict[tuple[str, str], set[str]] = {}
+    for schema, table in _view_groups:
+        try:
+            col_rows = conn.execute(
+                f"SELECT column_name FROM duckdb_columns() "
+                f"WHERE database_name='lake' AND schema_name='{schema}' AND table_name='{table}'"
+            ).fetchall()
+            _actual_cols[(schema, table)] = {r[0] for r in col_rows}
+        except duckdb.Error:
+            _actual_cols[(schema, table)] = set()
+
     json_views_created = 0
     json_views_failed = 0
+    json_views_skipped = 0
     for (schema, table), cols_list in _view_groups.items():
+        actual = _actual_cols.get((schema, table), set())
+        # Drop columns that no longer exist on the base table
+        valid_cols = [(col, kind) for col, kind in cols_list if col in actual]
+        if not valid_cols:
+            json_views_skipped += len(cols_list)
+            continue
         extra_cols = []
-        for col, kind in cols_list:
+        for col, kind in valid_cols:
             if kind == "geojson_point":
                 extra_cols.append(
                     f"TRY_CAST(json_extract_string({col}, '$.coordinates[0]') AS DOUBLE) AS {col}_lon"
@@ -550,7 +569,7 @@ async def app_lifespan(server):
             json_views_failed += 1
             print(f"Warning: JSON view {schema}.v_{table} failed: {e}", flush=True)
 
-    print(f"JSON-parsed views: {json_views_created} created, {json_views_failed} failed", flush=True)
+    print(f"JSON-parsed views: {json_views_created} created, {json_views_failed} failed, {json_views_skipped} skipped (missing cols)", flush=True)
 
     # Lock configuration so sql_query can't change settings
     try:
@@ -1796,7 +1815,7 @@ async def app_lifespan(server):
                         bg_conn.execute("LOAD ducklake")
                         bg_conn.execute(f"""
                             ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={tok_pg_pass} host=postgres'
-                            AS lake
+                            AS lake (AUTOMATIC_MIGRATION TRUE)
                         """)
                         tmp_path = "/data/common-ground/lake/_tmp_routes.parquet"
                         bg_conn.execute(f"""
@@ -1976,32 +1995,39 @@ from tools import (
     transit,
 )
 
-# Domain super-tools
-mcp.tool(annotations=READONLY)(address_report)
-mcp.tool(annotations=READONLY)(building)
-mcp.tool(annotations=READONLY)(entity)
-mcp.tool(annotations=READONLY)(neighborhood)
-mcp.tool(annotations=READONLY)(network)
-mcp.tool(annotations=READONLY)(school)
-mcp.tool(annotations=READONLY)(semantic_search)
-mcp.tool(annotations=READONLY)(safety)
-mcp.tool(annotations=READONLY)(health)
-mcp.tool(annotations=READONLY)(legal)
-mcp.tool(annotations=READONLY)(civic)
-mcp.tool(annotations=READONLY)(transit)
-mcp.tool(annotations=READONLY)(services)
-mcp.tool(annotations=READONLY)(suggest)
+# ---------------------------------------------------------------------------
+# Tool registration — two tiers:
+#   "public"   → visible to LLM clients (Claude Desktop, etc.)
+#   "internal" → hidden from LLM list_tools, still callable by explore page / REST
+# ---------------------------------------------------------------------------
 
-# Catalog + SQL tools (split from the legacy query() super-tool)
-mcp.tool(annotations=READONLY)(list_schemas)
-mcp.tool(annotations=READONLY)(list_tables)
-mcp.tool(annotations=READONLY)(describe_table)
-mcp.tool(annotations=READONLY)(catalog_search)
-mcp.tool(annotations=READONLY)(health_check)
-mcp.tool(annotations=READONLY)(query_sql)
+# Domain super-tools (public)
+mcp.tool(annotations=READONLY, tags={"public"})(address_report)
+mcp.tool(annotations=READONLY, tags={"public"})(building)
+mcp.tool(annotations=READONLY, tags={"public"})(entity)
+mcp.tool(annotations=READONLY, tags={"public"})(neighborhood)
+mcp.tool(annotations=READONLY, tags={"public"})(network)
+mcp.tool(annotations=READONLY, tags={"public"})(school)
+mcp.tool(annotations=READONLY, tags={"public"})(semantic_search)
+mcp.tool(annotations=READONLY, tags={"public"})(safety)
+mcp.tool(annotations=READONLY, tags={"public"})(health)
+mcp.tool(annotations=READONLY, tags={"public"})(legal)
+mcp.tool(annotations=READONLY, tags={"public"})(civic)
+mcp.tool(annotations=READONLY, tags={"public"})(transit)
+mcp.tool(annotations=READONLY, tags={"public"})(services)
+mcp.tool(annotations=READONLY, tags={"public"})(suggest)
+mcp.tool(annotations=READONLY, tags={"public"})(query_sql)
 
-# Legacy query() kept for backwards compatibility with existing clients
-mcp.tool(annotations=READONLY)(query)
+# Internal / explore-page tools (hidden from LLM clients)
+mcp.tool(annotations=READONLY, tags={"internal"})(list_schemas)
+mcp.tool(annotations=READONLY, tags={"internal"})(list_tables)
+mcp.tool(annotations=READONLY, tags={"internal"})(describe_table)
+mcp.tool(annotations=READONLY, tags={"internal"})(catalog_search)
+mcp.tool(annotations=READONLY, tags={"internal"})(health_check)
+mcp.tool(annotations=READONLY, tags={"internal"})(query)
+
+# Only expose "public" tools to LLM clients
+mcp.enable(tags={"public"}, only=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2227,57 +2253,23 @@ class PostHogMiddleware(Middleware):
 # ConcurrencyMiddleware — limit concurrent tool calls per IP and globally
 # ---------------------------------------------------------------------------
 
-_concurrency_semaphores: dict[str, asyncio.Semaphore] = defaultdict(
-    lambda: asyncio.Semaphore(4)
-)
-_GLOBAL_SEMAPHORE = asyncio.Semaphore(20)  # leave 4 cursors for health/warmup
+# Global concurrency gate — only limit to prevent server OOM.
+# Requests WAIT (queue) instead of being rejected.
+_GLOBAL_SEMAPHORE = asyncio.Semaphore(24)
 
 
 class ConcurrencyMiddleware(Middleware):
-    """Limit concurrent tool calls per client IP and globally."""
+    """Queue excess requests instead of rejecting them. Only hard-cap globally to prevent OOM."""
 
     async def on_call_tool(self, context, call_next):
-        client_ip = "unknown"
-        try:
-            req = get_http_request()
-            if req:
-                headers = dict(req.headers) if hasattr(req, "headers") else {}
-                client_ip = (
-                    headers.get("cf-connecting-ip")
-                    or headers.get("x-forwarded-for", "").split(",")[0].strip()
-                    or (req.client.host if req.client else "unknown")
-                )
-        except Exception:
-            pass
-
-        per_ip = _concurrency_semaphores[client_ip]
-
-        if per_ip.locked():
-            raise ToolError(
-                "Too many concurrent requests from your IP (max 4). "
-                "Wait for current queries to complete."
-            )
-
-        if _GLOBAL_SEMAPHORE.locked():
-            raise ToolError(
-                "Server at capacity (20 concurrent queries). "
-                "Please retry in a few seconds."
-            )
-
         async with _GLOBAL_SEMAPHORE:
-            async with per_ip:
-                return await call_next(context)
+            return await call_next(context)
 
 
 # ---------------------------------------------------------------------------
 # Middleware registrations
 # ---------------------------------------------------------------------------
 
-mcp.add_middleware(RateLimitingMiddleware(
-    max_requests_per_second=2.0,
-    burst_capacity=10,
-    global_limit=True,
-))
 mcp.add_middleware(ConcurrencyMiddleware())
 mcp.add_middleware(SummarizeMiddleware(max_size=50_000))
 mcp.add_middleware(OutputFormatterMiddleware())

@@ -36,7 +36,7 @@ def _reattach_lake(conn):
     if "dbname=" in catalog:
         import re
         raw = re.sub(r"^ducklake:postgres:", "", catalog).strip()
-        conn.execute(f"ATTACH 'ducklake:postgres:{raw}' AS lake")
+        conn.execute(f"ATTACH 'ducklake:postgres:{raw}' AS lake (AUTOMATIC_MIGRATION TRUE)")
         return
 
     # Parse dlt-style URI: postgres:user:pass@host:port/db?sslmode=...
@@ -59,7 +59,7 @@ def _reattach_lake(conn):
         host, port = hostport, "5432"
     conn.execute(
         f"ATTACH 'ducklake:postgres:dbname={db} user={user} "
-        f"password={password} host={host} port={port}' AS lake"
+        f"password={password} host={host} port={port}' AS lake (AUTOMATIC_MIGRATION TRUE)"
     )
 CLUSTER_THRESHOLD = 0.92
 

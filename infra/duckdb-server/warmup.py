@@ -9,7 +9,7 @@ for ext in ['ducklake', 'postgres', 'httpfs']:
 
 conn.execute(f"""
     ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres'
-    AS lake
+    AS lake (AUTOMATIC_MIGRATION TRUE)
 """)
 
 try:

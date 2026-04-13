@@ -13,7 +13,7 @@ pg_pass = os.environ["DAGSTER_PG_PASSWORD"].replace("'", "''")
 
 conn.execute(f"""
     ATTACH 'ducklake:postgres:dbname=ducklake user=dagster password={pg_pass} host=postgres' AS lake
-    (DATA_PATH '{DUCKLAKE_PATH}/data/')
+    (DATA_PATH '{DUCKLAKE_PATH}/data/', AUTOMATIC_MIGRATION TRUE)
 """)
 
 for schema in ("nyc", "census", "manual"):
