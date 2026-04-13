@@ -43,11 +43,20 @@ EXPOSE 4213 9999
 ENV FASTMCP_STATELESS_HTTP=true
 
 # Pre-install community extensions at build time (avoids download on every startup)
-RUN python -c "\
-import duckdb; conn = duckdb.connect(); \
-[conn.execute(f'INSTALL {ext} FROM community') for ext in \
-['h3','splink_udfs','rapidfuzz','anofox_tabular','datasketches','hashfuncs', \
-'lindel','dqtest','anofox_forecast','lsh','curl_httpfs']]; \
-print('Extensions pre-installed'); conn.close()"
+# Some extensions may lag behind DuckDB releases — skip unavailable ones gracefully
+COPY <<'INSTALL_EXTS' /tmp/install_exts.py
+import duckdb
+conn = duckdb.connect()
+exts = ['h3','splink_udfs','rapidfuzz','anofox_tabular','datasketches','hashfuncs',
+        'lindel','dqtest','anofox_forecast','lsh','curl_httpfs']
+for e in exts:
+    try:
+        conn.execute(f"INSTALL {e} FROM community")
+        print(f"  OK: {e}")
+    except Exception as err:
+        print(f"  SKIP: {e} ({err})")
+conn.close()
+INSTALL_EXTS
+RUN python /tmp/install_exts.py && rm /tmp/install_exts.py
 
 CMD ["./start.sh"]
